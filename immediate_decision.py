@@ -89,7 +89,7 @@ def immediate_decision(board, best, played=None, context=None):
             # Only claim a contrast if the BEST move doesn't create the same
             # avoidable loose-piece problem at its own destination.
             if not _hanging(best_after, best.to_square, side):
-                return {'motif': 'loose_piece_awareness', 'strength': 1.0,
+                return {'motif': 'dont_hang_pieces', 'strength': 1.0,
                         'kind': 'played_hangs_piece',
                         'explanation': (f'In the game, {played_san} leaves your '
                                         f'{_name(moved)} on {chess.square_name(played.to_square)} '
@@ -108,7 +108,7 @@ def immediate_decision(board, best, played=None, context=None):
                 direct = f'{best_san} takes the opponent\'s unprotected {_name(victim)} on {target}.'
                 if played_san and not same_move:
                     direct += f' In the game, {played_san} misses the capture.'
-                return {'motif': 'hanging_piece', 'strength': 0.98,
+                return {'motif': 'capture_loose_piece', 'strength': 0.98,
                         'kind': 'free_capture', 'explanation': direct}
 
     # Capturing a newly threatening attacker is a directly intelligible

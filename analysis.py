@@ -831,8 +831,10 @@ def _refresh_position_labels(conn, position_id, row_or_values):
             if new_key in CONCEPTS:
                 current = next((label for label in labels if label.key == new_key), None)
                 if current is None:
-                    wording = (f"After {evidence.get('played_move')}, "
-                               f"{evidence.get('critical_move')} wins material."
+                    from coaching_language import game_continuation
+                    wording = (game_continuation(evidence.get('played_move'),
+                               evidence.get('critical_move'), 'win material',
+                               ply=evidence.get('critical_ply') or 2)
                                if evidence['kind'] == 'material_loss' else evidence.get('text', ''))
                     current = LearningLabel(new_key, 0.95, wording)
                     labels.append(current)
@@ -1346,7 +1348,7 @@ def _run_analysis_job(job_id: int):
                         and str(cached['source_username'] or owner_username).casefold() == str(source_username).casefold()
                     )
                     copied = 0
-                    if cached_same_source:
+                    if cached_same_source and not row['force_reanalysis']:
                         copied = copy_cached_positions(
                             conn, account_id, game_id, cached['source_job_id'], job_id, learning_modes
                         )
@@ -1503,7 +1505,7 @@ def _run_analysis_job(job_id: int):
                 SET status = 'complete', force_reanalysis = 0, finished_at = CURRENT_TIMESTAMP,
                     passes_completed = max_passes, current_pass = max_passes,
                     current_screen_depth = ?, current_deep_depth = ?
-                WHERE id = ?
+                WHERE id = ? AND status = 'running'
             """, (final_screen_depth, final_deep_depth, job_id))
             conn.commit()
 

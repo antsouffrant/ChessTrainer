@@ -5,9 +5,11 @@ def list_state(retrieval_status, analysis_status, positions_found):
         return 'retrieving'
     if retrieval_status and retrieval_status != 'complete':
         return 'retrieval_' + retrieval_status
+    if analysis_status == 'restarting':
+        return 'analyzing'
     if count > 0:
         return 'ready'
-    if analysis_status in ('queued', 'running', 'retrieving'):
+    if analysis_status in ('queued', 'running', 'retrieving', 'restarting'):
         return 'analyzing'
     if analysis_status == 'complete':
         return 'empty'

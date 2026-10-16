@@ -1,4 +1,4 @@
-/* v46 – every game list owns one active process transport and two explicit actions. */
+/* v52 – Pause preserves the checkpoint; Restart re-evaluates saved games. */
 (() => {
   const root = document.getElementById('process-root');
   const list = document.getElementById('process-list');
@@ -8,8 +8,8 @@
   let busy = false;
   const fmt = n => Number(n || 0).toLocaleString();
   const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-  const active = s => ['queued','running','retrieving'].includes(s);
-  const label = s => ({waiting_for_games:'Waiting for retrieval', queued:'Queued',running:'Running',
+  const active = s => ['queued','running','retrieving','restarting'].includes(s);
+  const label = s => ({waiting_for_games:'Waiting for retrieval', queued:'Queued',running:'Running',restarting:'Restarting',
     paused:'Paused',stopped:'Stopped',complete:'Complete',error:'Error',superseded:'Superseded',
     idle:'Not started'})[s] || s || 'Not started';
   const hasSavedBatch = j => !j.retrieval_status || j.retrieval_status === 'complete';
@@ -18,6 +18,7 @@
   const isRetrieving = j => !hasSavedBatch(j) && active(j.retrieval_status);
   const canAnalyze = j => hasSavedBatch(j) && !isAnalyzing(j) && !isRefreshing(j);
   const canRefresh = j => hasSavedBatch(j) && !isAnalyzing(j) && !isRefreshing(j);
+  const canRestart = j => hasSavedBatch(j) && !isRefreshing(j) && j.analysis_status !== 'restarting';
 
   function currentProcess(j) {
     if (!hasSavedBatch(j)) return {kind:'retrieve',status:j.retrieval_status};
@@ -34,8 +35,8 @@
     const status = retrieval ? (j.retrieval_status || 'complete') : (analysis ? j.analysis_status : j.refresh_status) || 'idle';
     const count = retrieval ? Number(j.bytes_downloaded||0) : Number(analysis ? j.games_processed||0 : j.processed||0);
     const total = retrieval ? Number(j.bytes_total||0) : Number(analysis ? j.games_retrieved||0 : j.total||0);
-    const percentage = status === 'complete' ? 100 : total > 0 ? Math.max(0,Math.min(100,Math.round(count*100/total))) : 0;
-    const description = retrieval ? (!j.retrieval_status ? 'Existing saved PGN – no new download needed' :
+    const percentage = status === 'restarting' ? 0 : status === 'complete' ? 100 : total > 0 ? Math.max(0,Math.min(100,Math.round(count*100/total))) : 0;
+    const description = analysis && status === 'restarting' ? 'Stopping the current engine, clearing previous positions and coaching metadata, then reanalyzing saved games' : retrieval ? (!j.retrieval_status ? 'Existing saved PGN – no new download needed' :
         status === 'complete' ? `${fmt(j.games_retrieved)} games saved locally` :
         status === 'error' ? 'Retrieval failed: ' + esc(j.retrieval_error||'Unknown error') :
         `${(count/1048576).toFixed(1)} MB downloaded${total ? ' / '+(total/1048576).toFixed(1)+' MB' : ''}`)
@@ -66,12 +67,15 @@
     const command = paused && kind !== 'retrieve' ? 'resume' : 'start';
     const controls = transport(command, startText, !!kind && !running &&
       (!hasSavedBatch(j) || paused), 'play') +
-      transport('pause',`Pause ${title}`,!!kind && running,'pause') +
-      transport('stop',`Stop ${title}`,!!kind && (running || paused),'stop');
+      transport('pause',`Pause ${title}`,!!kind && running && current.status !== 'restarting','pause') +
+      `<button type="button" class="secondary-button process-media-button process-restart"
+        data-process-action="analyze" data-command="restart" data-job-id="${j.id}"
+        aria-label="Restart analysis" title="Clear this list’s analysis and training history; reanalyze saved games with current settings"
+        ${canRestart(j)?'':'disabled'}><i class="fa-solid fa-rotate-right" aria-hidden="true"></i><span>Restart analysis</span></button>`;
     const analysisText = j.analysis_status === 'complete' ? 'Analyze again · next pass' :
       j.analysis_status === 'paused' || j.analysis_status === 'stopped' || j.analysis_status === 'error' ? 'Resume analysis' : 'Start analysis';
     const refreshText = j.refresh_status === 'complete' ? 'Refresh again' : 'Start refresh';
-    const detail = isRetrieving(j) ? 'Retrieving games' : isAnalyzing(j) ? 'Analyzing games' :
+    const detail = isRetrieving(j) ? 'Retrieving games' : j.analysis_status === 'restarting' ? 'Restarting analysis' : isAnalyzing(j) ? 'Analyzing games' :
       isRefreshing(j) ? 'Refreshing metadata' : kind && paused ? `${title[0].toUpperCase()+title.slice(1)} paused` :
       hasSavedBatch(j) ? 'Ready for processing' : 'Retrieval interrupted';
     const action = (actionName,txt,enabled) => `<button type="button" class="secondary-button process-operation"
@@ -83,9 +87,9 @@
   }
 
   function renderJob(j) {
-    const ready = Number(j.has_training_positions||0) > 0 && hasSavedBatch(j);
+    const ready = Number(j.has_training_positions||0) > 0 && hasSavedBatch(j) && j.analysis_status !== 'restarting';
     const summary = !hasSavedBatch(j) ? (active(j.retrieval_status)?'Retrieving games':`Retrieval ${label(j.retrieval_status).toLowerCase()}`) :
-      isAnalyzing(j) ? 'Analyzing games' : isRefreshing(j) ? 'Refreshing' :
+      j.analysis_status === 'restarting' ? 'Restarting analysis' : isAnalyzing(j) ? 'Analyzing games' : isRefreshing(j) ? 'Refreshing' :
       ready ? 'Ready to train' : j.analysis_status === 'complete' ? 'No training positions found' : 'Awaiting training positions';
     return `<article class="process-card glass ${j.id===selected?'process-highlight':''}" data-process-job="${j.id}">
       <header class="process-card-heading"><div><span class="eyebrow">GAME LIST #${j.id}</span>
@@ -114,7 +118,11 @@
     const job=Number(button.dataset.jobId),kind=button.dataset.processAction,command=button.dataset.command;
     let url=`/api/jobs/${job}/process/${kind}`;
     let body='{}';
-    if(command==='pause' || command==='stop') {
+    if(command==='restart') {
+      if(typeof window !== 'undefined' && typeof window.confirm === 'function' &&
+         !window.confirm('Restart this game list from scratch? Its training positions, learned progress, explanations, motifs, and position/chat feedback will be permanently deleted. The downloaded PGN is kept. Download the Coach CSV first if you need the old feedback.')) return;
+      url=`/api/jobs/${job}/process/analyze/restart`;
+    } else if(command==='pause' || command==='stop') {
       url=kind==='analyze' && command==='pause' ? `/api/jobs/${job}/pause` : `${url}/${command}`;
     } else if(command==='resume') {
       if(kind==='analyze') url=`/api/jobs/${job}/resume`;

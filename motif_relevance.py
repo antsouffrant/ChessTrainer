@@ -11,7 +11,7 @@ from __future__ import annotations
 # concepts, not claims that an attack or a defensive technique occurred.
 PROMPT_RELATIONS = {
     'threat_awareness': {'defensive_resource', 'counterattack', 'simplification',
-                         'loose_piece_awareness', 'king_safety'},
+                         'loose_piece_awareness', 'dont_hang_pieces', 'lost_material', 'king_safety'},
     'loose_piece_awareness': {'defensive_resource', 'loose_piece_awareness',
                               'counterattack', 'simplification'},
     'king_safety': {'mate_defense', 'king_safety', 'defensive_resource',

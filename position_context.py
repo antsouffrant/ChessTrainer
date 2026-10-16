@@ -217,7 +217,7 @@ def inspect_response(
         result['prompt_facts'].append('The last move created an immediate material threat.')
         result['prompt_motifs'].append('threat_awareness')
     if result['opponent_exposed'] is not None:
-        result['context_motifs'].append('hanging_piece')
+        result['context_motifs'].append('capture_loose_piece')
     if result['new_pins_on_them']:
         result['prompt_facts'].append('The opponent has a piece pinned to its king that may limit defensive captures.')
         result['prompt_motifs'].append('pin')
@@ -341,7 +341,7 @@ def inspect_response(
         result['primary_evidence'] = 'The best move removes the piece that created the new pressure.'
         result['response_reason'] = 'captures the piece that created the new threat'
     elif result['best_takes_loose']:
-        result['primary_key'] = 'hanging_piece'
+        result['primary_key'] = 'capture_loose_piece'
         result['primary_evidence'] = f'The best move captures an undefended {chess.piece_name(captured.piece_type)} on {chess.square_name(best_move.to_square)}.'
         result['response_reason'] = f'captures the undefended {chess.piece_name(captured.piece_type)} on {chess.square_name(best_move.to_square)}'
     elif result['best_capture'] and captured is not None and VALUES[captured.piece_type] >= 3:

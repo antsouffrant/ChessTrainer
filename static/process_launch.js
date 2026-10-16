@@ -1,6 +1,6 @@
 /* Home game-list buttons launch work only when the process queue is idle.
-   If a job is underway, Process owns all control (pause/stop/resume). */
-const activeProcessStatuses = new Set(['queued', 'running', 'retrieving']);
+   If a job is underway, Process owns all control (pause/resume/restart). */
+const activeProcessStatuses = new Set(['queued', 'running', 'retrieving', 'restarting']);
 let homeProcessLaunchPending = false;
 document.addEventListener('click', async event => {
   const button = event.target.closest('[data-process-start]');

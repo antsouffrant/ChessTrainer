@@ -2953,3 +2953,31 @@ body.theme-wood .mini-square.dark { background: #7b4d2e; }
 @media(max-width:1180px) {.analytics-overview {grid-template-columns:repeat(3,minmax(0,1fr))}.analytics-breakdowns {grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:860px) {.analytics-filter-grid {grid-template-columns:repeat(2,minmax(0,1fr))}.analytics-breakdowns {grid-template-columns:1fr}}
 @media(max-width:640px) {.analytics-hero {flex-direction:column;align-items:stretch}.analytics-overview {grid-template-columns:repeat(2,minmax(0,1fr))}.analytics-filter-grid {grid-template-columns:1fr}.analytics-filters,.analytics-table-panel {padding:14px}}
+
+/* v51 · Coach sections get breathing room and an export schema explainer. */
+.analytics-hub {gap:28px; padding:10px 0 46px;}
+.analytics-hero {padding:32px 36px; gap:32px;}
+.analytics-filters {padding:26px 30px;}
+.analytics-filter-heading {margin-bottom:20px;}
+.analytics-filter-grid {gap:18px 20px;}
+.analytics-overview {gap:16px;}
+.analytics-score {padding:23px; min-height:162px; gap:12px;}
+.analytics-summary-note {margin:-12px 4px 2px; line-height:1.6;}
+.analytics-breakdowns {gap:22px;}
+.analytics-table-panel {padding:28px;}
+.analytics-table-panel > p {margin:12px 0 22px;}
+.analytics-table th, .analytics-table td {padding:13px 10px;}
+.analytics-records-heading {margin-bottom:18px;}
+.analytics-export-guide {padding:24px 28px;display:grid;grid-template-columns:1.3fr 1fr;gap:28px;align-items:start;border-radius:16px;}
+.analytics-export-guide h2 {margin:0 0 12px;font-size:1.05rem;}
+.analytics-export-guide p {font-size:.85rem;line-height:1.65;margin:0;}
+@media(max-width:860px){.analytics-export-guide{grid-template-columns:1fr;gap:14px}}
+@media(max-width:640px){.analytics-hub{gap:20px}.analytics-hero{padding:24px}.analytics-filters,.analytics-table-panel,.analytics-export-guide{padding:20px}.analytics-overview{gap:10px}}
+
+@media(min-width:1181px){.analytics-breakdowns{grid-template-columns:repeat(2,minmax(0,1fr))}}
+
+/* Coach reset is independent from game-list analysis reset. */
+.coach-actions{display:flex;align-items:center;gap:12px;flex-wrap:wrap;justify-content:flex-end}
+.coach-reset-feedback{min-height:44px;white-space:nowrap}
+#coach-reset-note{margin:0 3px;line-height:1.5}
+@media(max-width:640px){.coach-actions{width:100%;justify-content:flex-start}}

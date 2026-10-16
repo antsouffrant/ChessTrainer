@@ -46,6 +46,7 @@
     document.getElementById('analytics-motif-breakdown').innerHTML = breakdownTable(data.by_motif);
     document.getElementById('analytics-opening-breakdown').innerHTML = breakdownTable(data.by_opening);
     document.getElementById('analytics-lesson-breakdown').innerHTML = breakdownTable(data.by_lesson);
+    document.getElementById('analytics-version-breakdown').innerHTML = breakdownTable(data.by_coaching_version);
     document.getElementById('analytics-record-count').textContent = `${fmt(data.overall.total)} matching ratings`;
     const body = document.querySelector('#analytics-records tbody');
     if (!data.recent.length) {
@@ -84,6 +85,8 @@
         fillFacet('opening_key', data.facets.openings);
         fillFacet('primary_motif_key', data.facets.motifs);
         fillFacet('learning_mode', data.facets.learning_modes);
+        fillFacet('coaching_version', data.facets.coaching_versions);
+        fillFacet('position_category', data.facets.position_categories);
         loadedFacets = true;
       }
       draw(data);
@@ -96,6 +99,33 @@
       if (token === requestToken) loading.classList.add('hidden');
     }
   }
+  const resetFeedback = document.getElementById('coach-reset-feedback');
+  if (resetFeedback) resetFeedback.addEventListener('click', async () => {
+    const selectedJob = form.elements.job_id.value;
+    const scope = selectedJob
+      ? `all position, explanation, motif, and chat votes for game list #${selectedJob}`
+      : 'ALL position, explanation, motif, and chat votes across EVERY game list';
+    if (!window.confirm(`Permanently delete ${scope}? Training positions and analysis are kept. Export CSV first if you want a backup.`)) return;
+    const typed = window.prompt('Type RESET FEEDBACK to confirm this irreversible rating reset:');
+    if (typed !== 'RESET FEEDBACK') return;
+    resetFeedback.disabled = true;
+    error.classList.add('hidden');
+    try {
+      const response = await fetch('/api/coach/feedback/reset', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({job_id:selectedJob || null, confirmation:typed})
+      });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.error || 'Reset failed');
+      loadedFacets = false;
+      await update();
+      document.getElementById('coach-reset-note').textContent =
+        `Ratings reset: ${fmt(body.deleted.position_explanation_motif + body.deleted.chat_coaching)} feedback records deleted. Analysis and positions were kept.`;
+    } catch (err) {
+      error.textContent = err.message;
+      error.classList.remove('hidden');
+    } finally { resetFeedback.disabled = false; }
+  });
   form.addEventListener('change', update);
   form.addEventListener('reset', () => window.setTimeout(update, 0));
   update();

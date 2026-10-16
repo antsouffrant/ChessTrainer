@@ -1941,7 +1941,7 @@ async function loadPositions(preservePosition = true) {
 }
 
 function processStateName(status) {
-  return ({running:'Running',retrieving:'Retrieving',queued:'Queued',paused:'Paused',complete:'Complete',error:'Failed',stopped:'Stopped'})[status] || 'Not started';
+  return ({running:'Running',retrieving:'Retrieving',queued:'Queued',restarting:'Restarting',paused:'Paused',complete:'Complete',error:'Failed',stopped:'Stopped'})[status] || 'Not started';
 }
 
 async function updateJobHud() {
@@ -1960,7 +1960,7 @@ async function updateJobHud() {
   }
   // This dashboard is global: show the active worker even if the learner is
   // training a different list. Running takes priority over queued/paused.
-  const priority = value => ['running','retrieving'].includes(value) ? 3
+  const priority = value => ['running','retrieving','restarting'].includes(value) ? 3
     : value === 'queued' ? 2 : value === 'paused' ? 1 : 0;
   const candidates = [];
   for (const row of processRows) {

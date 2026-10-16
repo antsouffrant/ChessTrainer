@@ -1,5 +1,48 @@
 # Personal Chess Trainer
 
+## October 16, 2026 — v53 coaching cleanup and clean analysis iterations
+
+- **Specific motifs instead of “Evaluate Candidate Moves.”** The generic label is removed from the classifier catalog and no longer emitted. Forcing-Move Scan is limited to genuinely forcing root decisions; otherwise the classifier chooses a lower-confidence, board-based strategic motif and avoids inventing a tactic. Classifier version increased to `2.5-specific-motifs-syzygy`.
+- **Endgame evidence.** A local, optional Syzygy ≤7-piece tablebase (`CHESS_SYZYGY_PATH`) can identify exactly won, drawn, or lost endgames and distinguish a game move that changes the provable result. Without tables, the app uses normal Stockfish mate and position evidence, not an unverified claim that a centipawn lead “solves” an endgame.
+- **Game-centric explanations.** Shared language helper expresses demonstrated refutations as “In the game you played X, allowing Y …,” with explicit “analyzed continuation” qualifications for later consequences. The causal ranking and short explanations remain the primary display logic.
+- **Restart Analysis is a destructive, clean iteration.** The selected list’s positions, motifs, explanations, learned flags, chats and their ratings, caches and checkpoint are discarded, and Stockfish recomputes everything from game one with the latest settings. Other game lists and the saved PGN remain intact. Any old README descriptions of restart **preserving** positions/feedback (v52 and earlier) are superseded. Export Coach CSV before restarting if you need the old evidence. Refresh Metadata still updates *only derived labels and text*, not scores/positions or training history.
+- **Coach Reset feedback.** An independent Coach button clears saved thumbs ratings for the selected game list or (without a game-list filter) across all lists, after two confirmations. Training positions, engine results, chat text and learned history are untouched.
+- **Verification.** See `COACHING_PIPELINE.md` for pipeline ownership, evidence standards, reset semantics, and local test commands. No optional tablebase files or user data are included in the archive.
+
+---
+
+## October 16, 2026 — v52 restartable analysis
+
+- **Restart Analysis replaces Stop Analysis** in the Process toolbar. Pause continues to mean "preserve the last full-game checkpoint"; Resume continues from there; **Analyze again** on a completed list still adds one deeper refinement pass. Restart instead begins at game one, pass one, and automatically starts the new analysis.
+- **Re-evaluate without re-retrieving.** Restart uses the previously saved PGN batch and the current engine/analysis settings, sets `force_reanalysis=1`, clears the candidate index and progress checkpoint, and bypasses cached game evaluations and copied cached positions. It does not call the Lichess retrieval API.
+- **Safe mid-run restart.** Restart marks the list as restarting, which prompts its existing worker to exit. The new cursor is committed **only after the old worker terminates**, so the old Stockfish process cannot overwrite the restart state. Refresh and duplicate restarts are blocked while a restart is pending. If the app closes in this transition, the restart is recoverable as a fresh paused pass at the next app start.
+- **History remains intact.** The restart preserves existing training positions, learning history, chat and thumbs feedback, and updates rediscovered positions in place as new analysis finishes. Positions from an older run that are not rediscovered are retained rather than deleted; this is a deliberate retention policy to avoid wiping rated training material. A restart recomputes engine results, but it is not a destructive curriculum purge.
+- **Validation.** Added `tests/test_process_restart_v52.py` (SQLite restart, conflict handling, progress reset, fresh settings, startup recovery and history retention) and `tests/test_process_restart_ui_v52.cjs` (confirmation, available controls and locks). Existing Process and Home control tests are updated. Live Stockfish behavior needs validation with dependencies installed.
+
+---
+
+## October 16, 2026 — v51 motif precision, sacrifices, and Coach quality hub
+
+- **Loose-piece motifs require proof.** Attacked-and-undefended geometry alone no longer triggers Protect Loose Pieces. Defending requires an identifiable, near-term capture in the inferior continuation which does not recur in the comparable better line. An attacking loose-piece motif must show newly created pressure and an actual near-term capture; simply targeting an undefended piece is not a material win. Free *direct* captures are described primarily as **Win Material** rather than the generic loose-piece theme.
+- **Forcing-Move Scan is a genuine fallback.** The classifier prefers specific, decision-relevant motifs. Without evidence for a concrete motif, a forcing calculation label only appears if checks/captures pertain to the actual candidate moves or the position starts in check; otherwise **Evaluate Candidate Moves** is the honest process label.
+- **Sacrifices versus even exchanges.** New **Sacrifice Material** and **Exchange Sacrifice** learning motifs distinguish bishop-for-pawn, queen-for-minor, and rook-for-minor deals from even trades. A rook for knight/bishop is an *exchange sacrifice*, not simply a piece exchange. A quiet even-value capture followed by immediate recapture may instead be explained as **Simplify** if there is no stronger near-term mechanism. The existing bishop-enabling pawn-offer plan is categorized as a material sacrifice. A sacrificed piece is never called a free capture.
+- **Causation near the decision.** Explanations favor initial consequences, the opponent's immediate response, and verified follow-ups. Distant incidental pins are downweighted; early captures are only described as material losses if differential across both saved lines and not balanced by recapture. Long-term claims still require specific connected evidence (such as the documented pawn-sacrifice plan). Short natural language is retained.
+- **Coach instead of Analytics.** Coach is a first-class navigation view at `/coach`; existing `/analytics` bookmarks redirect to it. More space is provided between filters, feedback scorecards, breakdowns, and the recent-feedback list. Approval rates are also broken down by coaching version.
+- **Development-grade filtered CSV.** One row per latest thumbs vote with training-position FEN, move and variation evidence, evaluation, learning mode, opening, lesson, current and at-vote motif, classifier version at vote, coach version at vote vs currently stored, feedback snapshot vs regenerated explanation, and the previous user message for each chat rating. It includes stable identifiers and a position link, with formula-injection precautions. All filters apply to export; older votes retain their content but have blank historical classifier fields when unavailable. No game PGNs are duplicated in the export.
+- **Compatibility and QA.** App startup seeds new motif catalog entries and adds the classifier-at-vote database field without clearing old votes or game data. Pure SQLite export tests and browser-interface tests run without python-chess; six new board fixtures validate sacrifices and motif precision when python-chess is installed. Recomputed explanations and motifs use saved PVs, not a new game download or Stockfish session. Back up `data/` when upgrading. Existing analysis and training history remain intact.
+
+---
+
+## October 16, 2026 — v50 chess-idea explanation planning
+
+- **A single chess idea, not two essays.** The post-solve coach now ranks causal mechanisms and writes one concise, contextual explanation. The old fallback that emitted `Why [game move] falls short` and `Why [best move] is better` has been removed from the user-facing path. It does not append raw evaluation gaps or disconnected recapture reports.
+- **What earns the headline.** Directly losing a rook/queen, a proven mating threat, or a demonstrable material-winning double attack can outrank incidental captures further down a PV. When the recommended move takes an opponent's *genuinely unrecapturable* piece, that opportunity can outrank unrelated delayed piece-loss observations. A capture with a legal recapture is never automatically called free.
+- **Chess purpose from evidence.** The candidate planner distinguishes immediate loose material, missed captures, legal mating refutations of seemingly possible recaptures, checking double attacks and their PV material payoff, unfavorable rook-for-minor-piece exchanges, documented counterplay, and a pawn offer that enables a bishop's later capture. Queen activity is mentioned only with a safe and influential destination. Queen trades are linked to loss of castling only when a king actually recaptures the queen in the saved line.
+- **Explain and label from the same finding.** The primary learning-motif selector recognizes the new semantic causes. Saved lessons, attempts, imported games, evaluations, and feedback are retained; the coaching/classifier version stamps trigger regenerated descriptions from existing position evidence without running Stockfish.
+- **Testing.** `tests/test_chess_idea_coaching_v50.py` contains 11 position-based contracts inspired by the ten supplied examples (using simplified boards where no original FEN was provided). The tests require `python-chess`; they could not be executed in this packaging environment. Python source syntax checks, 10 Node test suites, and the 5 feedback-database tests passed. Verify the new position-based tests locally with `pip install -r requirements.txt && python -m unittest discover -s tests -p 'test_chess_idea_coaching_v50.py' -v`.
+
+---
+
 ## October 16, 2026 — v47 grounded, branch-aware chess explanations
 
 - **Reasons before labels.** A solved-position explanation compares the original game move and the recommended move from the **same training position**, then uses their saved Stockfish PVs and relative evaluation (when available). Explanations distinguish what a move threatens, what a sampled variation actually demonstrates, and what a mate score establishes. They do not treat one analyzed PV as a proof against every possible defense.
@@ -926,3 +969,44 @@ do not need to be retrieved or re-analyzed to receive thumbs feedback.
 `node --test tests/*.cjs`. Run `python app.py` from the project directory to
 apply SQLite migrations before testing manually. Existing `data/` should be
 preserved across updates.
+
+## Short, causal coaching (v49)
+
+The yellow post-solve explanation now uses **context → assessment → learning**
+more selectively. `semantic_coaching.py` ranks *why a decision differs from
+its evaluated alternative*, not just which motifs happen to be visible.
+
+- **Immediate:** legal mate, next-move mate threat, direct captures and hanging
+  pieces (capture/recapture are distinguished).
+- **Through the saved continuations:** original-piece tracking, a demonstrable
+  additional material loss, unavoidable losses in both shown branches with
+  compensating counterplay, and later pins only when actually shown.
+- **Positional:** restrained descriptions of demonstrated changes in central
+  control (for instance a knight retreat) when evaluation differs but no
+  forcing tactical cause is established. This does not claim that the engine
+  has *proved* loss of initiative, a trapped piece, or a forced defeat.
+
+The output is a focused explanation, typically one or two short sentences,
+with a teaching idea when helpful. It distinguishes **what the move allows**
+from **what an engine continuation illustrates**. PVs are not proofs of forced
+play; only checkmate on the board and verified mate scores justify forced-mate
+claims. When the new causal planner lacks sufficient evidence the existing
+legality-aware explanation engine remains a fallback.
+
+Primary learning-motif selection uses the same high-confidence causal
+findings for mate defense, counterattack, and supported material loss while
+preserving stronger independently verified tactics (fork/pin/discovered
+attack). Classification and coaching versions have been incremented, so
+**existing game lists are not retrieved or analyzed again**. Running the app
+rebuilds saved motifs and text locally using stored positions and variations;
+learned state, feedback votes and historical feedback snapshots are preserved.
+The backfill now passes saved alternative PVs so correct/excellent moves can
+be explained against an actual inferior choice when available.
+
+QA: `python -m unittest discover -s tests -p 'test_semantic_coaching_v49.py'`
+(requires `python-chess`) and `node --test tests/*.cjs`.
+
+
+### v54 – Loose-piece lesson provenance
+
+The coach distinguishes pieces loose before the training decision (**Protect Loose Pieces**, **Capture Loose Pieces**) from a newly hung mover (**Don’t Hang Pieces**), a demonstrated newly lost piece (**Lost Material**), and a newly created winning attack (**Attack Loose Pieces**). The primary motif and explanation share the same immediate board and saved-variation evidence. Use **Refresh Metadata** to reclassify existing positions without rerunning Stockfish; export Coach feedback before a destructive **Restart Analysis**.

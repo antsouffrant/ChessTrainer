@@ -1,12 +1,15 @@
 {% extends 'base.html' %}
-{% block title %}Analytics · Personal Chess Trainer{% endblock %}
+{% block title %}Coach · Personal Chess Trainer{% endblock %}
 {% block content %}
 <section id="feedback-analytics" class="analytics-hub" aria-label="Coaching feedback analytics">
   <header class="analytics-hero glass">
-    <div><span class="eyebrow">LEARNING QUALITY</span><h1>Coaching analytics</h1>
+    <div><span class="eyebrow">COACH · LEARNING QUALITY</span><h1>Coaching feedback</h1>
       <p class="muted">Understand how useful your training positions, explanations, learning motifs, and chat coaching are. Ratings are saved and can be revised at any time.</p>
     </div>
-    <a class="primary-button analytics-download" id="analytics-export" href="/api/analytics/feedback.csv" download="chess_coaching_feedback.csv"><i class="fa-solid fa-download" aria-hidden="true"></i> Download CSV</a>
+    <div class="coach-actions">
+      <button type="button" id="coach-reset-feedback" class="secondary-button coach-reset-feedback"><i class="fa-solid fa-trash-can" aria-hidden="true"></i> Reset feedback</button>
+      <a class="primary-button analytics-download" id="analytics-export" href="/api/analytics/feedback.csv" download="chess_coaching_feedback.csv"><i class="fa-solid fa-download" aria-hidden="true"></i> Download CSV</a>
+    </div>
   </header>
   <form id="analytics-filters" class="analytics-filters glass" aria-label="Feedback data filters">
     <div class="analytics-filter-heading"><h2>Explore feedback</h2><button type="reset" class="secondary-button">Clear filters</button></div>
@@ -24,8 +27,11 @@
         <option value="coaching">Chat coaching</option>
       </select></label>
       <label>Feedback<select name="rating"><option value="">Positive and negative</option><option value="1">👍 Thumbs up</option><option value="-1">👎 Thumbs down</option></select></label>
+      <label>Coach version<select name="coaching_version"><option value="">All versions</option></select></label>
+      <label>Position category<select name="position_category"><option value="">All categories</option></select></label>
     </div>
   </form>
+  <p id="coach-reset-note" class="muted" role="status">Reset feedback clears ratings only. Selecting a game list limits the reset to that list; otherwise it clears all votes. Download CSV first if you need a backup.</p>
   <p id="analytics-error" class="analytics-error hidden" role="alert"></p>
   <div id="analytics-loading" class="muted" role="status">Loading saved feedback…</div>
   <div id="analytics-results" class="hidden">
@@ -37,12 +43,17 @@
       <article class="analytics-score glass" data-score="coaching"><span>Chat coaching</span><strong>—</strong><small>0 ratings</small><div class="analytics-score-track"><span></span></div></article>
     </section>
     <p class="analytics-summary-note muted">Each item is counted once per feedback category; changing your vote updates it. The percentage is the share of thumbs-up ratings among responses received, not among all analyzed positions.</p>
-    <section class="analytics-breakdowns">
+    <section class="analytics-breakdowns" aria-label="Detailed coaching feedback breakdowns">
       <article class="glass analytics-table-panel"><h2>By primary learning motif</h2><p class="muted">Which concepts have the strongest and weakest feedback?</p><div id="analytics-motif-breakdown"></div></article>
       <article class="glass analytics-table-panel"><h2>By opening</h2><p class="muted">Compare feedback across your opening families.</p><div id="analytics-opening-breakdown"></div></article>
       <article class="glass analytics-table-panel"><h2>By lesson</h2><p class="muted">The lesson in use when rated, or the primary motif when no lesson was selected.</p><div id="analytics-lesson-breakdown"></div></article>
+      <article class="glass analytics-table-panel"><h2>By coach version</h2><p class="muted">Track thumbs-up rates for coaching iterations using the version recorded at vote time.</p><div id="analytics-version-breakdown"></div></article>
     </section>
-    <section class="glass analytics-table-panel analytics-records-panel"><div class="analytics-records-heading"><div><h2>Recent feedback</h2><p class="muted">Up to 80 latest ratings for the current filters. Download CSV for all matching records.</p></div><span id="analytics-record-count" class="eyebrow"></span></div><div class="analytics-table-scroll"><table class="analytics-table" id="analytics-records"><thead><tr><th>Type</th><th>Vote</th><th>Game list</th><th>Lesson / motif</th><th>Opening</th><th>Position</th><th>Updated</th></tr></thead><tbody></tbody></table></div></section>
+    <section class="glass analytics-export-guide" aria-label="Coaching development dataset">
+      <div><h2>Coaching development dataset</h2><p>Export filtered thumbs-up and thumbs-down examples for training-position quality, explanation accuracy, motif relevance and chat-response usefulness. Each CSV row has a stable position ID and the evidence needed to revisit the decision.</p></div>
+      <p class="muted">Ratings are the latest vote per item. The <strong>content_snapshot</strong> is what was rated; <strong>current_explanation</strong> and current motif fields may have changed after model revisions. The export contains chess FENs and engine variations but not complete PGNs.</p>
+    </section>
+    <section class="glass analytics-table-panel analytics-records-panel"><div class="analytics-records-heading"><div><h2>Recent feedback</h2><p class="muted">Up to 80 recent ratings. CSV exports every matching rating, its original feedback snapshot, current coaching text, FEN, Stockfish lines, evaluation, motifs, and version metadata for reproducible review.</p></div><span id="analytics-record-count" class="eyebrow"></span></div><div class="analytics-table-scroll"><table class="analytics-table" id="analytics-records"><thead><tr><th>Type</th><th>Vote</th><th>Game list</th><th>Lesson / motif</th><th>Opening</th><th>Position</th><th>Updated</th></tr></thead><tbody></tbody></table></div></section>
   </div>
 </section>
 <script src="{{ url_for('static', filename='analytics.js') }}"></script>

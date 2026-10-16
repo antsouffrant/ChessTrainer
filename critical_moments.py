@@ -200,32 +200,25 @@ def decode_critical_evidence(raw):
 
 
 def critical_explanation(evidence):
-    """Give the first tactical realization without reciting later PV motifs."""
+    """Explain an observed refutation as feedback on the *game decision*.
+
+    Do not claim that a sampled variation proves every defense fails.
+    """
     if not evidence or not evidence.get('kind'):
         return ''
-    if evidence.get('kind') != 'material_loss':
-        move = evidence.get('played_move')
-        best = evidence.get('best_move')
-        event = evidence.get('text')
-        if not all((move, best, event)):
-            return ''
-        context = ('After the alternative ' if evidence.get('comparison_role') == 'alternative'
-                   else 'After ')
-        # An illustrative PV is not a universal forced refutation. Keep SAN
-        # capitalization intact and explain the recorded response concretely.
-        return f'{context}{move}, the analyzed reply {event}. The engine rates {best} higher; this sampled line does not prove that every such threat disappears.'
+    from coaching_language import game_continuation
     played = evidence.get('played_move')
     reply = evidence.get('critical_move')
-    best = evidence.get('best_move')
-    piece = evidence.get('piece')
-    square = evidence.get('square')
-    ply = evidence.get('critical_ply')
-    if not all((played, reply, best, piece, square)):
+    alt = evidence.get('comparison_role') == 'alternative'
+    if evidence.get('kind') == 'material_loss':
+        piece, square = evidence.get('piece'), evidence.get('square')
+        if not all((played, reply, piece, square)):
+            return ''
+        return game_continuation(
+            played, reply, f'capture your {piece} on {square}',
+            ply=evidence.get('critical_ply') or 2, alternative=alt)
+    event = evidence.get('text')
+    if not played or not event:
         return ''
-    if ply == 1:
-        qualifier = 'the alternative ' if evidence.get('comparison_role') == 'alternative' else ''
-        return (f'After {qualifier}{played}, {reply} wins your {piece} on {square}. '
-                f'{best} retains more material at the compared point in the saved variations.')
-    qualifier = 'the alternative ' if evidence.get('comparison_role') == 'alternative' else ''
-    return (f'After {qualifier}{played}, the analyzed continuation reaches '
-            f'{reply}, winning your {piece} on {square}. {best} avoids that loss.')
+    introduction = f'The alternative {played}' if alt else f'In the game you played {played}'
+    return f'{introduction}; the analyzed continuation shows {event.rstrip(".")}.'.replace('..','.')

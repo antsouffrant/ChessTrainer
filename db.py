@@ -319,6 +319,7 @@ CREATE TABLE IF NOT EXISTS position_feedback (
     primary_motif_key TEXT,
     content_snapshot TEXT,
     coaching_version TEXT,
+    classifier_version_at_vote TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY(position_id, category),
@@ -544,7 +545,16 @@ def init_db():
         conn.execute("UPDATE learning_concepts SET created_at = COALESCE(created_at, CURRENT_TIMESTAMP), updated_at = COALESCE(updated_at, CURRENT_TIMESTAMP)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_learning_concepts_account ON learning_concepts(account_id, status)")
 
+        # Preserve existing thumbs votes while extending their reproducible
+        # classifier identity. Historical votes leave this field NULL.
+        if 'classifier_version_at_vote' not in _columns(conn, 'position_feedback'):
+            conn.execute('ALTER TABLE position_feedback ADD COLUMN classifier_version_at_vote TEXT')
         _seed_learning_concepts(conn)
+        # Retire the generic candidate-comparison pseudo-motif from older
+        # releases. Refresh/reclassification will assign a supported, specific
+        # motif; keep the catalog row only for historical feedback snapshots.
+        conn.execute("DELETE FROM position_concepts WHERE concept_key='candidate_evaluation'")
+        conn.execute("UPDATE learning_concepts SET status='retired' WHERE key='candidate_evaluation'")
 
         # v2.19 separates learning modes from learning motifs. Older builds
         # injected mode labels (Excellent/Brilliant/Opposition) into the concept

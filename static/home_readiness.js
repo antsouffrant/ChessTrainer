@@ -18,8 +18,9 @@
     const r = j.retrieval_status;
     if (r === 'queued' || r === 'running' || j.analysis_status === 'waiting_for_games') return 'retrieving';
     if (r && r !== 'complete') return `retrieval_${r}`;
+    if (j.analysis_status === 'restarting') return 'analyzing';
     if (n > 0) return 'ready';
-    if (['queued','running','retrieving'].includes(j.analysis_status)) return 'analyzing';
+    if (['queued','running','retrieving','restarting'].includes(j.analysis_status)) return 'analyzing';
     if (j.analysis_status === 'complete') return 'empty';
     if (['error','paused','stopped','superseded'].includes(j.analysis_status)) return `analysis_${j.analysis_status}`;
     return 'analyzing';
@@ -48,7 +49,7 @@
             anchor.setAttribute('tabindex', '-1');
           }
         });
-        const active = v => ['queued','running','retrieving'].includes(v);
+        const active = v => ['queued','running','retrieving','restarting'].includes(v);
         const retrievalBlocked = !!job.retrieval_status && job.retrieval_status !== 'complete';
         const controlsBlocked = retrievalBlocked || job.analysis_status === 'waiting_for_games' ||
           active(job.analysis_status) || active(job.refresh_status);
@@ -56,7 +57,7 @@
           button.disabled = controlsBlocked;
         });
         const label = card.querySelector('[data-list-status]');
-        if (label) label.textContent = state === 'ready' && ['queued','running'].includes(job.analysis_status)
+        if (label) label.textContent = state === 'ready' && ['queued','running','restarting'].includes(job.analysis_status)
           ? 'Ready · analyzing games' : (human[state] || 'Preparing game list…');
         const count = card.querySelector('[data-list-count]');
         if (count) count.textContent = `${Number(job.games_retrieved || 0).toLocaleString()} games · ${Number(job.positions_found || 0).toLocaleString()} positions`;

@@ -33,7 +33,7 @@ from list_readiness import list_state
 from feedback_analytics import (
     record_position_vote, position_votes, report_rows, report_facets, report_summary, csv_bytes,
 )
-from process_policy import queue_analysis
+from process_policy import queue_analysis, restart_analysis
 from opening_playlist import enrich_opening_playlist, board_identity
 from adaptive_coach import (
     apply_adaptive_concepts_to_position, coach_history, handle_coach_message, get_or_create_thread,
@@ -111,6 +111,39 @@ def resume_analysis_thread(job_id: int):
         ).start()
         return existing
     return start_analysis_thread(job_id)
+
+
+def restart_analysis_after_current_worker(job_id: int):
+    """Drain the existing analysis worker before resetting its saved cursor."""
+    with _job_threads_lock:
+        existing = _job_threads.get(job_id)
+
+    def finish_restart():
+        try:
+            if existing is not None and existing.is_alive():
+                existing.join()
+            # A paused refresh might be finishing an atomic metadata batch.
+            # Let it drain too, or it could reinsert labels during the purge.
+            with _refresh_threads_lock:
+                refresh_worker = _refresh_threads.get(job_id)
+            if refresh_worker is not None and refresh_worker.is_alive():
+                refresh_worker.join()
+            with connect() as conn:
+                state = conn.execute('SELECT status FROM analysis_jobs WHERE id=?', (job_id,)).fetchone()
+                if not state or state['status'] != 'restarting':
+                    return
+                restart_analysis(conn, job_id, get_settings(conn))
+                conn.commit()
+            start_analysis_thread(job_id)
+        except Exception as exc:
+            # Do not leave the toolbar indefinitely locked on 'Restarting'.
+            with connect() as conn:
+                conn.execute('''UPDATE analysis_jobs SET status='error', error=?
+                    WHERE id=? AND status IN ('restarting','queued')''', (str(exc), job_id))
+                conn.commit()
+
+    threading.Thread(target=finish_restart, daemon=True,
+        name=f'analysis-restart-{job_id}').start()
 
 
 # Retrieving a new PGN is independent of Stockfish and metadata refresh.
@@ -304,7 +337,7 @@ def process_refresh(job_id):
         if current and current['status'] in ('running', 'queued'):
             return jsonify({'error':'Metadata refresh already queued or running.'}), 409
         analysis_status = conn.execute('SELECT status FROM analysis_jobs WHERE id=?', (job_id,)).fetchone()['status']
-        if analysis_status in ('running', 'queued', 'retrieving', 'waiting_for_games'):
+        if analysis_status in ('running', 'queued', 'retrieving', 'restarting', 'waiting_for_games'):
             return jsonify({'error':'This game list is being analyzed. Pause or finish evaluation before refreshing.'}), 409
         retrieval = conn.execute('SELECT status FROM retrieval_processes WHERE job_id=?',(job_id,)).fetchone()
         if retrieval is not None and retrieval['status'] != 'complete':
@@ -365,7 +398,7 @@ def process_analyze(job_id):
             JOIN accounts a ON a.id=j.account_id WHERE j.id=?''', (job_id,)).fetchone()
         if job is None:
             return jsonify({'error': 'Game list not found'}), 404
-        if job['status'] in ('queued', 'running', 'retrieving'):
+        if job['status'] in ('queued', 'running', 'retrieving', 'restarting'):
             return jsonify({'error': 'Analysis is already queued or running.'}), 409
         retrieval = conn.execute('SELECT status FROM retrieval_processes WHERE job_id=?', (job_id,)).fetchone()
         if (retrieval is not None and retrieval['status'] != 'complete') or job['status'] == 'waiting_for_games':
@@ -384,17 +417,30 @@ def process_analyze(job_id):
     return jsonify({'ok': True, 'status': 'queued', 'action': action}), 202
 
 
-@app.post('/api/jobs/<int:job_id>/process/analyze/stop')
-def process_stop_analysis(job_id):
+@app.post('/api/jobs/<int:job_id>/process/analyze/restart')
+def process_restart_analysis(job_id):
+    """Discard the list’s derived state, then reanalyze the saved PGN."""
     with connect() as conn:
-        row = conn.execute('SELECT status FROM analysis_jobs WHERE id=?', (job_id,)).fetchone()
-        if row is None:
+        job = conn.execute('''SELECT j.status, j.source_username, a.username
+            FROM analysis_jobs j JOIN accounts a ON a.id=j.account_id
+            WHERE j.id=?''', (job_id,)).fetchone()
+        if job is None:
             return jsonify({'error':'Game list not found'}), 404
-        if row['status'] not in ('queued', 'running', 'retrieving', 'paused'):
-            return jsonify({'error':'Analysis is not active.'}), 409
-        conn.execute("UPDATE analysis_jobs SET status='stopped', finished_at=CURRENT_TIMESTAMP WHERE id=?", (job_id,))
+        if job['status'] == 'restarting':
+            return jsonify({'error':'Analysis restart is already in progress.'}), 409
+        retrieval = conn.execute('SELECT status FROM retrieval_processes WHERE job_id=?', (job_id,)).fetchone()
+        if (retrieval is not None and retrieval['status'] != 'complete') or job['status'] == 'waiting_for_games':
+            return jsonify({'error':'Game retrieval must finish before restarting analysis.'}), 409
+        batch = batch_path_for_job(job['source_username'] or job['username'], job_id)
+        if not batch.exists() or batch.stat().st_size == 0:
+            return jsonify({'error':'Saved game batch not found; cannot restart analysis.'}), 409
+        refresh = conn.execute('SELECT status FROM metadata_processes WHERE job_id=?', (job_id,)).fetchone()
+        if refresh and refresh['status'] in ('running', 'queued'):
+            return jsonify({'error':'Pause or finish metadata refresh before restarting analysis.'}), 409
+        conn.execute("UPDATE analysis_jobs SET status='restarting',error=NULL WHERE id=?", (job_id,))
         conn.commit()
-    return jsonify({'ok':True,'status':'stopped'})
+    restart_analysis_after_current_worker(job_id)
+    return jsonify({'ok':True,'status':'restarting','action':'restart'}), 202
 
 
 def verify_lichess_username(username: str) -> bool:
@@ -551,6 +597,7 @@ def backfill_coaching_texts():
                     mate_before=row['mate_before'],
                     best_pv_uci=row['best_pv_uci'],
                     played_pv_uci=row['played_pv_uci'],
+                    alternative_pvs_json=row['alternative_pvs_json'],
                     eval_before_cp=row['eval_before_cp'],
                     eval_after_cp=row['eval_after_cp'],
                     critical_events_json=row['critical_events_json'],
@@ -1082,6 +1129,7 @@ def lesson_detail(job_id, concept_key):
             JOIN position_concepts pc ON pc.concept_key = lc.key
             JOIN training_positions tp ON tp.id = pc.position_id
             WHERE tp.job_id = ? AND pc.is_primary = 1
+              AND lc.key <> 'candidate_evaluation'
               AND (lc.source = 'built_in' OR lc.status IN ('personal','promoted'))
             GROUP BY lc.key, lc.name, lc.priority
             ORDER BY lc.priority DESC, lc.name ASC
@@ -1672,6 +1720,7 @@ def lesson_plans(job_id):
             JOIN learning_concepts lc ON lc.key = pc.concept_key
             JOIN training_positions tp ON tp.id = pc.position_id
             WHERE tp.job_id = ? AND pc.is_primary = 1
+              AND lc.key <> 'candidate_evaluation'
               AND (lc.source = 'built_in' OR lc.status IN ('personal', 'promoted'))
             GROUP BY lc.key, lc.name, lc.family, lc.description, lc.source, lc.status, lc.priority
             ORDER BY game_count DESC, primary_positions DESC, position_count DESC,
@@ -2451,10 +2500,16 @@ def enrich_job_motifs(job_id):
     return jsonify({**info, 'updated': updated})
 
 
+@app.get('/coach')
+def coach_view():
+    """Coaching quality and feedback reporting, separate from Process."""
+    return render_template('analytics.html')
+
+
 @app.get('/analytics')
 def analytics():
-    """Learning/coaching quality reporting, independent of Process controls."""
-    return render_template('analytics.html')
+    """Preserve old bookmarks while making Coach the canonical view."""
+    return redirect(url_for('coach_view'), code=302)
 
 
 @app.get('/api/analytics/feedback')
@@ -2463,7 +2518,15 @@ def analytics_feedback():
         rows = report_rows(conn, request.args)
         facets = report_facets(conn)
     summary = report_summary(rows)
-    return jsonify({**summary, 'facets': facets, 'recent': rows[:80]})
+    # Full evidence belongs in CSV. Avoid sending large JSON PV/critical
+    # event blobs to the dashboard for each item on every filter change.
+    recent_fields = ('feedback_type', 'rating', 'username', 'date_range',
+                     'job_id', 'position_id', 'message_id', 'lesson_name',
+                     'primary_motif_name', 'opening_name', 'opening_eco',
+                     'learning_mode', 'move_number', 'updated_at')
+    return jsonify({**summary, 'facets': facets,
+                    'recent': [{k: row.get(k) for k in recent_fields}
+                               for row in rows[:80]]})
 
 
 @app.get('/api/analytics/feedback.csv')
@@ -2474,6 +2537,34 @@ def analytics_feedback_csv():
         io.BytesIO(csv_bytes(rows)), mimetype='text/csv; charset=utf-8',
         as_attachment=True, download_name='chess_coaching_feedback.csv',
     )
+
+
+@app.post('/api/coach/feedback/reset')
+def coach_reset_feedback():
+    """Clear saved thumbs ratings without affecting positions or analysis."""
+    payload = request.get_json(silent=True) or {}
+    if payload.get('confirmation') != 'RESET FEEDBACK':
+        return jsonify({'error': 'Explicit RESET FEEDBACK confirmation is required.'}), 400
+    raw_job = payload.get('job_id')
+    try:
+        job_id = int(raw_job) if raw_job not in (None, '') else None
+    except (TypeError, ValueError):
+        return jsonify({'error': 'Invalid game list ID'}), 400
+    with connect() as conn:
+        if job_id is not None:
+            if not conn.execute('SELECT 1 FROM analysis_jobs WHERE id=?', (job_id,)).fetchone():
+                return jsonify({'error': 'Game list not found'}), 404
+            positions = conn.execute('''DELETE FROM position_feedback
+                WHERE position_id IN (SELECT id FROM training_positions WHERE job_id=?)''', (job_id,)).rowcount
+            coaching = conn.execute('''DELETE FROM coach_message_feedback
+                WHERE position_id IN (SELECT id FROM training_positions WHERE job_id=?)''', (job_id,)).rowcount
+        else:
+            positions = conn.execute('DELETE FROM position_feedback').rowcount
+            coaching = conn.execute('DELETE FROM coach_message_feedback').rowcount
+        conn.commit()
+    return jsonify({'ok': True, 'job_id': job_id,
+                    'deleted': {'position_explanation_motif': positions,
+                                'chat_coaching': coaching}})
 
 
 @app.route('/api/positions/<int:position_id>/feedback', methods=['GET', 'POST'])
@@ -2903,6 +2994,11 @@ def pause_interrupted_jobs_on_startup():
     instruction. Operators can explicitly Resume from Process when ready.
     """
     with connect() as conn:
+        # Preserve a restart requested just before app shutdown; on boot it
+        # becomes a paused fresh pass, rather than resuming the old cursor.
+        pending_restarts = conn.execute("SELECT id FROM analysis_jobs WHERE status='restarting'").fetchall()
+        for restart in pending_restarts:
+            restart_analysis(conn, restart['id'], get_settings(conn), queued=False)
         conn.execute("""UPDATE analysis_jobs SET status='paused'
             WHERE status IN ('queued','retrieving','running')""")
         conn.execute("""UPDATE retrieval_processes SET status='paused',

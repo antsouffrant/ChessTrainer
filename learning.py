@@ -8,10 +8,12 @@ import chess
 from position_context import inspect_response
 from immediate_decision import immediate_decision
 from decision_context import decision_facts
+from semantic_coaching import evidence_findings
+from loose_piece_provenance import differential_loss_motif, confirmed_differential_loss
 from motif_relevance import select_relevant_primary
 from pv_reasoning import fork_evidence, legal_pv, comparative_insight
 
-CLASSIFIER_VERSION = '2.1-branch-aware-context'
+CLASSIFIER_VERSION = '2.6-loose-piece-provenance'
 
 # A deliberately compact curriculum: these are common, teachable amateur
 # failure modes that we can identify with reasonably explainable board rules.
@@ -29,8 +31,13 @@ CONCEPT_CATALOG = [
     {'key': 'removal_of_defender', 'name': 'Remove the Defender', 'family': 'Tactics', 'description': 'Eliminate a key defender so another target becomes vulnerable.', 'priority': 88},
     {'key': 'overloaded_defender', 'name': 'Overload', 'family': 'Tactics', 'description': 'Exploit a defender that is responsible for too many jobs.', 'priority': 87},
     {'key': 'trapped_piece', 'name': 'Trap a Piece', 'family': 'Tactics', 'description': 'Restrict a valuable piece until it has no safe escape.', 'priority': 86},
+    {'key': 'material_sacrifice', 'name': 'Sacrifice Material', 'family': 'Tactics', 'description': 'Intentionally concede material for a verified tactical or positional opportunity.', 'priority': 93},
+    {'key': 'exchange_sacrifice', 'name': 'Exchange Sacrifice', 'family': 'Tactics', 'description': 'Give a rook for a bishop or knight to gain compensation.', 'priority': 94},
     {'key': 'exchange', 'name': 'Piece Exchange', 'family': 'Tactics', 'description': 'Recognize captures and recaptures, and distinguish favorable trades from winning a free piece.', 'priority': 82},
-    {'key': 'hanging_piece', 'name': 'Attack Loose Pieces', 'family': 'Tactics', 'description': 'Spot attacks and captures against undefended enemy material, and verify whether it can be saved or recaptured.', 'priority': 84},
+    {'key': 'hanging_piece', 'name': 'Attack Loose Pieces', 'family': 'Tactics', 'description': 'Create a new threat against enemy material and realize it in a near-term continuation.', 'priority': 84},
+    {'key': 'capture_loose_piece', 'name': 'Capture Loose Pieces', 'family': 'Tactics', 'description': 'Notice and capture an already-undefended enemy piece in the training position.', 'priority': 88},
+    {'key': 'dont_hang_pieces', 'name': "Don't Hang Pieces", 'family': 'Defense', 'description': 'Avoid moving a piece onto an undefended square where the opponent can win it.', 'priority': 96},
+    {'key': 'lost_material', 'name': 'Lost Material', 'family': 'Defense', 'description': 'Recognize the direct material cost of the game move without mislabeling it as a pre-existing loose piece.', 'priority': 86},
     {'key': 'missed_capture', 'name': 'Win Material', 'family': 'Tactics', 'description': 'Take a favorable capture before choosing a quieter move.', 'priority': 78},
     {'key': 'promotion_tactic', 'name': 'Promotion', 'family': 'Tactics', 'description': 'Use forcing pawn advances and promotion threats to decide the position.', 'priority': 85},
     {'key': 'attack_building', 'name': 'Build the Attack', 'family': 'Tactics', 'description': 'Create forcing threats that keep the opponent reacting.', 'priority': 74},
@@ -39,7 +46,7 @@ CONCEPT_CATALOG = [
     {'key': 'king_safety', 'name': 'King Safety', 'family': 'Defense', 'description': 'Address direct king danger before pursuing slower plans.', 'priority': 72},
     {'key': 'mate_defense', 'name': 'Stop the Mate', 'family': 'Defense', 'description': 'Recognize and neutralize a mating threat immediately.', 'priority': 99},
     {'key': 'threat_awareness', 'name': 'See the Threat', 'family': 'Defense', 'description': 'Identify what the opponent is threatening before you choose a move.', 'priority': 94},
-    {'key': 'loose_piece_awareness', 'name': 'Protect Loose Pieces', 'family': 'Defense', 'description': 'Avoid leaving valuable pieces undefended or tactically exposed.', 'priority': 93},
+    {'key': 'loose_piece_awareness', 'name': 'Protect Loose Pieces', 'family': 'Defense', 'description': 'Save a piece that was already loose in the training position and whose loss the better move prevents.', 'priority': 93},
     {'key': 'defensive_resource', 'name': 'Defensive Resource', 'family': 'Defense', 'description': 'Find active or simplifying moves that keep a difficult position playable.', 'priority': 80},
     {'key': 'piece_development', 'name': 'Develop Pieces', 'family': 'Strategy', 'description': 'Bring minor pieces into the game efficiently instead of losing opening tempi.', 'priority': 58},
     {'key': 'pawn_structure', 'name': 'Pawn Structure', 'family': 'Strategy', 'description': 'Create an identifiable weakness such as doubled or isolated pawns, or avoid one yourself.', 'priority': 66},
@@ -49,6 +56,7 @@ CONCEPT_CATALOG = [
     {'key': 'piece_coordination', 'name': 'Coordinate Pieces', 'family': 'Strategy', 'description': 'Improve how your pieces defend one another and combine on key squares.', 'priority': 57},
     {'key': 'passed_pawn', 'name': 'Passed Pawn', 'family': 'Endgames', 'description': 'Create, support, or advance a passed pawn when it becomes the main plan.', 'priority': 70},
     {'key': 'king_activity', 'name': 'Activate the King', 'family': 'Endgames', 'description': 'Use the king as an active fighting piece once the position simplifies.', 'priority': 68},
+    {'key': 'endgame_precision', 'name': 'Endgame Conversion', 'family': 'Endgames', 'description': 'Find a move that preserves a tablebase-verified win or draw, rather than allowing the result to slip.', 'priority': 98},
     {'key': 'opposition_zugzwang', 'name': 'Opposition & Zugzwang', 'family': 'Endgames', 'description': 'Use king opposition and spare tempi to force the opponent backward.', 'priority': 76},
     {'key': 'calculation', 'name': 'Forcing-Move Scan', 'family': 'Calculation', 'description': 'Check forcing moves and calculate one move deeper before committing.', 'priority': 20},
 ]
@@ -287,23 +295,9 @@ def classify_learning_concepts(
     elif category == 'major_blunder':
         add('threat_awareness', 0.74, 'A large one-move evaluation drop suggests an opponent resource was missed.')
 
-    # Detect a common amateur failure mode: moving a valuable piece onto a
-    # square where it can simply be taken and is not defended.
-    if played_after is not None:
-        moved_after = played_after.piece_at(played_move.to_square)
-        if (
-            moved_after is not None
-            and moved_after.color == side
-            and moved_after.piece_type != chess.KING
-            and _piece_value(moved_after) >= 3
-            and played_after.is_attacked_by(opponent, played_move.to_square)
-            and not played_after.is_attacked_by(side, played_move.to_square)
-        ):
-            add(
-                'loose_piece_awareness',
-                0.96,
-                f'The played move leaves the {chess.piece_name(moved_after.piece_type)} on {chess.square_name(played_move.to_square)} undefended and attacked.',
-            )
+    # Do not label a hanging piece merely because it is attacked and
+    # undefended. Its actual loss, versus the better branch, must be proven
+    # in a near-term legal continuation (see decision and semantic evidence).
 
     # Promotion and passed-pawn themes.
     if best_piece and best_piece.piece_type == chess.PAWN:
@@ -407,7 +401,8 @@ def classify_learning_concepts(
         }:
             add('simplification', 0.72, f'{best_san} trades a major piece and simplifies a tactically sensitive position.')
         if captured_value >= 1 and not destination_defended:
-            add('hanging_piece', 0.90 if captured_value >= 3 else 0.78, f'{best_san} wins a piece or pawn that cannot be immediately recaptured.')
+            add('capture_loose_piece', 0.90 if captured_value >= 3 else 0.78,
+                f'{best_san} captures material already available in the training position without an immediate legal recapture.')
         if captured_value >= 3:
             add('missed_capture', 0.76, f'{best_san} wins material immediately.')
 
@@ -480,7 +475,10 @@ def classify_learning_concepts(
                 f'{best_san} counterattacks the {threat["piece"]} on {threat["square"]}; '
                 'the original threatened material is lost in both saved lines.')
             context_primary = 'counterattack'
-        elif decision['truly_saved']:
+        elif (decision['truly_saved'] and decision.get('bad') and
+                any(c['ply'] <= 2 and not c['by_solver'] and
+                    c['root_square'] == decision['truly_saved'][0]['square']
+                    for c in decision['bad']['captures'])):
             saved = decision['truly_saved'][0]
             add('loose_piece_awareness', 0.97,
                 f'{best_san} keeps the attacked {saved["piece"]} from {saved["square"]} '
@@ -489,22 +487,37 @@ def classify_learning_concepts(
         elif (decision['good']['exchanges']
                 and decision['good']['exchanges'][0]['first']['ply'] == 0):
             exchange = decision['good']['exchanges'][0]
-            add('exchange', 0.94,
-                f'{exchange["first"]["san"]} is met by {exchange["recapture"]["san"]}; '
-                'this is an exchange, not a free capture.')
-            context_primary = 'exchange'
-        elif decision['new_targets'] and decision['new_targets'][0]['loose']:
-            target = decision['new_targets'][0]
-            add('hanging_piece', 0.86,
-                f'{best_san} attacks the opponent’s undefended {target["piece"]} '
-                f'on {target["square"]}; material gain still depends on the reply.')
-            context_primary = 'hanging_piece'
+            diff = exchange['recapture']['value'] - exchange['first']['value']
+            if diff >= 2:
+                motif = ('exchange_sacrifice' if exchange['recapture']['value'] == 5
+                         and exchange['first']['value'] == 3 else 'material_sacrifice')
+                add(motif, 0.97, f'{best_san} deliberately gives up more material than it takes.')
+            elif abs(diff) <= 1:
+                motif = 'simplification'
+                add(motif, 0.84, f'{best_san} makes an even exchange of material.')
+            else:
+                motif = 'missed_capture'
+            context_primary = motif
+        else:
+            # A *new* attack on a loose enemy target can be a motif only when
+            # the good PV realizes the capture promptly, and the inferior line
+            # misses that material. Mere geometry or an undefended target is
+            # insufficient evidence for an attacking lesson.
+            bad_captured = {c['root_square'] for c in decision['bad']['captures']
+                            if c['by_solver']} if decision.get('bad') else set()
+            for target in decision['new_targets']:
+                if not target['loose'] or target['square'] in bad_captured:
+                    continue
+                if any(c['by_solver'] and c['root_square'] == target['square']
+                       and 1 <= c['ply'] <= 2
+                       for c in decision['good']['captures']):
+                    add('hanging_piece', 0.92,
+                        f'{best_san} attacks the opponent’s undefended {target["piece"]} '
+                        f'on {target["square"]}; the continuation realizes the capture.')
+                    context_primary = 'hanging_piece'
+                    break
 
-    # If nothing concrete fired, retain a useful process-level lesson rather
-    # than manufacturing a low-confidence strategic label.
-    if not labels:
-        confidence = 0.72 if centipawn_loss >= 300 else 0.62
-        add('calculation', confidence, 'No single board motif dominates; the missed move is best treated as a calculation/forcing-move exercise.')
+    # Keep process-level guidance out of the specific motif taxonomy.
 
     # A discovered check constrains the reply even when the moved piece is
     # captured. A quieter line attack is less clearly causal if the moved
@@ -574,8 +587,8 @@ def classify_learning_concepts(
         concrete_primary = 'discovered_attack'
     elif 'promotion_tactic' in labels:
         concrete_primary = 'promotion_tactic'
-    elif 'hanging_piece' in labels and context['best_takes_loose']:
-        concrete_primary = 'hanging_piece'
+    elif 'capture_loose_piece' in labels and context['best_takes_loose']:
+        concrete_primary = 'capture_loose_piece'
     elif 'counterattack' in labels and context['new_pressure'] and (after.is_check() or fork and fork['line_supported']):
         concrete_primary = 'counterattack'
     elif 'attack_building' in labels and after.is_check() and len(line) >= 3:
@@ -616,10 +629,15 @@ def classify_learning_concepts(
         chosen = 'simplification' if balanced_exchange else 'calculation'
         add(chosen, 0.75, 'The recapture determines the material outcome; avoid labeling a temporary threat as a lasting attack.')
     if not chosen:
-        # A pin, skewer, or double attack is not necessarily the lesson just
-        # because it exists. Lacking a verified consequence, teach calculation.
-        chosen = 'calculation'
-        add('calculation', 0.75, 'The saved data establish the better move, but do not show a forcing continuation proving that a detected motif is decisive.')
+        # Forcing-Move Scan only applies where there is a concrete forcing
+        # option at the root: a legal check, a capture, or an existing check.
+        forcing = (board.is_check() or board.is_capture(best_move)
+                   or board.gives_check(best_move)
+                   or (played_move is not None and played_move in board.legal_moves and
+                       (board.is_capture(played_move) or board.gives_check(played_move))))
+        if forcing:
+            chosen = 'calculation'
+            add(chosen, 0.64, 'Compare immediate checks, captures, and replies.')
 
     # Root facts that distinguish these two actual moves are higher-confidence
     # learning material than a tactical pattern appearing many plies later.
@@ -655,8 +673,139 @@ def classify_learning_concepts(
     # geometric label or a temporary attack in a sampled PV.
     if context_primary and context_primary in labels and not forced_primary and not check_evasion:
         chosen = context_primary
-    # The score is relative evidence of relevance, not a calibrated probability.
-    # Preserve confidence as a measure of detection certainty.
+    # Explanation and primary motif should describe the SAME causal event.
+    # Only explicit threats / saved-line results may override the older
+    # geometry-based motif; do not turn a weak positional hypothesis into
+    # an asserted cause. Keep specific mating and immediate tactical labels.
+    causal, _ = evidence_findings(
+        board, best_move, played_move, best_pv_uci, played_pv_uci,
+        category=category, mate_before=mate_before, facts=decision)
+    if causal and not forced_primary and not check_evasion:
+        cause = causal[0]
+        if (cause.confidence >= 2 and cause.impact >= 78 and
+                cause.key in {'counterattack', 'mate_allowed', 'mate_threat',
+                              'material_loss', 'clean_capture', 'exchange_loss',
+                              'material_sacrifice', 'exchange_sacrifice',
+                              'double_attack', 'pawn_sacrifice_plan',
+                              'capture_mate_trap', 'queen_trade_castling'} and
+                cause.motif in CONCEPTS):
+            # A demonstrated fork or discovered check is more instructive
+            # than a generic material-loss label for that same sequence.
+            specific = chosen in {'fork', 'skewer', 'discovered_attack', 'pin'}
+            if not (cause.key == 'material_loss' and specific and cause.impact < 105):
+                add(cause.motif, 0.96, cause.assessment)
+                chosen = cause.motif
+    # Broad labels must be supported by near-root, differential evidence,
+    # not incidental threats or an undefended square on the board.
+    # Root-side pieces can be hanging BEFORE the move or become hanging
+    # because the played move puts them directly on an attacked square. In
+    # both cases, require a legal near-term capture differential across PVs.
+    verified_defense = bool(decision and decision.get('bad') and (
+        (decision['truly_saved'] and any(
+            c['ply'] <= 2 and not c['by_solver']
+            and c['root_square'] in {x['square'] for x in decision['truly_saved']}
+            for c in decision['bad']['captures'])) or
+        (any(c['ply'] == 1 and not c['by_solver']
+             and c['root_square'] == chess.square_name(played_move.from_square)
+             for c in decision['bad']['captures'])
+         and played_after is not None
+         and played_after.is_attacked_by(opponent, played_move.to_square)
+         and not played_after.is_attacked_by(side, played_move.to_square)
+         and len(decision['good']['steps']) > 1
+         and chess.square_name(played_move.from_square) not in {
+             c['root_square'] for c in decision['good']['captures']
+             if not c['by_solver']})
+    ))
+    verified_attack = bool(decision and decision.get('bad') and any(
+        target['loose'] and target['square'] not in {
+            c['root_square'] for c in decision['bad']['captures'] if c['by_solver']}
+        and any(c['by_solver'] and c['root_square'] == target['square']
+                and 1 <= c['ply'] <= 2 for c in decision['good']['captures'])
+        for target in decision['new_targets']))
+    if verified_defense and causal and causal[0].key == 'material_loss' and causal[0].horizon == 1:
+        # Only a pre-existing loose piece can be 'protected'. A piece moved
+        # into danger or newly exposed by the mistake needs a different lesson.
+        captured = confirmed_differential_loss(board, decision)
+        if captured and differential_loss_motif(board, played_move, captured) == 'loose_piece_awareness':
+            add('loose_piece_awareness', 0.97, causal[0].assessment)
+    # This check runs AFTER all relevance/semantic overrides. It prevents a
+    # newly hung mover being mislabeled as a piece that was already loose.
+    witnessed = confirmed_differential_loss(board, decision)
+    if witnessed and played_move != best_move and not forced_primary:
+        provenance = differential_loss_motif(board, played_move, witnessed)
+        if provenance == 'loose_piece_awareness':
+            add(provenance, 0.98, 'The piece was already loose before the game move; the better choice saves it.')
+        elif provenance == 'dont_hang_pieces':
+            add(provenance, 0.99, 'The game move places its own piece en prise, and the continuation shows the capture.')
+            labels.pop('loose_piece_awareness', None)
+        else:
+            add(provenance, 0.96, 'The game move allows a material loss not present in the better continuation.')
+            labels.pop('loose_piece_awareness', None)
+        if chosen in {'loose_piece_awareness', 'hanging_piece', 'lost_material',
+                      'dont_hang_pieces', 'calculation', 'threat_awareness', 'tactical_combination'}:
+            chosen = provenance
+    if not verified_defense and (not witnessed or differential_loss_motif(board, played_move, witnessed) != 'loose_piece_awareness'):
+        labels.pop('loose_piece_awareness', None)
+    if not verified_attack:
+        labels.pop('hanging_piece', None)
+    # A free root capture is *not* an attack that the answer creates. The
+    # loose enemy piece was available before either candidate move.
+    if root_evidence and root_evidence.get('kind') == 'free_capture':
+        add('capture_loose_piece', 0.99, root_evidence['explanation'])
+        if not forced_primary:
+            chosen = 'capture_loose_piece'
+    if chosen not in labels:
+        chosen = next((key for key in ('mate_defense', 'exchange_sacrifice',
+             'material_sacrifice', 'simplification', 'missed_capture',
+             'tactical_combination', 'fork', 'counterattack') if key in labels), None)
+    if chosen == 'calculation':
+        # Process labels are fallback, never preferred over a relevant
+        # recognized chess mechanism. A bare label with no response or root
+        # evidence cannot displace one with a substantial relevance score.
+        supported = [(k, score) for k, score in relevance_scores.items()
+                     if k in labels and k not in {'calculation'}
+                     and score >= 0.30]
+        if supported:
+            chosen = max(supported, key=lambda item: item[1])[0]
+    # An exact endgame verdict takes precedence over heuristic motifs.
+    from endgame_evidence import exact_move_contrast
+    exact = exact_move_contrast(board, best_move, played_move) if played_move else None
+    if exact:
+        add('endgame_precision', 1.0,
+            f'Syzygy confirms {best_san} preserves a {exact["best"]}, whereas the game move leads to a {exact["played"]}.')
+        chosen = 'endgame_precision'
+    if chosen in {'calculation', None}:
+        forcing = (board.is_check() or board.is_capture(best_move)
+                   or board.gives_check(best_move)
+                   or (played_move is not None and played_move in board.legal_moves
+                       and (board.is_capture(played_move) or board.gives_check(played_move))))
+        specific = [(k, relevance_scores.get(k, 0.0)) for k in labels
+                    if k != 'calculation']
+        if specific and (not forcing or max(score for _, score in specific) >= 0.30):
+            chosen = max(specific, key=lambda entry: (entry[1], labels[entry[0]].confidence))[0]
+        elif forcing:
+            chosen = 'calculation'
+            add('calculation', 0.60, 'Examine the forcing moves available in this position.')
+        else:
+            moving = board.piece_at(best_move.from_square)
+            if _is_endgame(board) and moving and moving.piece_type == chess.KING:
+                chosen = 'king_activity'
+                note = 'Compare the king’s activity and reachable squares in this endgame.'
+            elif moving and moving.piece_type == chess.PAWN:
+                chosen = 'pawn_structure'
+                note = 'Compare how the pawn moves change the pawn structure and available squares.'
+            elif moving and moving.piece_type == chess.KING:
+                chosen = 'king_safety'
+                note = 'Compare king safety and available escape squares.'
+            else:
+                chosen = 'piece_activity'
+                note = 'Compare the pieces’ active squares and influence after each move.'
+            add(chosen, 0.56, note)
+        if chosen != 'calculation':
+            labels.pop('calculation', None)
+    if not labels:
+        chosen = 'piece_activity'
+        add(chosen, 0.52, 'Compare useful squares and activity rather than assuming a forcing tactic.')
     ordered = sorted(labels.values(), key=lambda label: (
         label.key != chosen, -relevance_scores.get(label.key, 0.0),
         -label.confidence, -CONCEPTS[label.key]['priority']))

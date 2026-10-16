@@ -5,7 +5,7 @@ from typing import Iterable, Mapping, Optional
 import chess
 
 from position_context import inspect_response, piece_description
-from decision_context import decision_facts, concrete_explanation, has_decisive_context, unanswered_mate_threat
+from decision_context import decision_facts, unanswered_mate_threat
 from immediate_decision import immediate_decision
 from root_explanation import root_move_impact
 from branch_diagnostics import decisive_contrast
@@ -13,8 +13,9 @@ from critical_moments import (critical_decision_evidence, decode_critical_eviden
                               critical_explanation)
 from pv_reasoning import comparative_insight, fork_evidence, legal_pv
 from narrative_editor import mate_explanation, polish_comparison, concise
+from semantic_coaching import causal_coaching
 
-COACHING_VERSION = 'rules-v20-branch-aware-mates-exchanges'
+COACHING_VERSION = 'rules-v25-loose-piece-provenance'
 
 PIECE_NAMES = {
     chess.PAWN: 'pawn',
@@ -241,6 +242,9 @@ def _concept_prompt(concept_keys: list[str]) -> Optional[str]:
         'mate_defense': 'Your king is facing a mating threat. Identify the forcing idea first and find the move that stops it.',
         'threat_awareness': 'The opponent has a concrete threat. Identify exactly what becomes vulnerable if you make a slow move.',
         'loose_piece_awareness': 'One of your valuable pieces is tactically loose. Find a move that protects it, removes the attacker, or creates a concrete counter-threat.',
+        'dont_hang_pieces': 'Before moving, check whether your piece can be captured for free on its destination square.',
+        'lost_material': 'Consider what material the game move loses and whether a tactical defense or alternative avoids the loss.',
+        'capture_loose_piece': 'Look for an enemy piece you can already capture without an effective recapture.',
         'defensive_resource': 'This position needs an active defensive resource, not a passive waiting move. Look for checks, trades, or counter-threats.',
         'fork': 'Look for a move that attacks two important targets at the same time.',
         'pin': 'The alignment of a valuable piece and the piece behind it matters here. Look for a move that exploits that geometry.',
@@ -525,15 +529,17 @@ def generate_coaching_text(
     # from claiming that a counterattack saves an inevitably lost pawn.
     factual = decision_facts(board, best, played, best_pv_uci, played_pv_uci,
                              alternative_pvs_json, eval_before_cp, eval_after_cp)
-    grounded = concrete_explanation(board, factual, category=category,
-                                    mate_before=mate_before)
-    if grounded and has_decisive_context(board, factual):
-        # Forced mate beyond one ply has more precise existing mate-number
-        # evidence. Do not replace it with an incidental capture from a PV.
-        if category != 'allowed_checkmate' or factual['opponent_mate_bad']:
-            if category != 'missed_checkmate' or (factual['good']['steps'] and factual['good']['steps'][0]['checkmate']):
-                return prompt, grounded
-
+    # Rank consequences before composing prose. A direct reply, a later
+    # demonstrated loss, and positional consequences are NOT equally strong
+    # evidence. This semantic layer speaks first when it can explain the
+    # evaluation with a specific, supported cause. Legacy reasoning is the
+    # conservative fallback for unusual motifs and older metadata.
+    semantic = causal_coaching(
+        board, best, played, best_pv_uci, played_pv_uci,
+        alternative_pvs_json, eval_before_cp, eval_after_cp,
+        category, mate_before, facts=factual)
+    if semantic and (not board.is_check() or semantic['motif'] in {'mate_defense', 'mating_net'}):
+        return prompt, semantic['text']
     features = _best_move_features(board, best)
     comparison = comparative_insight(board, best, played, best_pv_uci, played_pv_uci)
     diagnostic = decisive_contrast(board, best, played, best_pv_uci, played_pv_uci,
