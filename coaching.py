@@ -8,10 +8,12 @@ from position_context import inspect_response, piece_description
 from immediate_decision import immediate_decision
 from root_explanation import root_move_impact
 from branch_diagnostics import decisive_contrast
+from critical_moments import (critical_decision_evidence, decode_critical_evidence,
+                              critical_explanation)
 from pv_reasoning import comparative_insight, fork_evidence, legal_pv
 from narrative_editor import mate_explanation, polish_comparison, concise
 
-COACHING_VERSION = 'rules-v17-grounded-first-move-outcomes'
+COACHING_VERSION = 'rules-v19-contextual-critical-realizations'
 
 PIECE_NAMES = {
     chess.PAWN: 'pawn',
@@ -437,6 +439,9 @@ def generate_coaching_text(
     played_pv_uci=None,
     alternative_pvs_json=None,
     eval_before_cp=None,
+    eval_after_cp=None,
+    critical_events_json=None,
+    explanatory_lines_json=None,
 ) -> tuple[str, str]:
     """Generate a concrete pre-solve coaching prompt and post-solve explanation."""
     board = chess.Board(fen)
@@ -509,6 +514,14 @@ def generate_coaching_text(
     comparison = comparative_insight(board, best, played, best_pv_uci, played_pv_uci)
     diagnostic = decisive_contrast(board, best, played, best_pv_uci, played_pv_uci,
                                    alternative_pvs_json, category, eval_before_cp)
+    critical = decode_critical_evidence(critical_events_json)
+    # Live coaching, older databases, and new metadata refresh all use the
+    # same causal evidence even when no persisted annotation is available.
+    if critical is None:
+        critical = critical_decision_evidence(board, best, played, best_pv_uci,
+            played_pv_uci, eval_before_cp, eval_after_cp,
+            alternatives=alternative_pvs_json, explanatory_lines=explanatory_lines_json)
+    critical_text = critical_explanation(critical)
     events = comparison['best'].get('events') or []
     line_mate = bool(events and events[-1]['ours'] and events[-1]['mate'])
     ending = events[-1]['san'] if line_mate else None
@@ -602,8 +615,12 @@ def generate_coaching_text(
     # root move *actually does*, and only then less local PV changes.
     rooted = immediate_decision(board, best, played, context)
     root_effect = root_move_impact(board, best, played, best_pv_uci)
+    # A demonstrated early loss takes priority over the fork, pressure, or
+    # positional pattern seen later in that *same* inferior continuation.
     if diagnostic and diagnostic['kind'] == 'mate':
         return prompt, diagnostic['text']
+    if critical_text:
+        return prompt, critical_text
     if rooted:
         if diagnostic and diagnostic['kind'] in {'fork', 'material'}:
             return prompt, concise([rooted['explanation'], diagnostic['text']])

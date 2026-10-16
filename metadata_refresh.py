@@ -6,6 +6,10 @@ selected positions, PVs, modes, and learning history remain untouched.
 from __future__ import annotations
 
 import io
+import json
+
+from critical_moments import critical_decision_evidence
+from explanatory_evidence import explanation_variations, decode_variations
 
 import chess
 import chess.pgn
@@ -131,6 +135,27 @@ def refresh_metadata_batch(conn, job_id, after_id=0, batch_size=25):
             conn.execute('''UPDATE training_positions
                 SET difficulty_score = ?, estimated_rating = ?, difficulty_version = ?
                 WHERE id = ?''', (score, rating, DIFFICULTY_VERSION, position_id))
+
+            # Metadata-only reconstruction: uses existing root evaluations and
+            # saved PVs, never downloads PGNs or invokes Stockfish.
+            try:
+                played = chess.Move.from_uci(row['played_move_uci'])
+                existing_lines = decode_variations(row['explanatory_lines_json'])
+                probe = next((line for line in existing_lines['lines']
+                              if line.get('role') == 'tested_reply'), None) if existing_lines else None
+                lines = explanation_variations(
+                    board, best_move, played, row['best_pv_uci'], row['played_pv_uci'],
+                    row['eval_before_cp'], row['eval_after_cp'], row['mate_before'],
+                    row['mate_after'], row['alternative_pvs_json'], probe=probe)
+                evidence = critical_decision_evidence(
+                    board, best_move, played, row['best_pv_uci'], row['played_pv_uci'],
+                    row['eval_before_cp'], row['eval_after_cp'],
+                    alternatives=row['alternative_pvs_json'], explanatory_lines=lines)
+                conn.execute('''UPDATE training_positions
+                    SET critical_events_json = ?, explanatory_lines_json = ?
+                    WHERE id = ?''', (json.dumps(evidence), json.dumps(lines), position_id))
+            except (TypeError, ValueError):
+                pass
 
             # Refresh labels from the newest stored PGN context, PVs, and
             # unchanged engine evaluations; coaching uses those updated labels.

@@ -163,6 +163,7 @@ let trainerKeyboardArmed = false;
 let boardGridOrientation = null;
 let renderedBoardMap = {};
 let boardInteractive = false;
+let boardDragController = null;
 const boardSquares = new Map();
 
 const PRE_MOVE_PAUSE_MS = 650;
@@ -324,10 +325,13 @@ function updatePieceOnSquare(square, squareName, pieceCode, canInteract, activeC
   piece.style.visibility = '';
   piece.style.transform = '';
   piece.dataset.from = squareName;
-  piece.draggable = Boolean(canInteract && isPieceForColor(pieceCode, activeColor));
+  // Pointer-based dragging supports mouse and touch without interfering with
+  // the existing click-piece/click-destination move entry.
+  piece.draggable = false;
 }
 
 function renderBoard(position, fen = position.fen, interactive = true) {
+  boardDragController?.cancel();
   displayedFen = fen;
   const board = parseFen(fen);
   ensureBoardGrid(position);
@@ -337,34 +341,30 @@ function renderBoard(position, fen = position.fen, interactive = true) {
   const activeColor = interactionColor(position);
   renderedBoardMap = board;
   boardInteractive = Boolean(canInteract);
+  boardEl.classList.toggle('is-interactive', boardInteractive);
   for (const [squareName, square] of boardSquares.entries()) {
     square.classList.remove('selected','legal-target','correct','wrong','near-optimal','last-move');
     updatePieceOnSquare(square, squareName, board[squareName], canInteract, activeColor);
   }
 }
 
-boardEl.addEventListener('dragstart', event => {
-  const piece = event.target.closest?.('.piece');
-  if (!piece || !boardInteractive || !piece.draggable) return;
-  selectedSquare = piece.dataset.from;
-  paintSelection();
-  event.dataTransfer?.setData('text/plain', selectedSquare);
-});
-boardEl.addEventListener('dragend', () => {
-  if ((!inputLocked && !solved) || analysisModeActive()) { selectedSquare = null; paintSelection(); }
-});
-boardEl.addEventListener('dragover', event => {
-  if (boardInteractive && event.target.closest?.('.square')) event.preventDefault();
-});
-boardEl.addEventListener('drop', event => {
-  const square = event.target.closest?.('.square');
-  if (!square || !boardInteractive) return;
-  event.preventDefault();
-  const from = event.dataTransfer?.getData('text/plain');
-  const to = square.dataset.square;
-  if (!from || from === to) { selectedSquare = null; paintSelection(); return; }
-  const legalMove = resolveLegalMove(from, to);
-  if (legalMove) submitBoardMove(from, to, legalMove);
+// Drag-and-drop and click-to-move must both use the same legal-move resolver.
+// The pointer controller waits for real movement before starting a drag, so
+// taps/clicks are left intact and dragging works on touch screens too.
+boardDragController = window.installBoardPointerDrag(boardEl, {
+  canStart: from => boardInteractive &&
+    isPieceForColor(renderedBoardMap[from], interactionColor(currentPosition())),
+  onStart: from => {
+    selectedSquare = from;
+    paintSelection();
+  },
+  onDrop: (from, to) => {
+    const legalMove = boardInteractive ? resolveLegalMove(from, to) : null;
+    selectedSquare = null;
+    paintSelection();
+    if (legalMove) submitBoardMove(from, to, legalMove);
+  },
+  onCancel: () => { selectedSquare = null; paintSelection(); }
 });
 boardEl.addEventListener('click', event => {
   const square = event.target.closest?.('.square');
@@ -2002,7 +2002,11 @@ trainerRootEl?.addEventListener('pointerdown', event => {
 });
 
 coachPanelEl?.addEventListener('focusin', () => { trainerKeyboardArmed = false; });
-boardEl?.addEventListener('pointerdown', () => boardEl.focus({preventScroll: true}));
+boardEl?.addEventListener('pointerdown', event => {
+  // Focusing a parent element during a press on a chess piece can interrupt
+  // the platform's pointer/drag gesture on some browsers.
+  if (!boardInteractive || !event.target.closest?.('.piece')) boardEl.focus({preventScroll: true});
+});
 pgnMovesEl?.addEventListener('pointerdown', () => pgnMovesEl.focus({preventScroll: true}));
 
 document.addEventListener('keydown', e => {

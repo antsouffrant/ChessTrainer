@@ -28,6 +28,9 @@ from learning import CLASSIFIER_VERSION, classify_learning_concepts
 from openings import ensure_opening_metadata, famous_for_opening, CLASSICS
 from metadata_refresh import refresh_metadata_batch
 from process_runtime import PROCESS_LOCK
+from retrieval import retrieve_game_list
+from list_readiness import list_state
+from process_policy import queue_analysis
 from opening_playlist import enrich_opening_playlist, board_identity
 from adaptive_coach import (
     apply_adaptive_concepts_to_position, coach_history, handle_coach_message, get_or_create_thread,
@@ -105,6 +108,43 @@ def resume_analysis_thread(job_id: int):
         ).start()
         return existing
     return start_analysis_thread(job_id)
+
+
+# Retrieving a new PGN is independent of Stockfish and metadata refresh.
+# Only newly created lists (or their explicit retries) enter this workflow.
+_retrieval_threads = {}
+_retrieval_threads_lock = threading.Lock()
+
+
+def start_retrieval_thread(job_id: int):
+    with _retrieval_threads_lock:
+        current = _retrieval_threads.get(job_id)
+        if current is not None and current.is_alive():
+            return current
+        def worker():
+            try:
+                retrieve_game_list(job_id, on_complete=start_analysis_thread)
+            finally:
+                with _retrieval_threads_lock:
+                    _retrieval_threads.pop(job_id, None)
+        thread = threading.Thread(target=worker, daemon=True, name=f'game-retrieval-{job_id}')
+        _retrieval_threads[job_id] = thread
+        thread.start()
+        return thread
+
+
+def resume_retrieval_thread(job_id: int):
+    """Do not reuse an in-flight .part file when retrying a stopped retrieval."""
+    with _retrieval_threads_lock:
+        current = _retrieval_threads.get(job_id)
+    if current is not None and current.is_alive():
+        def restart_after_cancel():
+            current.join()
+            start_retrieval_thread(job_id)
+        threading.Thread(target=restart_after_cancel, daemon=True,
+                         name=f'retrieval-retry-{job_id}').start()
+        return current
+    return start_retrieval_thread(job_id)
 
 
 # Metadata refresh has a persisted cursor and a dedicated background thread.
@@ -202,10 +242,13 @@ def process_listing():
             j.games_retrieved, j.games_screened, j.games_processed, j.positions_found, j.current_pass,
             j.max_passes, j.error AS analysis_error, j.metadata_refreshed_at,
             j.created_at, j.source_type, j.source_username, a.username,
+            EXISTS(SELECT 1 FROM training_positions t WHERE t.job_id=j.id LIMIT 1) AS has_training_positions,
+            r.status AS retrieval_status, r.bytes_downloaded, r.bytes_total, r.error AS retrieval_error,
             p.status AS refresh_status, p.processed, p.total, p.updated,
             p.failed, p.without_pgn, p.error AS refresh_error
             FROM analysis_jobs j JOIN accounts a ON a.id=j.account_id
             LEFT JOIN metadata_processes p ON p.job_id=j.id
+            LEFT JOIN retrieval_processes r ON r.job_id=j.id
             ORDER BY j.id DESC''').fetchall()
             return jsonify({'processes': [dict(row) for row in jobs]})
         except sqlite3.OperationalError as exc:
@@ -214,6 +257,38 @@ def process_listing():
             if attempt == 3:
                 return jsonify({'error': 'Database is momentarily busy; status will retry.'}), 503, {'Retry-After': '1'}
             time.sleep(0.12 * (attempt + 1))
+
+
+@app.post('/api/jobs/<int:job_id>/process/retrieve')
+def process_retrieve(job_id):
+    # Retry failed or interrupted retrieval for a newly created list.
+    with connect() as conn:
+        task = conn.execute('SELECT status FROM retrieval_processes WHERE job_id=?', (job_id,)).fetchone()
+        if task is None:
+            return jsonify({'error':'Retrieval only applies to newly created game lists.'}), 409
+        if task['status'] not in ('error', 'stopped', 'paused'):
+            return jsonify({'error':'Retrieval is already active or complete.'}), 409
+        conn.execute('''UPDATE retrieval_processes SET status='queued', error=NULL,
+            bytes_downloaded=0, bytes_total=0, finished_at=NULL,updated_at=CURRENT_TIMESTAMP
+            WHERE job_id=?''', (job_id,))
+        conn.execute("UPDATE analysis_jobs SET status='waiting_for_games',error=NULL,finished_at=NULL WHERE id=?", (job_id,))
+        conn.commit()
+    resume_retrieval_thread(job_id)
+    return jsonify({'ok':True,'status':'queued'}), 202
+
+
+@app.post('/api/jobs/<int:job_id>/process/retrieve/stop')
+def process_stop_retrieval(job_id):
+    with connect() as conn:
+        task = conn.execute('SELECT status FROM retrieval_processes WHERE job_id=?', (job_id,)).fetchone()
+        if task is None:
+            return jsonify({'error':'No retrieval task for this game list.'}), 404
+        if task['status'] not in ('queued','running','paused'):
+            return jsonify({'error':'Retrieval is not active.'}), 409
+        conn.execute("UPDATE retrieval_processes SET status='stopped',updated_at=CURRENT_TIMESTAMP WHERE job_id=?",(job_id,))
+        conn.execute("UPDATE analysis_jobs SET status='stopped' WHERE id=? AND status='waiting_for_games'", (job_id,))
+        conn.commit()
+    return jsonify({'ok':True,'status':'stopped'})
 
 
 @app.post('/api/jobs/<int:job_id>/process/refresh')
@@ -226,8 +301,11 @@ def process_refresh(job_id):
         if current and current['status'] in ('running', 'queued'):
             return jsonify({'error':'Metadata refresh already queued or running.'}), 409
         analysis_status = conn.execute('SELECT status FROM analysis_jobs WHERE id=?', (job_id,)).fetchone()['status']
-        if analysis_status in ('running', 'queued', 'retrieving'):
+        if analysis_status in ('running', 'queued', 'retrieving', 'waiting_for_games'):
             return jsonify({'error':'This game list is being analyzed. Pause or finish evaluation before refreshing.'}), 409
+        retrieval = conn.execute('SELECT status FROM retrieval_processes WHERE job_id=?',(job_id,)).fetchone()
+        if retrieval is not None and retrieval['status'] != 'complete':
+            return jsonify({'error':'Retrieval must finish before refreshing metadata.'}), 409
         # Paused work resumes at its cursor. A completed refresh starts from zero.
         resume = bool(current and current['status'] == 'paused' and
                       (request.get_json(silent=True) or {}).get('resume'))
@@ -261,32 +339,46 @@ def control_refresh(job_id, action):
     return jsonify({'ok': True, 'status': state})
 
 
+@app.post('/api/jobs/<int:job_id>/process/retrieve/pause')
+def process_pause_retrieval(job_id):
+    with connect() as conn:
+        task = conn.execute('SELECT status FROM retrieval_processes WHERE job_id=?', (job_id,)).fetchone()
+        if task is None:
+            return jsonify({'error': 'This game list has no retrieval task.'}), 404
+        if task['status'] not in ('queued', 'running'):
+            return jsonify({'error': 'Retrieval is not active.'}), 409
+        conn.execute("UPDATE retrieval_processes SET status='paused', updated_at=CURRENT_TIMESTAMP WHERE job_id=?", (job_id,))
+        conn.execute("UPDATE analysis_jobs SET status='paused' WHERE id=? AND status='waiting_for_games'", (job_id,))
+        conn.commit()
+    # Paused retrieval drops its incomplete .part file; saved batches are intact.
+    return jsonify({'ok': True, 'status': 'paused'})
+
+
 @app.post('/api/jobs/<int:job_id>/process/analyze')
 def process_analyze(job_id):
     with connect() as conn:
-        job = conn.execute('''SELECT j.status, j.source_username, a.username FROM analysis_jobs j
+        job = conn.execute('''SELECT j.status, j.source_username, j.passes_completed,
+            j.max_passes, a.username FROM analysis_jobs j
             JOIN accounts a ON a.id=j.account_id WHERE j.id=?''', (job_id,)).fetchone()
         if job is None:
             return jsonify({'error': 'Game list not found'}), 404
         if job['status'] in ('queued', 'running', 'retrieving'):
             return jsonify({'error': 'Analysis is already queued or running.'}), 409
+        retrieval = conn.execute('SELECT status FROM retrieval_processes WHERE job_id=?', (job_id,)).fetchone()
+        if (retrieval is not None and retrieval['status'] != 'complete') or job['status'] == 'waiting_for_games':
+            return jsonify({'error': 'Wait for game retrieval to finish before starting analysis.'}), 409
         source = job['source_username'] or job['username']
         batch = batch_path_for_job(source, job_id)
         if not batch.exists() or batch.stat().st_size == 0:
-            return jsonify({'error': 'The saved game batch is missing. Reimport the PGN before rerunning analysis.'}), 409
+            return jsonify({'error': 'The saved game batch is missing. Reimport the PGN before analyzing.'}), 409
         refresh = conn.execute('SELECT status FROM metadata_processes WHERE job_id=?', (job_id,)).fetchone()
         if refresh and refresh['status'] in ('running', 'queued'):
-            # A single-list analysis must not begin until refresh has committed.
             return jsonify({'error': 'This list has an active metadata refresh. Pause or finish it first.'}), 409
-        conn.execute('''UPDATE analysis_jobs SET status='queued',force_reanalysis=1,
-            error=NULL,finished_at=NULL,current_pass=1,passes_completed=0,
-            games_processed=0, checkpoint_pass=0, checkpoint_game_index=0,
-            checkpoint_file_offset=0 WHERE id=?''', (job_id,))
+        action = queue_analysis(conn, job_id, job['status'],
+            completed_passes=job['passes_completed'], max_passes=job['max_passes'])
         conn.commit()
-    # A stopped worker may still be finishing its current engine call. Wait
-    # until it exits before launching the explicitly restarted analysis.
     resume_analysis_thread(job_id)
-    return jsonify({'ok':True,'status':'queued'}), 202
+    return jsonify({'ok': True, 'status': 'queued', 'action': action}), 202
 
 
 @app.post('/api/jobs/<int:job_id>/process/analyze/stop')
@@ -295,7 +387,7 @@ def process_stop_analysis(job_id):
         row = conn.execute('SELECT status FROM analysis_jobs WHERE id=?', (job_id,)).fetchone()
         if row is None:
             return jsonify({'error':'Game list not found'}), 404
-        if row['status'] not in ('queued','running','retrieving','paused'):
+        if row['status'] not in ('queued', 'running', 'retrieving', 'paused'):
             return jsonify({'error':'Analysis is not active.'}), 409
         conn.execute("UPDATE analysis_jobs SET status='stopped', finished_at=CURRENT_TIMESTAMP WHERE id=?", (job_id,))
         conn.commit()
@@ -456,6 +548,10 @@ def backfill_coaching_texts():
                     mate_before=row['mate_before'],
                     best_pv_uci=row['best_pv_uci'],
                     played_pv_uci=row['played_pv_uci'],
+                    eval_before_cp=row['eval_before_cp'],
+                    eval_after_cp=row['eval_after_cp'],
+                    critical_events_json=row['critical_events_json'],
+                    explanatory_lines_json=row['explanatory_lines_json'],
                 )
             except (ValueError, TypeError, KeyError):
                 continue
@@ -584,14 +680,20 @@ def index():
 
         game_lists = conn.execute('''
             SELECT j.id, j.date_range, j.source_type, j.source_username,
-                   j.status, j.created_at, j.metadata_refreshed_at,
+                   j.status, j.created_at, j.metadata_refreshed_at, j.games_retrieved,
+                   r.status AS retrieval_status, p.status AS refresh_status,
                    a.username, COUNT(tp.id) AS position_count,
                    COUNT(DISTINCT tp.game_id) AS game_count
             FROM analysis_jobs j
             JOIN accounts a ON a.id = j.account_id
             LEFT JOIN training_positions tp ON tp.job_id = j.id
+            LEFT JOIN retrieval_processes r ON r.job_id = j.id
+            LEFT JOIN metadata_processes p ON p.job_id = j.id
             GROUP BY j.id ORDER BY j.id DESC LIMIT 30
         ''').fetchall()
+    game_lists = [dict(item) for item in game_lists]
+    for item in game_lists:
+        item['home_state'] = list_state(item['retrieval_status'], item['status'], item['position_count'])
     return render_template('index.html', error=error,
                            latest_job=latest_job, game_lists=game_lists)
 
@@ -690,19 +792,15 @@ def update_setting(key):
                     changed = modes != before
                     if changed:
                         status = row['status']
-                        if status in ('complete', 'error', 'superseded') and modes - before:
-                            conn.execute("""
-                                UPDATE analysis_jobs
-                                SET learning_modes = ?, status = 'queued', error = NULL, finished_at = NULL,
-                                    current_pass = 1, passes_completed = 0, games_processed = 0,
-                                    checkpoint_pass = 0, checkpoint_game_index = 0, checkpoint_file_offset = 0
-                                WHERE id = ?
-                            """, (json.dumps(ordered), job_id))
+                        retrieval_row = conn.execute('SELECT status FROM retrieval_processes WHERE job_id=?', (job_id,)).fetchone()
+                        retrieved = retrieval_row is None or retrieval_row['status'] == 'complete'
+                        conn.execute('UPDATE analysis_jobs SET learning_modes = ? WHERE id = ?',
+                                     (json.dumps(ordered), job_id))
+                        if status in ('complete', 'error', 'stopped') and modes - before and retrieved:
+                            queue_analysis(conn, job_id, status,
+                                completed_passes=row['passes_completed'], max_passes=row['max_passes'])
                             should_start = True
-                            status = 'queued'
-                        else:
-                            conn.execute('UPDATE analysis_jobs SET learning_modes = ? WHERE id = ?',
-                                         (json.dumps(ordered), job_id))
+                            status = 'queued' 
                         job_update = {'job_id': job_id, 'learning_modes': ordered, 'status': status}
             conn.commit()
     except KeyError:
@@ -785,15 +883,8 @@ def setup():
             settings_json = serialize_settings(job_settings)
 
             with connect() as conn:
-                conn.execute("""
-                    UPDATE analysis_jobs
-                    SET status = 'superseded',
-                        error = 'Superseded by a newer analysis request for the same game-list source.',
-                        finished_at = CURRENT_TIMESTAMP
-                    WHERE account_id = ? AND status IN ('queued', 'retrieving', 'running', 'paused')
-                      AND COALESCE(source_type, 'self') = ?
-                      AND lower(COALESCE(source_username, '')) = lower(?)
-                """, (account_id, source_type, source_username))
+                # Game lists are independent: a new import must not cancel or
+                # supersede any previous list, even from the same account.
                 cur = conn.execute("""
                     INSERT INTO analysis_jobs (
                         account_id, date_range, game_types,
@@ -801,7 +892,7 @@ def setup():
                         current_pass, max_passes, passes_completed,
                         current_screen_depth, current_deep_depth, settings_json,
                         source_type, source_username, learning_modes, status
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, 0, ?, ?, ?, ?, ?, ?, 'queued')
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, 0, ?, ?, ?, ?, ?, ?, 'waiting_for_games')
                 """, (
                     account_id, date_range, json.dumps(game_types),
                     base_screen_depth, base_deep_depth, screen_seconds, deep_seconds,
@@ -809,9 +900,10 @@ def setup():
                     source_type, source_username, json.dumps(learning_modes),
                 ))
                 job_id = cur.lastrowid
+                conn.execute("INSERT INTO retrieval_processes(job_id,status) VALUES (?,'queued')", (job_id,))
                 conn.commit()
 
-            start_analysis_thread(job_id)
+            start_retrieval_thread(job_id)
             return redirect(url_for('analyzing', job_id=job_id))
 
     default_modes = []
@@ -835,8 +927,17 @@ def analyzing(job_id):
 
 
 
+def list_has_positions(job_id):
+    with connect() as conn:
+        return conn.execute(
+            'SELECT 1 FROM training_positions WHERE job_id=? LIMIT 1', (job_id,)
+        ).fetchone() is not None
+
+
 @app.route('/openings/<int:job_id>')
 def openings(job_id):
+    if not list_has_positions(job_id):
+        return redirect(url_for('processes', job_id=job_id))
     with connect() as conn:
         job = conn.execute('SELECT * FROM analysis_jobs WHERE id = ?', (job_id,)).fetchone()
         if job is None:
@@ -847,6 +948,8 @@ def openings(job_id):
 
 @app.route('/openings/<int:job_id>/<opening_key>')
 def opening_detail(job_id, opening_key):
+    if not list_has_positions(job_id):
+        return redirect(url_for('processes', job_id=job_id))
     with connect() as conn:
         job = conn.execute('SELECT id FROM analysis_jobs WHERE id = ?', (job_id,)).fetchone()
         if job is None:
@@ -939,6 +1042,8 @@ def reset_opening(job_id, opening_key):
 
 @app.route('/lessons/<int:job_id>')
 def lessons(job_id):
+    if not list_has_positions(job_id):
+        return redirect(url_for('processes', job_id=job_id))
     with connect() as conn:
         job = conn.execute('SELECT * FROM analysis_jobs WHERE id = ?', (job_id,)).fetchone()
     if job is None:
@@ -953,6 +1058,8 @@ def lessons(job_id):
 
 @app.route('/lessons/<int:job_id>/<concept_key>')
 def lesson_detail(job_id, concept_key):
+    if not list_has_positions(job_id):
+        return redirect(url_for('processes', job_id=job_id))
     with connect() as conn:
         job = conn.execute('SELECT status FROM analysis_jobs WHERE id = ?', (job_id,)).fetchone()
         lesson = conn.execute('''
@@ -1002,6 +1109,8 @@ def lesson_detail(job_id, concept_key):
 
 @app.route('/trainer/<int:job_id>')
 def trainer(job_id):
+    if not list_has_positions(job_id):
+        return redirect(url_for('processes', job_id=job_id))
     concept_key = request.args.get('concept', '').strip()
     opening_key = request.args.get('opening', '').strip()
     opening_variation = request.args.get('variation','')
@@ -1121,19 +1230,15 @@ def set_job_learning_modes(job_id):
         removed = current - requested_set
         status = row['status']
         if requested_set != current:
-            if added and status in ('complete', 'error', 'superseded'):
-                conn.execute("""
-                    UPDATE analysis_jobs
-                    SET learning_modes = ?, status = 'queued', error = NULL, finished_at = NULL,
-                        current_pass = 1, passes_completed = 0, games_processed = 0,
-                        checkpoint_pass = 0, checkpoint_game_index = 0, checkpoint_file_offset = 0
-                    WHERE id = ?
-                """, (json.dumps(ordered), job_id))
+            conn.execute('UPDATE analysis_jobs SET learning_modes = ? WHERE id = ?',
+                         (json.dumps(ordered), job_id))
+            retrieval = conn.execute('SELECT status FROM retrieval_processes WHERE job_id=?', (job_id,)).fetchone()
+            retrieved = retrieval is None or retrieval['status'] == 'complete'
+            if added and status in ('complete', 'error', 'stopped') and retrieved:
+                queue_analysis(conn, job_id, status,
+                    completed_passes=row['passes_completed'], max_passes=row['max_passes'])
                 status = 'queued'
                 should_start = True
-            else:
-                conn.execute('UPDATE analysis_jobs SET learning_modes = ? WHERE id = ?',
-                             (json.dumps(ordered), job_id))
         if payload.get('persist_defaults'):
             defaults = {
                 'learning_mode_mistakes': 'mistakes' in requested_set,
@@ -1158,8 +1263,8 @@ def pause_job(job_id):
         row = conn.execute('SELECT status FROM analysis_jobs WHERE id = ?', (job_id,)).fetchone()
         if row is None:
             return jsonify({'error': 'Job not found'}), 404
-        if row['status'] in ('complete', 'error', 'superseded'):
-            return jsonify({'error': f"Cannot pause a {row['status']} job"}), 409
+        if row['status'] not in ('queued', 'running', 'retrieving'):
+            return jsonify({'error': 'Analysis is not active.'}), 409
         conn.execute(
             "UPDATE analysis_jobs SET status = 'paused' WHERE id = ?",
             (job_id,),
@@ -1176,6 +1281,9 @@ def resume_job(job_id):
             return jsonify({'error': 'Job not found'}), 404
         if row['status'] != 'paused':
             return jsonify({'error': 'Only paused jobs can be resumed'}), 409
+        retrieval = conn.execute('SELECT status FROM retrieval_processes WHERE job_id=?', (job_id,)).fetchone()
+        if retrieval is not None and retrieval['status'] != 'complete':
+            return jsonify({'error': 'Resume the Retrieval process first.'}), 409
         conn.execute(
             "UPDATE analysis_jobs SET status = 'queued', error = NULL, finished_at = NULL WHERE id = ?",
             (job_id,),
@@ -2738,6 +2846,9 @@ def pause_interrupted_jobs_on_startup():
     with connect() as conn:
         conn.execute("""UPDATE analysis_jobs SET status='paused'
             WHERE status IN ('queued','retrieving','running')""")
+        conn.execute("""UPDATE retrieval_processes SET status='paused',
+            updated_at=CURRENT_TIMESTAMP WHERE status IN ('queued','running')""")
+        conn.execute("""UPDATE analysis_jobs SET status='paused' WHERE status='waiting_for_games'""")
         conn.execute("""UPDATE metadata_processes SET status='paused',
             updated_at=CURRENT_TIMESTAMP WHERE status IN ('queued','running')""")
         conn.commit()

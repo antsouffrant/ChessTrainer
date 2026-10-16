@@ -20,9 +20,12 @@ document.addEventListener('click', async event => {
       return;
     }
     const data = await statusResponse.json();
-    const busy = (data.processes || []).some(job =>
-      activeProcessStatuses.has(job.analysis_status) ||
-      activeProcessStatuses.has(job.refresh_status)
+    const target = (data.processes || []).find(job => Number(job.id) === id);
+    const busy = target && (
+      (target.retrieval_status && target.retrieval_status !== 'complete') ||
+      target.analysis_status === 'waiting_for_games' ||
+      activeProcessStatuses.has(target.analysis_status) ||
+      activeProcessStatuses.has(target.refresh_status)
     );
     if (busy) {
       window.location.assign(processUrl);

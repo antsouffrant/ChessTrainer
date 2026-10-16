@@ -59,6 +59,19 @@ CREATE TABLE IF NOT EXISTS analysis_jobs (
 );
 
 
+-- Retrieval is separate from Stockfish analysis and runs only for new lists.
+CREATE TABLE IF NOT EXISTS retrieval_processes (
+    job_id INTEGER PRIMARY KEY,
+    status TEXT NOT NULL DEFAULT 'queued',
+    bytes_downloaded INTEGER NOT NULL DEFAULT 0,
+    bytes_total INTEGER NOT NULL DEFAULT 0,
+    error TEXT,
+    started_at TEXT,
+    finished_at TEXT,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(job_id) REFERENCES analysis_jobs(id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS metadata_processes (
     job_id INTEGER PRIMARY KEY,
     status TEXT NOT NULL DEFAULT 'idle',
@@ -150,6 +163,8 @@ CREATE TABLE IF NOT EXISTS training_positions (
     best_pv_uci TEXT,
     played_pv_uci TEXT,
     alternative_pvs_json TEXT,
+    critical_events_json TEXT,
+    explanatory_lines_json TEXT,
     coach_prompt TEXT,
     coach_explanation TEXT,
     coaching_version TEXT,
@@ -461,6 +476,8 @@ def init_db():
             'best_pv_uci': 'ALTER TABLE training_positions ADD COLUMN best_pv_uci TEXT',
             'played_pv_uci': 'ALTER TABLE training_positions ADD COLUMN played_pv_uci TEXT',
             'alternative_pvs_json': 'ALTER TABLE training_positions ADD COLUMN alternative_pvs_json TEXT',
+            'critical_events_json': 'ALTER TABLE training_positions ADD COLUMN critical_events_json TEXT',
+            'explanatory_lines_json': 'ALTER TABLE training_positions ADD COLUMN explanatory_lines_json TEXT',
             'coach_prompt': 'ALTER TABLE training_positions ADD COLUMN coach_prompt TEXT',
             'coach_explanation': 'ALTER TABLE training_positions ADD COLUMN coach_explanation TEXT',
             'coaching_version': 'ALTER TABLE training_positions ADD COLUMN coaching_version TEXT',

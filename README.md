@@ -1,5 +1,27 @@
 # Personal Chess Trainer
 
+## October 16, 2026 — v46 game-list processes and durable analysis
+
+- **Retrieval** is a creation-only, distinct Lichess downloader. A successful import saves an immutable PGN batch under `data/batches/`, marks retrieval complete, and automatically queues **Analysis**. Further clicks on Analyze or Refresh never call the Lichess downloader. An interrupted retrieval can be retried on the *same* list, without creating a new list; a partial download is discarded and downloaded again, not byte-range resumed.
+- **Home** shows *Retrieving games*, then *Analyzing games*. Train, Lessons, and Openings are disabled and grey until at least one actual training position is stored. The Train button becomes white on readiness. Analyze and Refresh also disable while the list is retrieving or either operation is active.
+- **Process** groups retrieval, evaluation and metadata refresh within each saved game list. One Play/Pause/Stop transport controls that list's current task. Analyze and Refresh remain explicit operations, disabled whenever incompatible work is underway. Status counters and progress are persisted in SQLite and polled in the UI.
+- **Analyze** now resumes from the last committed per-game PGN offset after pause, stop, error, or app restart: no checkpoint reset. After a completed list, *Analyze again* starts exactly one **next, deeper refinement pass** on the saved PGN, retaining prior confirmed positions and solve history. Enabling new learning modes on a completed list also schedules an additional pass instead of clearing earlier work. Refresh remains a non-Stockfish metadata rebuild with its own resumable cursor.
+- **Startup** continues to leave interrupted work paused rather than launching unrequested CPU-intensive jobs. Resume is explicit on the Process page. The local SQLite database (`data/`) and saved batches must be preserved between runs; they are not shipped with this source archive. The source archive contains no imported game data.
+- Tests: `python -m unittest discover -s tests -p 'test_process_policy_v46.py' -v`, `python -m unittest discover -s tests -p 'test_retrieval_v45.py' -v`, `python -m unittest discover -s tests -p 'test_analysis_checkpoint_v38.py' -v`, `node tests/test_processes_ui.cjs`, `node tests/test_retrieval_ui_v45.cjs`, `node tests/test_process_media_v38.cjs`.
+
+---
+
+## October 16, 2026 — v42 root evaluation gap and critical-moment attribution
+
+- The explanation system distinguishes **where the evaluated mistake is made** (the training decision's before/after centipawn gap) from the **first move in the saved continuation that demonstrates its cost**. A PV realization is not a second centipawn swing: Stockfish already anticipates the reply in its root evaluation.
+- Deep-confirmed training positions now save `critical_events_json`: an evidence-versioned, root-aligned first material realization from the best and played Stockfish lines, including its ply, SAN, victim square, and saved root score difference. It does not add new engine requests or alter evaluated positions.
+- Priority is given to an early concrete loss (e.g., after a player hangs a bishop on d4, `...Qxd4` wins it) over a later incidental fork or positional-pressure description. Immediate clean wins, mating responses, and forced check defenses remain respected.
+- Only claim material loss when both valid PV prefixes allow comparison, a meaningful root eval gap exists, the lines show a net material difference, and the loss is not simply an equal recapture/exchange. Missing/inconclusive PVs generate no claim.
+- Primary motif selection on newly analyzed or metadata-refreshed positions can be corrected to **Protect Loose Pieces** when the early material loss is demonstrated and doesn't conflict with mate or a directly winning root capture.
+- Older saved positions are compatible. **Refresh metadata** reconstructs these critical moments and coaching copy from the existing evaluations/PVs, without downloading games or invoking Stockfish. No learned status or attempts are changed. Some old positions lack sufficiently detailed PVs; those need evaluation to gain new evidence.
+- Regression cases: `python -m unittest tests.test_critical_moments_v42 -v` (requires `python-chess`). SQL placeholder/schema and JS trainer checks can be validated independently.
+
+
 ## October 15, 2026 — v38 resumable analysis and compact Process controls
 
 - Process now uses accessible Play (`▶`), Pause (`Ⅱ`) and Stop (`■`) controls with tooltips. Play on a paused job resumes, while Play after Stop or completion explicitly starts a fresh analysis.
@@ -781,3 +803,70 @@ The coaching version has been bumped for metadata refresh. Existing evaluations,
 positions, lesson history, and learned status are retained. Test cases are in
 `tests/test_root_explanation_v40.py` (requires python-chess); JS tests and Python
 source compilation do not require a local Stockfish binary.
+
+
+## v41 — Dual chessboard input restored
+
+- Mouse/trackpad and touch users can **drag a piece to a destination square** or **click/tap a piece and then click/tap its destination**. Both routes use the same legal-move validation and promotion selection as before.
+- Replaced fragile HTML5 drag events on Font Awesome `<i>` elements with pointer gestures (6px mouse / 10px touch threshold), a lightweight moving-piece preview, and release-point hit testing. The gesture leaves normal click events intact.
+- Cancels pending gestures when a position or board frame changes, and avoids forcibly focusing the board at pointerdown on a piece. Incorrect drops are ignored.
+- Added an isolated Chromium browser test in `tests/test_dual_board_input_v41.py` covering mouse drag, click-to-move, touch drag, and invalid drop recovery. It requires Playwright and a local Chromium binary. The full Flask/Stockfish integration has not been run in this build environment.
+
+### v43 — Context-aware explanation evidence and reply probing
+
+Deep analysis now stores `explanatory_lines_json` for **up to three distinct
+explanatory continuations** (recommended, played, and a tested opponent reply
+or independently ranked alternative). Each line includes root-aligned legal
+moves, SAN, ply distance, the solver/opponent perspective, score provenance,
+and observed effects such as captures, checks/checkmate, pins, discovered lines,
+forks supported by the PV, exposure of loose pieces, pawn promotion, passed
+pawns, trapped pieces, and defensive threat neutralization. The record also
+stores a board-context snapshot and the root evaluation comparison. Observed
+features are **not** automatically considered a forced tactical win.
+
+A configurable extra Stockfish probe runs **only after deep confirmation** of
+a candidate. Settings → Passes → **Test explanatory replies** controls this;
+**Reply-probe time budget** defaults to 18% of the candidate's deep-search
+budget *in addition* to the original confirmation work. The probe compares
+two opponent replies after the played move; it stores a distinct response when
+available. No extra engine work occurs on lesson tiles, opening tiles or
+Refresh metadata. Probe failure preserves the original deep evaluation.
+
+The versioned `critical_events_json` now considers nonmaterial realizations
+in the opponent's demonstrated response and checks whether a second saved
+engine reply supports the same event. An immediate verified material loss
+remains preferable to a remote geometric pattern; sampled checks, forks, pins,
+discoveries and king-danger outcomes can be the central explanation when
+material doesn't suffice. Positive-move lessons can use a saved scored
+alternative for the same comparison. Both critical evidence and lesson labels
+are regenerated by Refresh metadata using the stored evaluations and PVs.
+Previously saved reply probes remain available through refresh; older positions
+need deep analysis to gain a new reply probe.
+
+### v45 — retrieval → analysis → training-ready lifecycle
+
+**Creating a new game list** now starts a separate Retrieval process first. It
+streams Lichess PGN to an unpublished `.part` file, tracks bytes downloaded in
+`retrieval_processes`, and atomically saves the completed batch. Retrieval
+then queues and automatically starts the existing checkpointed Stockfish
+Analysis process. Existing saved game lists are **never re-downloaded**.
+
+On Home, a list reports *Retrieving games* then *Analyzing games*. Train,
+Lessons, and Openings are unavailable until the database contains its first
+training position; they unlock immediately when a position is committed, even
+if deeper analysis is still running. The Train action becomes white again.
+The Home view polls current process state without a page reload; direct routes
+also redirect to Process when there are no training positions. A completed
+analysis with no positions remains untrainable with a specific message.
+
+Process shows independent Retrieval, Analysis, and Metadata refresh cards.
+Retrieval exposes downloaded bytes (and percentage when Lichess supplies a
+Content-Length). A failed or stopped new retrieval can be explicitly retried
+on Process; it will not publish or analyze a partial PGN. The retrieval worker
+checks persisted cancellation state between streamed chunks. Existing lists
+show "Saved" retrieval and retain their usual analysis/refresh controls.
+
+On application restart, interrupted new retrievals are marked paused and may
+be retried explicitly from Process. Analysis does not start automatically on
+application boot; only successful new-list retrieval triggers the handoff.
+All changes are additive migrations; no new Python dependencies are required.

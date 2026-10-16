@@ -169,5 +169,6 @@ window.TRAINER_LISTING_SCOPE = {{ listing_scope|tojson }};
 window.TRAINER_RATING_MIN = {{ rating_min|tojson }};
 window.TRAINER_RATING_MAX = {{ rating_max|tojson }};
 </script>
+<script src="{{ url_for('static', filename='board_pointer_drag.js') }}"></script>
 <script src="{{ url_for('static', filename='trainer.js') }}"></script>
 {% endblock %}

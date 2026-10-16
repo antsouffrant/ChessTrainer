@@ -5,10 +5,10 @@
   <header class="lesson-hero glass">
     <div><div class="eyebrow"><i class="fa-solid fa-gears"></i> BACKGROUND WORK</div>
       <h1>Process</h1>
-      <p class="lede">Manage Stockfish evaluations and metadata refreshes for each game list. One database-intensive task runs at a time; training can continue while work proceeds.</p>
+      <p class="lede">Monitor game retrieval, Stockfish evaluation, and metadata refresh for each game list. One database-intensive task runs at a time; training can continue while work proceeds.</p>
     </div>
   </header>
-  <div class="process-legend glass">Analysis uses the saved game batch and Stockfish. Refresh rebuilds lesson motifs, opening labels, difficulty estimates, and explanations using already stored information. Pause or stop a task without losing learned positions.</div>
+  <div class="process-legend glass">Retrieval downloads games once when a new list is created. Successful retrieval automatically starts analysis. Analysis uses the saved game batch and Stockfish. Refresh rebuilds lesson motifs, opening labels, difficulty estimates, and explanations using already stored information. Pause or stop a task without losing learned positions.</div>
   <div class="process-error hidden" id="process-feedback" role="alert"></div>
   <div id="process-list" class="process-list" aria-live="polite"><div class="glass process-card"><p>Loading process status…</p></div></div>
 </section>

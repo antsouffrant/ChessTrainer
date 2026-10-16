@@ -2827,3 +2827,60 @@ body.theme-wood .mini-square.dark { background: #7b4d2e; }
   outline: 2px solid #8ec7a9;
   outline-offset: 3px;
 }
+
+/* Dual board input: mouse/pen/touch drag, and click-piece/click-square. */
+.chessboard .piece {
+  -webkit-user-drag: none;
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: none;
+}
+.chessboard.is-interactive .piece { cursor: grab; }
+.chessboard.is-interactive.piece-dragging .piece { cursor: grabbing; }
+.dragging-piece-ghost {
+  position: fixed !important;
+  z-index: 10000 !important;
+  display: grid;
+  place-items: center;
+  margin: 0;
+  pointer-events: none;
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: none;
+  cursor: grabbing;
+  opacity: .92;
+  line-height: 1;
+}
+
+/* v45: training actions are visually and functionally locked until a position exists. */
+.game-list-index-links .game-list-training-action[aria-disabled="true"] {
+  opacity: .36; filter: grayscale(1); color: var(--muted); cursor: not-allowed;
+  background: rgba(130, 138, 147, .15); border-color: rgba(130, 138, 147, .23);
+  pointer-events: none;
+}
+.game-list-index-links:not(.game-list-ready) .game-list-train {
+  color: var(--muted); background: rgba(130, 138, 147, .15);
+}
+.game-list-status { font-size: .82rem; color: var(--muted); }
+.game-list-index-item[data-home-state="ready"] .game-list-status { color: #8acba7; }
+.process-task-grid { grid-template-columns: repeat(3,minmax(0,1fr)); }
+.process-retrieval-legacy { color: var(--muted); }
+.process-progress.indeterminate span { width: 35% !important; animation: retrieval-progress 2s ease-in-out infinite alternate; }
+@keyframes retrieval-progress { from { transform: translateX(-100%); } to { transform: translateX(290%); } }
+@media(max-width:900px) { .process-task-grid { grid-template-columns: 1fr; } }
+
+/* v46: one process transport for each game list, plus discrete stage indicators. */
+.process-card-meta { margin: .35rem 0 0; color: var(--muted); font-size: .86rem; }
+.process-card-summary { display:flex; align-items:center; gap:.8rem; flex-wrap:wrap; }
+.process-task-live { border-color:rgba(101,190,156,.65); background:rgba(101,190,156,.045); }
+.process-control-bar { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap;
+  gap:1rem; margin-top:1rem; padding-top:1rem; border-top:1px solid var(--line); }
+.process-control-context { display:flex; flex-direction:column; gap:.22rem; }
+.process-control-context strong { font-size:1rem; }
+.process-control-context small { font-size:.78rem; color:var(--muted); }
+.process-control-bar .process-task-actions,.process-operation-actions {display:flex; align-items:center;flex-wrap:wrap; gap:.5rem;}
+.process-control-bar .process-media-button { display:inline-flex; align-items:center; justify-content:center;
+  gap:.5rem; width:auto; flex:0 1 auto; min-width:75px; min-height:42px; padding:.5rem .7rem; }
+.process-control-bar button:disabled,.game-list-index-links button:disabled { opacity:.32; filter:grayscale(1);cursor:not-allowed;pointer-events:none; }
+.process-operation-actions button {min-height:42px;}
+@media (max-width:750px) { .process-control-bar {align-items:stretch; flex-direction:column;} }
