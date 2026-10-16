@@ -1,3 +1,8 @@
-data/*
-!data/*.json
 __pycache__/
+*.pyc
+.venv/
+venv/
+data/chess_trainer.sqlite3
+data/chess_trainer.sqlite3-shm
+data/chess_trainer.sqlite3-wal
+stockfish/

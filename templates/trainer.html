@@ -1,0 +1,173 @@
+{% extends 'base.html' %}
+{% block title %}Trainer · Personal Chess Trainer{% endblock %}
+{% block content %}
+<section class="trainer-layout" id="trainer-root" data-job-id="{{ job_id }}">
+  <div class="lesson-training-progress glass" id="lesson-training-progress" aria-label="Current playlist learning progress">
+    <div class="lesson-training-progress-heading">
+      <div class="lesson-training-progress-title">
+        <span class="lesson-progress-eyebrow" id="lesson-progress-heading">{{ 'Opening progress' if opening else 'Lesson progress' if lesson else 'Playlist progress' }}</span>
+        {% if lesson %}<span class="lesson-progress-name">{{ lesson.name }}</span>{% elif opening %}<span class="lesson-progress-name">{{ opening.name }}</span>{% endif %}
+      </div>
+      <div class="lesson-training-progress-summary" aria-live="polite">
+        <strong id="lesson-progress-count">Loading positions…</strong>
+        <span id="lesson-progress-remaining"></span>
+      </div>
+    </div>
+    <div class="lesson-progress-track" id="lesson-progress-track" role="progressbar" aria-label="Positions learned in the current playlist" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+      <span id="lesson-progress-fill"></span>
+    </div>
+  </div>
+  <div class="trainer-main glass{% if coach_enabled %} with-coach{% endif %}">
+    <div class="board-column">
+      <div class="board-top-rim" aria-label="Current training position details">
+        <div class="history-position-meta"><span id="position-title">—</span><span id="date-chip"></span><span id="move-chip"></span></div>
+        <div id="history-status" class="history-status">Game history</div>
+      </div>
+      <div class="board-wrap">
+        <div id="chessboard" class="chessboard" tabindex="0" aria-label="Interactive chess board"></div>
+        <svg id="engine-arrow" class="engine-arrow hidden" aria-hidden="true">
+          <polygon id="engine-arrow-shape" points="0,0 0,0 0,0 0,0 0,0 0,0 0,0"></polygon>
+        </svg>
+        <div id="board-feedback-mark" class="board-feedback-mark hidden" aria-live="polite"></div>
+      </div>
+
+      <div class="history-controls">
+        <button id="history-back" class="history-button" type="button" title="Previous move">←</button>
+        <div class="board-footer-actions">
+          <div class="game-share" id="game-share">
+            <button id="game-share-toggle" class="game-share-trigger secondary-button" type="button"
+                    aria-haspopup="true" aria-expanded="false" aria-controls="game-share-menu"
+                    title="Export the original game PGN or share its Lichess link">↗ Share</button>
+            <div id="game-share-menu" class="game-share-menu" hidden>
+              <div class="game-share-heading">Share original game</div>
+              <button id="share-copy-pgn" type="button" disabled>Copy PGN</button>
+              <a id="share-download-pgn" href="#" aria-disabled="true" class="unavailable">Download PGN</a>
+              <button id="share-copy-lichess" type="button" disabled>Copy Lichess link</button>
+              <a id="share-open-lichess" href="#" target="_blank" rel="noopener noreferrer"
+                 aria-disabled="true" class="unavailable">Open on Lichess ↗</a>
+              <p id="game-share-message" class="game-share-message" role="status" aria-live="polite"></p>
+            </div>
+          </div>
+          <label id="engine-toggle-wrap" class="engine-toggle hidden" title="Available after solving. Positive favors White; negative favors Black.">
+            <input id="engine-toggle" type="checkbox" disabled>
+            <span>Stockfish</span>
+            <strong id="engine-eval">—</strong>
+          </label>
+        </div>
+        <button id="history-forward" class="history-button" type="button" title="Next move">→</button>
+      </div>
+
+    </div>
+
+    <div class="board-moves" aria-label="Game moves">
+      <div id="pgn-moves" class="pgn-moves" tabindex="0"><span class="muted">Loading game history…</span></div>
+    </div>
+
+    <aside class="side-panel">
+      <div class="task-intro-block">
+        <div class="task-heading-row">
+          <div>
+            {% if opening %}<div class="eyebrow">OPENING PLAYLIST</div><div class="task-lesson-name">{{ opening.name }}</div>{% elif lesson %}<div class="eyebrow">LESSON PLAYLIST · {{ lesson.family|upper }}{% if lesson.source != 'built_in' %} · PERSONAL{% endif %}</div>
+            <div class="task-lesson-name">{{ lesson.name }}</div>{% else %}<div class="eyebrow">YOUR TASK</div>{% endif %}
+            <h2 id="task-heading">Find a strong move.</h2>
+          </div>
+          {% if opening %}<a class="task-lesson-back secondary-button" href="{{ url_for('opening_detail', job_id=job_id, opening_key=opening.key) }}">← Opening</a>
+          {% elif lesson %}
+          <a class="task-lesson-back secondary-button" href="{{ url_for('lesson_detail', job_id=job_id, concept_key=lesson.key) }}">← Lesson</a>
+          {% else %}
+          <a class="task-lesson-back secondary-button" href="{{ url_for('lessons', job_id=job_id) }}">← Lessons</a>
+          {% endif %}
+        </div>
+        <div id="opponent-move" class="opponent-move hidden"></div>
+        <button id="hint-toggle" class="hint-toggle secondary-button" type="button">Show hint</button>
+        <p id="coach-text" class="coach-text">Watch the last move, then find a strong response.</p>
+        <div id="category" class="eyebrow result-category hidden">TRAINING POSITION</div>
+      </div>
+
+      <div id="feedback" class="feedback neutral hidden" aria-live="polite"></div>
+
+      <div id="solution" class="solution hidden">
+        <div><span>Engine preference</span><strong id="best-move"></strong></div>
+        <div><span>Evaluation · White + / Black −</span><strong id="evaluation"></strong></div>
+        <div class="game-moves-result"><span>Your game moves</span><div id="played-moves-list" class="played-moves-list"></div></div>
+        <div><span title="Provisional heuristic, not a calibrated Elo rating">Estimated puzzle rating · provisional</span><strong id="puzzle-rating">—</strong></div>
+        <div class="concept-result-row"><span>Learning motifs</span><span id="lesson-concepts" class="lesson-concepts hidden"></span></div>
+      </div>
+
+      <div id="solved-position-controls" class="solved-position-controls hidden" aria-label="Solved position controls">
+        <button id="refresh-position-button" class="secondary-button solved-position-button" type="button" title="Reset this puzzle to unsolved">↻ Reset puzzle</button>
+        <label id="learned-toggle-wrap" class="learned-toggle solved-position-button solved-learned-control hidden" title="Uncheck to put this position back into the training mix while keeping the current review session active">
+          <input type="checkbox" id="learned-checkbox">
+          <span>Position learned</span>
+        </label>
+      </div>
+    </aside>
+
+    <div class="trainer-position-controls" aria-label="Training position navigation">
+
+        <button id="previous-button" class="secondary-button trainer-position-button">← Last position</button>
+        <button id="next-button" class="primary-button trainer-position-button">Next position →</button>
+        <span id="counter" class="trainer-position-count" aria-live="polite"></span>
+      </div>
+
+    {% if coach_enabled %}
+    <aside class="coach-panel">
+      <div class="coach-panel-header">
+        <div>
+          <div class="eyebrow">ADAPTIVE COACH</div>
+          <h2>Talk through the position</h2>
+        </div>
+        <span class="coach-learning-badge" title="Verified ideas can become personal learning motifs">learns</span>
+      </div>
+      <p class="coach-panel-intro">Ask why a move works, test a continuation, or explore a learning motif. Stockfish and the same explanation engine used by the puzzle will help compare the possibilities. After solving, the coach may suggest a relevant classic or a strong move from your own games.</p>
+      <form id="coach-form" class="coach-form coach-form-primary">
+        <textarea id="coach-input" rows="3" maxlength="2000" placeholder="Ask about a move, line, or idea…"></textarea>
+        <div class="coach-form-footer">
+          <small id="coach-mode-note">Candidate moves can be tested; the engine preference stays hidden until solve.</small>
+          <button id="coach-send" class="primary-button" type="submit">Send</button>
+        </div>
+      </form>
+      <div id="coach-concept-event" class="coach-concept-event hidden"></div>
+      <div id="coach-chat" class="coach-chat" aria-live="polite">
+        <div class="coach-empty">Try: <em>“What about d6?”</em>, <em>“What if the knight blocks?”</em>, or <em>“I thought taking that pawn gives my king f2.”</em></div>
+      </div>
+    </aside>
+    {% endif %}
+  </div>
+
+</section>
+
+<aside id="analysis-hud" class="analysis-hud glass collapsed" aria-live="polite">
+  <button id="hud-toggle" class="hud-toggle" type="button" aria-expanded="false" aria-controls="hud-body" aria-label="Expand Process dashboard" title="Show Process dashboard">
+    <svg viewBox="0 0 24 24" width="21" height="21" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 3v18h18"/><path d="m7 16 4-5 3 2 5-7"/></svg>
+  </button>
+  <div id="hud-body" class="hud-body" hidden>
+    <div class="hud-header"><span id="hud-dot" class="hud-dot"></span><strong id="hud-status">Process · Loading</strong></div>
+    <p id="hud-idle-copy" class="hud-idle-copy hidden">No active process for this game list.</p>
+    <div id="hud-metrics" class="hud-metrics" aria-label="Metrics for the active process"></div>
+    <div id="hud-progress" class="hud-progress" aria-label="Current process progress">
+      <div class="hud-progress-copy"><span id="hud-cycle-label">Current process</span><strong id="hud-cycle-percent">—</strong></div>
+      <div class="hud-progress-track" id="hud-cycle-track" role="progressbar" aria-label="Current process progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+        <span id="hud-progress-bar"></span>
+      </div>
+      <p class="hud-cycle-detail" id="hud-cycle-detail">Loading progress…</p>
+    </div>
+    <div class="hud-actions"><a id="hud-lessons-link" class="hud-lessons-link" href="{{ url_for('processes', job_id=job_id) }}">Manage processes →</a></div>
+  </div>
+</aside>
+
+<script>
+window.TRAINER_JOB_ID = {{ job_id }};
+window.TRAINER_CONCEPT = {{ concept_key|tojson }};
+window.TRAINER_OPENING = {{ opening_key|tojson }};
+window.TRAINER_VARIATION = {{ opening_variation|tojson }};
+window.TRAINER_CLASSICS = {{ historical_references|tojson }};
+window.TRAINER_POSITION_ID = {{ selected_position_id|tojson }};
+window.TRAINER_LEARNING_MODE = {{ learning_mode|tojson }};
+window.TRAINER_SORT = {{ sort_key|tojson }};
+window.TRAINER_LISTING_SCOPE = {{ listing_scope|tojson }};
+window.TRAINER_RATING_MIN = {{ rating_min|tojson }};
+window.TRAINER_RATING_MAX = {{ rating_max|tojson }};
+</script>
+<script src="{{ url_for('static', filename='trainer.js') }}"></script>
+{% endblock %}

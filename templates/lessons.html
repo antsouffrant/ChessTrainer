@@ -1,0 +1,45 @@
+{% extends 'base.html' %}
+{% block title %}Lessons · Personal Chess Trainer{% endblock %}
+{% block content %}
+<section class="lesson-page" id="lesson-root" data-job-id="{{ job_id }}">
+  <header class="lesson-hero glass">
+    <div>
+      {% if job.source_type == 'opposition' %}
+      <div class="eyebrow"><i class="fa-solid fa-crosshairs"></i> OPPOSITION RESEARCH · {{ job.source_username }}</div>
+      <h1>Prepare for {{ job.source_username }}.</h1>
+      <p class="lede">A standalone scouting curriculum built from concrete opportunities created by this opponent's mistakes. These lessons and progress remain separate from your personal curriculum.</p>
+      {% else %}
+      <div class="eyebrow"><i class="fa-solid fa-user"></i> PERSONALIZED LESSONS</div>
+      <h1>Train the patterns that recur in your games.</h1>
+      <p class="lede">Mistakes, missed opportunities, excellent moves, and brilliant ideas all appear in the same lesson taxonomy when the active game-list settings identify them.</p>
+      {% endif %}
+    </div>
+    <div class="lesson-actions">
+      <a class="secondary-button" href="{{ url_for('processes', job_id=job_id) }}"><i class="fa-solid fa-gears"></i> Process</a>
+      <a id="resume-lesson-button" class="secondary-button hidden" href="#">Resume lesson</a>
+      <a class="primary-button" href="{{ url_for('trainer', job_id=job_id, listing=1, new_playlist=1) }}">Train active positions</a>
+    </div>
+  </header>
+
+
+  <section class="lesson-status glass" aria-live="polite">
+    <div><span id="lesson-total">0</span><small>Total games</small></div>
+    <div><span id="lesson-screened">0</span><small>Games screened</small></div>
+    <div><span id="lesson-analyzed">0</span><small>Positions analyzed</small></div>
+    <div><span id="lesson-training">0</span><small>Training positions</small></div>
+    <div><span id="lesson-learned">0</span><small>Positions learned</small></div>
+    <div><span id="lesson-learned-pct">0%</span><small>% learned</small></div>
+    <div class="lesson-status-text"><span id="lesson-dot" class="hud-dot"></span><strong id="lesson-status-label">Loading…</strong></div>
+  </section>
+
+  <section id="lesson-list" class="lesson-grid">
+    <div class="lesson-empty glass">
+      <h2>Building lessons…</h2>
+      <p class="muted">Lessons will appear and update here as Stockfish confirms new training positions.</p>
+    </div>
+  </section>
+</section>
+
+<script>window.LESSON_JOB_ID = {{ job_id }};</script>
+<script src="{{ url_for('static', filename='lessons.js') }}"></script>
+{% endblock %}

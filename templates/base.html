@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Personal Chess Trainer{% endblock %}</title>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.7.2/css/all.min.css">
+  <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+</head>
+<body class="{% if ui_settings.get('wooden_board_enabled') %}theme-wood{% endif %}" data-server-coordinates="{{ 1 if ui_settings.get('show_square_coordinates') else 0 }}" data-server-wood-theme="{{ 1 if ui_settings.get('wooden_board_enabled') else 0 }}">
+  <div class="board-bg" aria-hidden="true"></div>
+  <nav class="app-nav glass" aria-label="Application navigation">
+    <button class="app-nav-back" type="button" data-browser-back aria-label="Back" title="Back"><i class="fa-solid fa-arrow-left"></i></button>
+    <div class="trainer-brand-anchor">
+      <button class="app-nav-brand app-brand-button" type="button" id="about-trainer-open" aria-expanded="false" aria-haspopup="true" aria-controls="about-trainer-dialog" title="About the Chess Trainer"><i class="fa-solid fa-chess-knight"></i><span>Trainer</span><i class="fa-solid fa-chevron-down brand-info-icon"></i></button>
+      <section id="about-trainer-dialog" class="about-trainer-dropdown" role="region" aria-labelledby="about-trainer-title" hidden>
+        <div class="about-trainer-header"><h2 id="about-trainer-title"><i class="fa-solid fa-chess-knight"></i> Personal Chess Trainer</h2><button type="button" id="about-trainer-close" aria-label="Close introduction">×</button></div>
+        <p>Turn your own chess games into a personalized course in better decision-making.</p>
+        <h3>How it works</h3>
+        <ol><li><b>Import games</b> from Lichess or PGN and choose analysis settings.</li><li><b>Explore openings</b> by opening family, variation, and move number.</li><li><b>Explore lessons</b> by the most important teachable concept in each position; secondary motifs are still shown after solving.</li><li><b>Train</b> by watching the preceding move and finding a strong response. Request hints, analyze variations, and mark positions learned.</li><li><b>Track progress</b> and resume a saved lesson playlist.</li></ol>
+        <p class="muted">Learning modes describe performance; learning motifs describe the main idea. Estimated difficulty ratings are provisional heuristics, not validated Elo.</p>
+        <button class="primary-button" type="button" id="about-trainer-done">Start training</button>
+      </section>
+    </div>
+    <div class="app-nav-links">
+      <a href="{{ url_for('index') }}"><i class="fa-solid fa-house"></i><span>Home</span></a>
+      <a data-resume-training href="{% if nav_job_id %}{{ url_for('trainer', job_id=nav_job_id) }}{% else %}{{ url_for('setup') }}{% endif %}"><i class="fa-solid fa-chess-board"></i><span>Training</span></a>
+      <a data-resume-lesson href="{% if nav_job_id %}{{ url_for('lessons', job_id=nav_job_id) }}{% else %}{{ url_for('index') }}{% endif %}"><i class="fa-solid fa-layer-group"></i><span>Lessons</span></a>
+      <a href="{% if nav_job_id %}{{ url_for('openings', job_id=nav_job_id) }}{% else %}{{ url_for('index') }}{% endif %}"><i class="fa-solid fa-book-open"></i><span>Openings</span></a>
+      <a href="{{ url_for('processes') }}"><i class="fa-solid fa-gears"></i><span>Process</span></a>
+      <a href="{{ url_for('settings_page', job_id=nav_job_id) if nav_job_id else url_for('settings_page') }}"><i class="fa-solid fa-sliders"></i><span>Settings</span></a>
+    </div>
+  </nav>
+  <main class="shell">
+    {% block content %}{% endblock %}
+  </main>
+  <script>
+  window.pctFormatCount = function(value) {
+    const number = Number(value ?? 0);
+    return Number.isFinite(number) ? new Intl.NumberFormat('en-US', {maximumFractionDigits: 0}).format(number) : '0';
+  };
+
+  function syncAppearanceFromBrowser() {
+    const stored = window.localStorage.getItem('pct_wooden_board_enabled');
+    const enabled = stored === null
+      ? document.body.dataset.serverWoodTheme === '1'
+      : stored === '1';
+    document.body.classList.toggle('theme-wood', enabled);
+  }
+  function syncCoordinates() {
+    const stored = window.localStorage.getItem('pct_show_square_coordinates');
+    const enabled = stored === null ? document.body.dataset.serverCoordinates === '1' : stored === '1';
+    document.body.classList.toggle('show-coordinates', enabled);
+  }
+  syncCoordinates();
+  syncAppearanceFromBrowser();
+  window.addEventListener('pageshow', () => { syncAppearanceFromBrowser(); syncCoordinates(); });
+  window.addEventListener('storage', event => {
+    if (event.key === 'pct_wooden_board_enabled') syncAppearanceFromBrowser();
+    if (event.key === 'pct_show_square_coordinates') syncCoordinates();
+  });
+
+  const aboutDialog = document.getElementById('about-trainer-dialog');
+  const aboutTrigger = document.getElementById('about-trainer-open');
+  function setAboutOpen(open) {
+    if (!aboutDialog || !aboutTrigger) return;
+    aboutDialog.hidden = !open;
+    aboutTrigger.setAttribute('aria-expanded', String(open));
+  }
+  aboutTrigger?.addEventListener('click', () => setAboutOpen(aboutDialog.hidden));
+  for (const id of ['about-trainer-close', 'about-trainer-done']) document.getElementById(id)?.addEventListener('click', () => setAboutOpen(false));
+  document.addEventListener('click', event => {
+    if (aboutDialog && !aboutDialog.hidden && !event.target.closest('.trainer-brand-anchor')) setAboutOpen(false);
+  });
+  document.addEventListener('keydown', event => {
+    if (event.key === 'Escape' && aboutDialog && !aboutDialog.hidden) {
+      setAboutOpen(false); aboutTrigger?.focus();
+    }
+  });
+  const activeJob = {{ nav_job_id|tojson }};
+  if (activeJob) {
+    const training = localStorage.getItem(`pct-training-${activeJob}`);
+    if (training && training.startsWith(`/trainer/${activeJob}`)) document.querySelector('[data-resume-training]').href = training;
+  }
+  document.addEventListener('click', (event) => {
+    const back = event.target.closest('[data-browser-back]');
+    if (!back) return;
+    event.preventDefault();
+    if (window.history.length > 1) window.history.back();
+    else window.location.href = back.getAttribute('href') || '/';
+  });
+  </script>
+<script src="{{ url_for('static', filename='process_launch.js') }}"></script>
+</body>
+</html>

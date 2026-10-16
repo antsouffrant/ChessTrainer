@@ -1,0 +1,88 @@
+{% extends 'base.html' %}
+{% block title %}Analysis Setup · Personal Chess Trainer{% endblock %}
+{% block content %}
+<section class="panel glass narrow">
+  <div class="eyebrow">ANALYSIS SETUP</div>
+  <h1>Choose what to study</h1>
+  <p class="lede">Connected to Lichess as <strong>{{ username }}</strong>. The first pass uses a per-game time budget; only promising mistakes receive the deeper confirmation budget. Depending on your global settings, the app can repeat the same game set with higher Stockfish depth caps so new positions and refined lesson labels emerge in the background.</p>
+
+  {% if error %}<div class="settings-notice glass">{{ error }}</div>{% endif %}
+  <form method="post" class="setup-form" id="analysis-setup-form">
+    <fieldset>
+      <legend>Game list</legend>
+      <div class="choice-grid two learning-source-grid">
+        <label class="choice source-choice"><input type="radio" name="analysis_source" value="self" checked><span><i class="fa-solid fa-user"></i> My games<small>Build or extend your personal curriculum.</small></span></label>
+        <label class="choice source-choice opposition-source"><input type="radio" name="analysis_source" value="opposition"><span><i class="fa-solid fa-crosshairs"></i> Opposition research<small>Create a standalone scouting curriculum for another Lichess player.</small></span></label>
+      </div>
+      <div id="opposition-username-wrap" class="opposition-username-wrap hidden">
+        <label><span class="opposition-field-label"><i class="fa-solid fa-crosshairs"></i> Opponent Lichess username <em>OPPOSITION</em></span>
+          <input type="text" name="opponent_username" placeholder="e.g. DrNykterstein" autocomplete="off">
+        </label>
+        <p class="hint">Opposition research is always its own game list. It studies confirmed mistakes by this player and trains you to find the strongest punishment, with separate lessons and progress.</p>
+      </div>
+    </fieldset>
+
+    <fieldset id="personal-learning-modes">
+      <legend>Learning modes</legend>
+      <div class="choice-grid two">
+        <label class="choice"><input type="checkbox" name="learning_modes" value="mistakes" {% if 'mistakes' in default_modes %}checked{% endif %}><span>Consequential mistakes<small>Major errors that lose an advantage or change the outcome.</small></span></label>
+        <label class="choice"><input type="checkbox" name="learning_modes" value="blunders" {% if 'blunders' in default_modes %}checked{% endif %}><span>Smaller blunders / missed opportunities<small>Less consequential errors and missed improvements.</small></span></label>
+        <label class="choice"><input type="checkbox" name="learning_modes" value="excellent" {% if 'excellent' in default_modes %}checked{% endif %}><span>Correct / excellent moves<small>Reinforce strong moves you found correctly, including precise forced continuations.</small></span></label>
+        <label class="choice"><input type="checkbox" name="learning_modes" value="brilliant" {% if 'brilliant' in default_modes %}checked{% endif %}><span>Brilliant / creative<small>Highly unique resources, sacrifices, and narrow ideas.</small></span></label>
+      </div>
+      <p class="hint">Positive modes are deliberately selective and separately capped so routine moves in already-winning positions do not overwhelm the curriculum.</p>
+    </fieldset>
+
+    <fieldset>
+      <legend>Date range</legend>
+      <div class="choice-grid four">
+        <label class="choice"><input type="radio" name="date_range" value="week"><span>Last week</span></label>
+        <label class="choice"><input type="radio" name="date_range" value="month" checked><span>Last month</span></label>
+        <label class="choice"><input type="radio" name="date_range" value="90days"><span>Last 90 days</span></label>
+        <label class="choice"><input type="radio" name="date_range" value="year"><span>Last year</span></label>
+      </div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Game type</legend>
+      <div class="choice-grid four">
+        <label class="choice"><input type="checkbox" name="game_types" value="classical"><span>Classical</span></label>
+        <label class="choice"><input type="checkbox" name="game_types" value="rapid"><span>Rapid</span></label>
+        <label class="choice"><input type="checkbox" name="game_types" value="blitz" checked><span>Blitz</span></label>
+        <label class="choice"><input type="checkbox" name="game_types" value="all"><span>All</span></label>
+      </div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Stockfish time budgets</legend>
+      <div class="depth-grid">
+        <label>Screening per game
+          <div class="number-with-unit"><input type="number" name="screen_seconds" min="0.1" max="120" step="0.1" value="{{ settings.screen_seconds }}"><span>sec</span></div>
+        </label>
+        <label>Deep confirmation per candidate
+          <div class="number-with-unit"><input type="number" name="deep_seconds" min="0.1" max="300" step="any" value="{{ settings.deep_seconds }}"><span>sec</span></div>
+        </label>
+      </div>
+      <p class="hint">These are per-run overrides of your global defaults. Current base depths: {{ settings.base_screen_depth }}/{{ settings.base_deep_depth }}. {% if settings.progressive_depths_enabled %}Progressive refinement is enabled for up to {{ settings.max_passes }} passes, increasing depth by {{ settings.screen_depth_step }}/{{ settings.deep_depth_step }} each pass.{% else %}Progressive refinement is disabled; this job will run one pass.{% endif %}</p>
+      <a class="inline-settings-link" href="{{ url_for('settings_page') }}">Configure all analysis settings →</a>
+    </fieldset>
+
+    <button class="primary-button full" type="submit">Analyze games</button>
+  </form>
+</section>
+<script>
+(() => {
+  const radios = [...document.querySelectorAll('input[name="analysis_source"]')];
+  const opposition = document.getElementById('opposition-username-wrap');
+  const personalModes = document.getElementById('personal-learning-modes');
+  const sync = () => {
+    const source = radios.find(r => r.checked)?.value || 'self';
+    const isOpposition = source === 'opposition';
+    opposition?.classList.toggle('hidden', !isOpposition);
+    personalModes?.classList.toggle('hidden', isOpposition);
+  };
+  radios.forEach(r => r.addEventListener('change', sync));
+  sync();
+})();
+</script>
+{% endblock %}

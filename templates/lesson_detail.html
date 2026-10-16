@@ -1,0 +1,120 @@
+{% extends 'base.html' %}
+{% block title %}{{ lesson.name }} · Personal Chess Trainer{% endblock %}
+{% block content %}
+<section class="lesson-detail-page" id="lesson-detail-root" data-job-id="{{ job_id }}" data-concept-key="{{ lesson.key }}">
+  <header class="lesson-detail-hero glass">
+    <div class="lesson-detail-copy">
+      <a class="lesson-detail-back" href="{{ url_for('lessons', job_id=job_id) }}">← All lessons</a>
+      <div class="lesson-family {% if lesson.source != 'built_in' %}personal{% endif %}">{{ lesson.family }}{% if lesson.source != 'built_in' %} · PERSONAL{% endif %}</div>
+      <h1>{{ lesson.name }}</h1>
+      <p class="lede">{{ lesson.description }}</p>
+    </div>
+    <div class="lesson-detail-actions">
+      <div class="lesson-actions-buttons">
+        <span id="position-save-note" class="lesson-save-note" role="status" aria-live="polite">No unsaved changes.</span>
+        <button id="position-save-progress" class="primary-button" type="button" disabled title="Save learned and unlearned position changes for this lesson">Save lesson</button>
+        <button id="detail-reset-lesson" class="secondary-button" type="button">Reset lesson</button>
+      </div>
+    </div>
+  </header>
+
+  <section class="lesson-completion glass" aria-live="polite">
+    <div class="lesson-completion-copy">
+      <div>
+        <div class="eyebrow">LESSON PROGRESS</div>
+        <strong id="detail-completion-label">0% complete</strong>
+      </div>
+      <span id="detail-completion-count">0 of 0 positions learned</span>
+    </div>
+    <div class="lesson-completion-track" role="progressbar" aria-label="Lesson completion" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+      <span id="detail-completion-bar"></span>
+    </div>
+  </section>
+
+  <section class="lesson-detail-summary glass" aria-live="polite">
+    <div><strong id="detail-position-count">0</strong><span>Positions</span></div>
+    <div><strong id="detail-learned-count">0</strong><span>Learned</span></div>
+    <div><strong id="detail-open-count">0</strong><span>To train</span></div>
+    <div><strong id="detail-average-rating">—</strong><span>Avg. rating</span></div>
+  </section>
+
+  <section class="position-library lesson-position-library">
+    <div class="position-library-header">
+      <div>
+        <div class="eyebrow">LESSON POSITIONS</div>
+        <h2>Review this lesson</h2>
+        <p class="muted">Filter, select, and update learning status across all matching positions, then save your changes.</p>
+      </div>
+      <div class="lesson-list-actions">
+        <button id="position-select-all" class="secondary-button" type="button">Select all filtered</button>
+        <a id="detail-train-lesson" class="primary-button" href="{{ url_for('trainer', job_id=job_id, concept=lesson.key, new_playlist=1) }}">Train lesson (0)</a>
+      </div>
+    </div>
+
+    <div class="lesson-detail-toolbar">
+      <label>Learning motif
+        <select id="position-concept-filter">
+          {% for option in lesson_options %}<option value="{{ option.key }}" {% if option.key == lesson.key %}selected{% endif %}>{{ option.name }}</option>{% endfor %}
+        </select>
+      </label>
+      <label>Status
+        <select id="position-status-filter">
+          <option value="all">All positions</option>
+          <option value="unlearned">To train</option>
+          <option value="learned">Learned</option>
+        </select>
+      </label>
+      <label>Learning mode
+        <select id="position-mode-filter">
+          <option value="all">All learning modes</option>
+          <option value="mistakes">Consequential mistakes</option>
+          <option value="blunders">Smaller blunders / missed opportunities</option>
+          <option value="excellent">Correct / excellent</option>
+          <option value="brilliant">Creative / brilliant</option>
+          <option value="opposition">Opponent opportunities</option>
+        </select>
+      </label>
+      <div class="rating-filter">
+        <div class="rating-filter-label"><span title="Difficulty estimate, not a calibrated Elo rating">Estimated rating · provisional</span><strong id="rating-filter-value">{{ rating_min }}–{{ rating_max }}</strong></div>
+        <div class="rating-range-stack" style="--range-min:{{ rating_min }};--range-max:{{ rating_max }}">
+          <input id="position-rating-min" type="range" min="{{ rating_min }}" max="{{ rating_max }}" step="50" value="{{ rating_min }}" aria-label="Minimum estimated rating">
+          <input id="position-rating-max" type="range" min="{{ rating_min }}" max="{{ rating_max }}" step="50" value="{{ rating_max }}" aria-label="Maximum estimated rating">
+        </div>
+      </div>
+      <label>Sort
+        <select id="position-sort">
+          <option value="rating-asc">Rating · easiest first</option>
+          <option value="rating-desc">Rating · hardest first</option>
+          <option value="date-desc">Game date · newest</option>
+          <option value="date-asc">Game date · oldest</option>
+        </select>
+      </label>
+    </div>
+    <div class="lesson-selection-bar" id="lesson-selection-bar" aria-live="polite">
+      <span id="position-selection-count">0 selected</span>
+      <div class="lesson-selection-buttons">
+        <button id="position-mark-learned" type="button" class="secondary-button" disabled>Mark learned</button>
+        <button id="position-mark-unlearned" type="button" class="secondary-button" disabled>Mark to train</button>
+        <button id="position-clear-selection" type="button" class="secondary-button" disabled>Clear selection</button>
+      </div>
+    </div>
+    <section id="position-grid" class="position-grid">
+      <div class="lesson-empty"><p class="muted">Loading positions…</p></div>
+    </section>
+    <nav class="lesson-pagination" aria-label="Lesson position pages">
+      <button id="position-page-previous" class="secondary-button" type="button">← Previous</button>
+      <span id="position-page-summary">Page 1 of 1</span>
+      <button id="position-page-next" class="secondary-button" type="button">Next →</button>
+    </nav>
+  </section>
+</section>
+
+<script>
+  window.LESSON_DETAIL_JOB_ID = {{ job_id }};
+  window.LESSON_DETAIL_CONCEPT = {{ lesson.key|tojson }};
+  window.LESSON_DETAIL_NAME = {{ lesson.name|tojson }};
+  window.LESSON_DETAIL_RATING_MIN = {{ rating_min }};
+  window.LESSON_DETAIL_RATING_MAX = {{ rating_max }};
+</script>
+<script src="{{ url_for('static', filename='lesson_detail.js') }}"></script>
+{% endblock %}

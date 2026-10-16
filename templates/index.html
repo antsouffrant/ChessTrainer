@@ -1,0 +1,46 @@
+{% extends 'base.html' %}
+{% block content %}
+<section class="hero glass">
+  <div>
+    <div class="eyebrow">PERSONAL CHESS TRAINER</div>
+    <h1>Learn from the positions that matter.</h1>
+    <p class="lede">Connect a Lichess account, learn from consequential mistakes, reinforce exceptional moves, or build a separate scouting curriculum for an opponent.</p>
+  </div>
+
+  <form method="post" class="connect-card">
+    <label for="username">Lichess username</label>
+    <div class="input-row">
+      <input id="username" name="username" placeholder="antsouffrant" autocomplete="off" required>
+      <button type="submit">Connect</button>
+    </div>
+    {% if error %}<p class="error">{{ error }}</p>{% endif %}
+    <p class="hint">Local prototype: account ownership is not yet authenticated with OAuth; the username is verified against Lichess.</p>
+  </form>
+
+</section>
+{% if game_lists %}
+<section class="game-list-index glass" aria-label="Saved game lists">
+  <div class="game-list-index-intro"><div><div class="eyebrow">SAVED GAME LISTS</div><h2>Game lists</h2></div>
+    <p class="hint">Review your game lists, train positions, or start a background refresh or evaluation. Monitor work on the Process page.</p>
+  </div>
+  <div class="game-list-index-items">
+  {% for item in game_lists %}
+    <article class="game-list-index-item">
+      <div class="game-list-index-label">
+        <strong>{% if item.source_type == 'opposition' %}Opposition · {{ item.source_username }}{% else %}{{ item.username }} · {{ item.date_range }}{% endif %}</strong>
+        <small>{{ item.created_at[:10] }} · {{ '{:,}'.format(item.game_count or 0) }} games · {{ '{:,}'.format(item.position_count or 0) }} positions</small>
+        <small class="muted" data-metadata-refreshed-job="{{ item.id }}">{% if item.metadata_refreshed_at %}Metadata refreshed {{ item.metadata_refreshed_at[:10] }}{% else %}Metadata not manually refreshed{% endif %}</small>
+      </div>
+      <div class="game-list-index-links" aria-label="Game list actions">
+        <a class="primary-button game-list-train" href="{{ url_for('trainer', job_id=item.id) }}">Train</a>
+        <a class="secondary-button" href="{{ url_for('lessons', job_id=item.id) }}">Lessons</a>
+        <a class="secondary-button" href="{{ url_for('openings', job_id=item.id) }}">Openings</a>
+        <button class="secondary-button" type="button" data-process-start="refresh" data-job-id="{{ item.id }}"><i class="fa-solid fa-rotate" aria-hidden="true"></i><span>Refresh</span></button>
+        <button class="secondary-button" type="button" data-process-start="analyze" data-job-id="{{ item.id }}"><i class="fa-solid fa-chart-line" aria-hidden="true"></i><span>Analyze</span></button>
+      </div>
+    </article>
+  {% endfor %}
+  </div>
+</section>
+{% endif %}
+{% endblock %}

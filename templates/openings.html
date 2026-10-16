@@ -1,0 +1,21 @@
+{% extends 'base.html' %}
+{% block title %}Opening Playlists · Personal Chess Trainer{% endblock %}
+{% block content %}
+<section class="lesson-page opening-page" id="opening-root" data-job-id="{{ job_id }}">
+  <header class="lesson-hero glass"><div>
+    <div class="eyebrow"><i class="fa-solid fa-book-open"></i> OPENING PLAYLISTS</div>
+    <h1>Learn your openings from your own games.</h1>
+    <p class="lede">Positions are grouped by opening family, with variations kept as metadata. Train in move-number order to follow how familiar opening positions branch into different decisions.</p>
+  </div><div class="lesson-actions"><a class="secondary-button" href="{{ url_for('processes', job_id=job_id) }}"><i class="fa-solid fa-gears"></i> Process</a><a id="resume-opening-button" class="secondary-button hidden" href="#">Resume opening</a><a class="secondary-button" href="{{ url_for('lessons', job_id=job_id) }}">Learning motifs →</a><a class="primary-button" href="{{ url_for('trainer', job_id=job_id, sort='move-asc', listing=1, new_playlist=1) }}">Train all openings</a></div></header>
+  <section class="opening-intro glass"><i class="fa-solid fa-chess-knight"></i><span>Opening names come from PGN tags when available, or a local move-sequence reference otherwise. Historical-game callouts require an exact board-position match; sharing an opening is not treated as the same historical position.</span></section>
+  <section class="lesson-status glass" id="opening-stats" aria-live="polite">
+    <div><span id="openings-count">0</span><small>Opening families</small></div>
+    <div><span id="openings-variations">0</span><small>Variations</small></div>
+    <div><span id="openings-positions">0</span><small>Training positions</small></div>
+    <div><span id="openings-learned">0</span><small>Positions learned</small></div>
+  </section>
+  <section id="opening-list" class="lesson-grid"><div class="lesson-empty glass"><h2>Organizing openings…</h2></div></section>
+</section>
+<script>window.OPENING_JOB_ID = {{ job_id }};</script>
+<script src="{{ url_for('static', filename='openings.js') }}"></script>
+{% endblock %}

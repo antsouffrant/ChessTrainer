@@ -1,0 +1,124 @@
+{% extends 'base.html' %}
+{% block title %}Settings · Personal Chess Trainer{% endblock %}
+{% block content %}
+<section class="settings-page">
+  <header class="settings-hero glass">
+    <div>
+      <div class="eyebrow">{% if active_job %}GAME LIST & SETTINGS{% else %}GLOBAL SETTINGS{% endif %}</div>
+      <h1>Trainer, analysis & adaptive coach</h1>
+      {% if active_job and active_job.source_type == 'opposition' %}
+      <p class="lede"><i class="fa-solid fa-crosshairs"></i> Editing settings while viewing opposition research for <strong>{{ active_job.source_username }}</strong>. Personal learning modes remain isolated from this game list.</p>
+      {% elif active_job %}
+      <p class="lede"><i class="fa-solid fa-user"></i> Editing the active personal game list. Learning-mode changes apply to this list; other background-analysis values remain snapshotted per analysis run.</p>
+      {% else %}
+      <p class="lede">Background-analysis values become defaults for new jobs and are snapshotted when a job starts. Trainer and post-solve review settings apply immediately.</p>
+      {% endif %}
+    </div>
+    <div class="settings-save-status" id="settings-save-status" aria-live="polite">Changes save automatically.</div>
+  </header>
+
+  {% if reset %}<div class="settings-notice glass">Settings restored to application defaults.</div>{% endif %}
+
+  <form method="post" class="settings-form" {% if active_job %}data-job-id="{{ active_job.id }}"{% endif %}>
+    {% set titles = {
+      'engine': 'Engine & resources',
+      'passes': 'Screening & refinement',
+      'thresholds': 'Evaluation thresholds',
+      'selection': 'Puzzle selection',
+      'learning_modes': 'Learning modes',
+      'lessons': 'Lesson browsing',
+      'appearance': 'Board appearance',
+      'adaptive_coach': 'Adaptive coach & concept learning',
+      'trainer': 'Trainer & post-solve analysis'
+    } %}
+    {% for section_key, items in sections.items() %}
+    <section class="settings-section glass">
+      <div class="settings-section-heading">
+        <div class="eyebrow">{{ titles.get(section_key, section_key)|upper }}</div>
+        {% if section_key == 'passes' %}<p>Control speed, depth caps, and whether the same batch is revisited at progressively deeper levels.</p>{% endif %}
+        {% if section_key == 'thresholds' %}<p>Centipawn boundaries used to decide which errors become confirmed training positions.</p>{% endif %}
+        {% if section_key == 'selection' %}<p>Limit duplicate tactical episodes and expensive deep confirmations within one game.</p>{% endif %}
+        {% if section_key == 'learning_modes' %}
+          {% if active_job and active_job.source_type == 'opposition' %}
+          <p><i class="fa-solid fa-crosshairs"></i> <strong>Opposition research · {{ active_job.source_username }}</strong>. This list is intentionally isolated and always uses the opposition-research analysis mode. The selectivity controls below still apply where relevant.</p>
+          {% elif active_job %}
+          <p><strong>Learning modes for this game list.</strong> This selection directly updates the current personal game list and also becomes the default selection for future personal lists. Enabling a new mode on a completed list automatically queues another asynchronous pass; paused lists pick it up when resumed. Existing positions are never deleted when a mode is switched off.</p>
+          {% else %}
+          <p>Choose default learning modes for new personal game lists and tune how selective positive reinforcement should be.</p>
+          {% endif %}
+        {% endif %}
+        {% if section_key == 'lessons' %}<p>Control how many matching training positions are loaded at once on an individual lesson page.</p>{% endif %}
+        {% if section_key == 'appearance' %}<p>Choose the visual treatment of the interactive training board and pieces.</p>{% endif %}
+        {% if section_key == 'adaptive_coach' %}<p>Control local language parsing and how much evidence a new user-discovered chess concept needs before becoming a personal lesson.</p>{% endif %}
+        {% if section_key == 'trainer' %}<p>Control near-optimal move acceptance and the lightweight Stockfish engine used after a puzzle is solved.</p>{% endif %}
+      </div>
+      <div class="settings-grid">
+        {% if section_key == 'learning_modes' %}
+        <div class="setting-row learning-mode-selector-row {% if active_job and active_job.source_type == 'opposition' %}setting-row-disabled{% endif %}">
+          <div>
+            <strong>Learning modes</strong>
+            <small>Select one or more ways this personal game list should identify training positions. Opposition research is created separately during game retrieval.</small>
+          </div>
+          <details id="learning-mode-multiselect" class="learning-mode-multiselect" {% if active_job and active_job.source_type == 'opposition' %}data-disabled="1"{% endif %}>
+            <summary id="learning-mode-summary">Learning modes</summary>
+            <div class="learning-mode-menu">
+              <label><input type="checkbox" data-learning-mode="mistakes" {% if values.learning_mode_mistakes %}checked{% endif %} {% if active_job and active_job.source_type == 'opposition' %}disabled{% endif %}><span><b>Mistakes</b><small>Consequential errors and missed opportunities</small></span></label>
+              <label><input type="checkbox" data-learning-mode="blunders" {% if values.learning_mode_blunders %}checked{% endif %}><span><b>Smaller blunders</b><small>Missed opportunities and less consequential errors</small></span></label>
+              <label><input type="checkbox" data-learning-mode="excellent" {% if values.learning_mode_excellent %}checked{% endif %} {% if active_job and active_job.source_type == 'opposition' %}disabled{% endif %}><span><b>Correct / excellent moves</b><small>Strong, instructive moves worth reinforcing</small></span></label>
+              <label><input type="checkbox" data-learning-mode="brilliant" {% if values.learning_mode_brilliant %}checked{% endif %} {% if active_job and active_job.source_type == 'opposition' %}disabled{% endif %}><span><b>Creative / brilliant moves</b><small>Unique resources, sacrifices, and narrow ideas</small></span></label>
+            </div>
+          </details>
+        </div>
+        {% endif %}
+        {% for item in items %}
+          {% if not (section_key == 'learning_modes' and item.key in ['learning_mode_mistakes', 'learning_mode_excellent', 'learning_mode_brilliant']) %}
+          {% if item.type == 'bool' %}
+          <label class="setting-row setting-toggle-row {% if active_job and active_job.source_type == 'opposition' and item.key in ['learning_mode_mistakes', 'learning_mode_excellent', 'learning_mode_brilliant'] %}setting-row-disabled{% endif %}">
+            <div>
+              <strong>{{ item.label }}</strong>
+              <small>{{ item.help }}</small>
+            </div>
+            <span class="switch-control">
+              <input type="checkbox" name="{{ item.key }}" data-setting-key="{{ item.key }}" {% if values[item.key] %}checked{% endif %} {% if active_job and active_job.source_type == 'opposition' and item.key in ['learning_mode_mistakes', 'learning_mode_excellent', 'learning_mode_brilliant'] %}disabled{% endif %}>
+              <span></span>
+            </span>
+          </label>
+          {% else %}
+          <label class="setting-row">
+            <div>
+              <strong>{{ item.label }}</strong>
+              <small>{{ item.help }}</small>
+            </div>
+            <div class="setting-input-wrap">
+              <input
+                type="{{ 'text' if item.type == 'text' else 'number' }}"
+                name="{{ item.key }}"
+                data-setting-key="{{ item.key }}"
+                value="{{ values[item.key] }}"
+                {% if item.min is defined %}min="{{ item.min }}"{% endif %}
+                {% if item.max is defined %}max="{{ item.max }}"{% endif %}
+                {% if item.step is defined %}step="{{ item.step }}"{% elif item.type == 'float' %}step="any"{% endif %}
+              >
+              {% if item.unit is defined %}<span>{{ item.unit }}</span>{% endif %}
+            </div>
+          </label>
+          {% endif %}
+          {% endif %}
+        {% endfor %}
+      </div>
+    </section>
+    {% endfor %}
+
+    <div class="settings-footer glass">
+      <div>
+        <strong>Cache behavior</strong>
+        <p class="muted">Changing background-analysis settings changes the cache signature. A new analysis job can therefore revisit older games under the new rules without deleting previously learned positions.</p>
+      </div>
+      <div class="settings-footer-actions">
+        <button class="secondary-button" id="reset-settings-button" type="button">Restore defaults</button>
+      </div>
+    </div>
+  </form>
+</section>
+<script src="{{ url_for('static', filename='settings.js') }}"></script>
+{% endblock %}
