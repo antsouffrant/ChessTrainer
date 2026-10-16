@@ -7,16 +7,18 @@ import chess
 
 from position_context import inspect_response
 from immediate_decision import immediate_decision
+from decision_context import decision_facts
 from motif_relevance import select_relevant_primary
 from pv_reasoning import fork_evidence, legal_pv, comparative_insight
 
-CLASSIFIER_VERSION = '2.0-immediate-decision-relevance'
+CLASSIFIER_VERSION = '2.1-branch-aware-context'
 
 # A deliberately compact curriculum: these are common, teachable amateur
 # failure modes that we can identify with reasonably explainable board rules.
 # The classifier is multi-label; one concept is selected as primary.
 CONCEPT_CATALOG = [
     {'key': 'back_rank_mate', 'name': 'Back-Rank Mate', 'family': 'Tactics', 'description': 'Spot mating chances against a king trapped behind its own pawns.', 'priority': 100},
+    {'key': 'mate_threat', 'name': 'Threaten Mate', 'family': 'Tactics', 'description': 'Create an immediate mating threat that the opponent must answer, without confusing a threat with forced mate.', 'priority': 94},
     {'key': 'mating_net', 'name': 'Mating Net', 'family': 'Tactics', 'description': 'Restrict the king and turn forcing checks into a mating sequence.', 'priority': 96},
     {'key': 'tactical_combination', 'name': 'Tactical Combination', 'family': 'Tactics', 'description': 'Calculate a sequence whose tactical payoff emerges only after the opponent replies.', 'priority': 91},
     {'key': 'fork', 'name': 'Double Attack', 'family': 'Tactics', 'description': 'Create two important threats with one move.', 'priority': 92},
@@ -27,7 +29,8 @@ CONCEPT_CATALOG = [
     {'key': 'removal_of_defender', 'name': 'Remove the Defender', 'family': 'Tactics', 'description': 'Eliminate a key defender so another target becomes vulnerable.', 'priority': 88},
     {'key': 'overloaded_defender', 'name': 'Overload', 'family': 'Tactics', 'description': 'Exploit a defender that is responsible for too many jobs.', 'priority': 87},
     {'key': 'trapped_piece', 'name': 'Trap a Piece', 'family': 'Tactics', 'description': 'Restrict a valuable piece until it has no safe escape.', 'priority': 86},
-    {'key': 'hanging_piece', 'name': 'Loose Material', 'family': 'Tactics', 'description': 'Notice undefended or inadequately defended material you can win now.', 'priority': 84},
+    {'key': 'exchange', 'name': 'Piece Exchange', 'family': 'Tactics', 'description': 'Recognize captures and recaptures, and distinguish favorable trades from winning a free piece.', 'priority': 82},
+    {'key': 'hanging_piece', 'name': 'Attack Loose Pieces', 'family': 'Tactics', 'description': 'Spot attacks and captures against undefended enemy material, and verify whether it can be saved or recaptured.', 'priority': 84},
     {'key': 'missed_capture', 'name': 'Win Material', 'family': 'Tactics', 'description': 'Take a favorable capture before choosing a quieter move.', 'priority': 78},
     {'key': 'promotion_tactic', 'name': 'Promotion', 'family': 'Tactics', 'description': 'Use forcing pawn advances and promotion threats to decide the position.', 'priority': 85},
     {'key': 'attack_building', 'name': 'Build the Attack', 'family': 'Tactics', 'description': 'Create forcing threats that keep the opponent reacting.', 'priority': 74},
@@ -196,6 +199,7 @@ def classify_learning_concepts(
     line = legal_pv(board, best_pv_uci, first_move=best_move)
     fork = fork_evidence(board, best_move, best_pv_uci)
     variation = comparative_insight(board, best_move, played_move, best_pv_uci, played_pv_uci)
+    decision = decision_facts(board, best_move, played_move, best_pv_uci, played_pv_uci)
     labels: dict[str, LearningLabel] = {}
 
     def add(key: str, confidence: float, evidence: str):
@@ -451,6 +455,51 @@ def classify_learning_concepts(
             elif len(board.piece_map()) <= 6 and not best_is_capture and not after.is_check():
                 add('opposition_zugzwang', 0.58, 'The simplified position is tempo-sensitive and the best move is a quiet king move.')
 
+    # New direct, differentiated context: an offensive threat is not a
+    # defensive save; an exchange is not an outright material win. Never
+    # select Protect Loose Pieces when even the engine-preferred line loses
+    # the exact same root piece.
+    context_primary = None
+    if decision:
+        if decision['shared_loss'] and not decision['truly_saved']:
+            labels.pop('loose_piece_awareness', None)
+            if root_evidence and root_evidence['motif'] == 'loose_piece_awareness':
+                root_evidence = None
+        if (decision['opponent_mate_bad'] and not decision['opponent_mate_good']
+                and played_move != best_move):
+            add('mate_defense', 0.99,
+                f'The game move allows {decision["opponent_mate_bad"][0]} checkmate immediately; {best_san} does not.')
+            context_primary = 'mate_defense'
+        elif (decision['our_mate_good'] and not decision['our_mate_bad']):
+            add('mate_threat', 0.97,
+                f'{best_san} threatens {decision["our_mate_good"][0]} next turn if unanswered.')
+            context_primary = 'mate_threat'
+        elif (decision['shared_loss'] and decision['new_targets']):
+            threat = decision['new_targets'][0]
+            add('counterattack', 0.96,
+                f'{best_san} counterattacks the {threat["piece"]} on {threat["square"]}; '
+                'the original threatened material is lost in both saved lines.')
+            context_primary = 'counterattack'
+        elif decision['truly_saved']:
+            saved = decision['truly_saved'][0]
+            add('loose_piece_awareness', 0.97,
+                f'{best_san} keeps the attacked {saved["piece"]} from {saved["square"]} '
+                'through the compared continuation.')
+            context_primary = 'loose_piece_awareness'
+        elif (decision['good']['exchanges']
+                and decision['good']['exchanges'][0]['first']['ply'] == 0):
+            exchange = decision['good']['exchanges'][0]
+            add('exchange', 0.94,
+                f'{exchange["first"]["san"]} is met by {exchange["recapture"]["san"]}; '
+                'this is an exchange, not a free capture.')
+            context_primary = 'exchange'
+        elif decision['new_targets'] and decision['new_targets'][0]['loose']:
+            target = decision['new_targets'][0]
+            add('hanging_piece', 0.86,
+                f'{best_san} attacks the opponent’s undefended {target["piece"]} '
+                f'on {target["square"]}; material gain still depends on the reply.')
+            context_primary = 'hanging_piece'
+
     # If nothing concrete fired, retain a useful process-level lesson rather
     # than manufacturing a low-confidence strategic label.
     if not labels:
@@ -602,6 +651,10 @@ def classify_learning_concepts(
     # the lesson even if a sampled PV contains a more exotic later tactic.
     if root_primary and root_primary in labels:
         chosen = root_primary
+    # A demonstrable, position-specific distinction overrides a merely
+    # geometric label or a temporary attack in a sampled PV.
+    if context_primary and context_primary in labels and not forced_primary and not check_evasion:
+        chosen = context_primary
     # The score is relative evidence of relevance, not a calibrated probability.
     # Preserve confidence as a measure of detection certainty.
     ordered = sorted(labels.values(), key=lambda label: (

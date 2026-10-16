@@ -74,7 +74,7 @@ def immediate_decision(board, best, played=None, context=None):
         if (played_after is not None and _under_threat(played_after, square, side)
                 and (square in newly_threatened or _hanging(played_after, square, side))):
             left = 'hanging' if _hanging(played_after, square, side) else 'under attack'
-            text = (f'{best_san} saves your {_name(piece)} on {chess.square_name(square)}. '
+            text = (f'{best_san} addresses the immediate attack on your {_name(piece)} on {chess.square_name(square)}. '
                     f'In the game, {played_san} leaves it {left}.')
             return {'motif': 'loose_piece_awareness' if left == 'hanging' else 'threat_awareness',
                     'explanation': text, 'strength': 1.0, 'kind': 'missed_defense'}
@@ -93,7 +93,7 @@ def immediate_decision(board, best, played=None, context=None):
                         'kind': 'played_hangs_piece',
                         'explanation': (f'In the game, {played_san} leaves your '
                                         f'{_name(moved)} on {chess.square_name(played.to_square)} '
-                                        f'hanging; {best_san} avoids that loss.')}
+                                        f'hanging; {best_san} does not leave its moved piece hanging in the same way.')}
 
     # A capture is a missed immediate opportunity only when the game move
     # fails to take the same target AND the capture is not legally recaptured.

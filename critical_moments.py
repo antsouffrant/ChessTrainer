@@ -101,8 +101,8 @@ def critical_decision_evidence(board, best, played, best_pv=None, played_pv=None
         for feature in poor_signals[ply]['effects']:
             if feature['kind'] == 'check':
                 continue  # A check alone rarely explains the lost evaluation.
-            if feature['kind'] == 'capture':
-                continue  # Material losses have a separate recapture-aware test.
+            if feature['kind'] in {'capture', 'exchange'}:
+                continue  # Exchanges are not material wins; test the net separately.
             # A shared check or pin is contextual, not a contrast. Compare board
             # facts and positions on both branches before promoting it.
             if any(other['kind'] == feature['kind']
@@ -213,7 +213,7 @@ def critical_explanation(evidence):
                    else 'After ')
         # An illustrative PV is not a universal forced refutation. Keep SAN
         # capitalization intact and explain the recorded response concretely.
-        return f'{context}{move}, the analyzed reply {event}. {best} avoids that outcome.'
+        return f'{context}{move}, the analyzed reply {event}. The engine rates {best} higher; this sampled line does not prove that every such threat disappears.'
     played = evidence.get('played_move')
     reply = evidence.get('critical_move')
     best = evidence.get('best_move')
@@ -225,7 +225,7 @@ def critical_explanation(evidence):
     if ply == 1:
         qualifier = 'the alternative ' if evidence.get('comparison_role') == 'alternative' else ''
         return (f'After {qualifier}{played}, {reply} wins your {piece} on {square}. '
-                f'{best} avoids that loss.')
+                f'{best} retains more material at the compared point in the saved variations.')
     qualifier = 'the alternative ' if evidence.get('comparison_role') == 'alternative' else ''
     return (f'After {qualifier}{played}, the analyzed continuation reaches '
             f'{reply}, winning your {piece} on {square}. {best} avoids that loss.')

@@ -30,6 +30,9 @@ from metadata_refresh import refresh_metadata_batch
 from process_runtime import PROCESS_LOCK
 from retrieval import retrieve_game_list
 from list_readiness import list_state
+from feedback_analytics import (
+    record_position_vote, position_votes, report_rows, report_facets, report_summary, csv_bytes,
+)
 from process_policy import queue_analysis
 from opening_playlist import enrich_opening_playlist, board_identity
 from adaptive_coach import (
@@ -2448,6 +2451,59 @@ def enrich_job_motifs(job_id):
     return jsonify({**info, 'updated': updated})
 
 
+@app.get('/analytics')
+def analytics():
+    """Learning/coaching quality reporting, independent of Process controls."""
+    return render_template('analytics.html')
+
+
+@app.get('/api/analytics/feedback')
+def analytics_feedback():
+    with connect() as conn:
+        rows = report_rows(conn, request.args)
+        facets = report_facets(conn)
+    summary = report_summary(rows)
+    return jsonify({**summary, 'facets': facets, 'recent': rows[:80]})
+
+
+@app.get('/api/analytics/feedback.csv')
+def analytics_feedback_csv():
+    with connect() as conn:
+        rows = report_rows(conn, request.args)
+    return send_file(
+        io.BytesIO(csv_bytes(rows)), mimetype='text/csv; charset=utf-8',
+        as_attachment=True, download_name='chess_coaching_feedback.csv',
+    )
+
+
+@app.route('/api/positions/<int:position_id>/feedback', methods=['GET', 'POST'])
+def position_feedback(position_id):
+    with connect() as conn:
+        if request.method == 'GET':
+            if not conn.execute('SELECT 1 FROM training_positions WHERE id = ?', (position_id,)).fetchone():
+                return jsonify({'error': 'Position not found'}), 404
+            return jsonify({'ratings': position_votes(conn, position_id)})
+        payload = request.get_json(silent=True) or {}
+        category = str(payload.get('category') or '')
+        try:
+            rating = int(payload.get('rating'))
+        except (ValueError, TypeError):
+            return jsonify({'error': 'Rating must be 1 or -1'}), 400
+        try:
+            ratings = record_position_vote(
+                conn, position_id, category, rating,
+                lesson_key=payload.get('lesson_key') or '',
+                text=payload.get('content_snapshot') or '',
+            )
+        except ValueError as exc:
+            return jsonify({'error': str(exc)}), 400
+        except LookupError as exc:
+            return jsonify({'error': str(exc)}), 404
+        except PermissionError as exc:
+            return jsonify({'error': str(exc)}), 403
+    return jsonify({'ok': True, 'ratings': ratings})
+
+
 @app.get('/api/positions/<int:position_id>/solution')
 def position_solution(position_id):
     _enrich_saved_variations(position_id)
@@ -2672,11 +2728,14 @@ def coach_message_feedback(message_id):
         if row['role'] != 'assistant':
             return jsonify({'error': 'Only coach responses can be rated'}), 400
         conn.execute('''
-            INSERT INTO coach_message_feedback(message_id, account_id, position_id, rating)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO coach_message_feedback(message_id, account_id, position_id, rating, lesson_key)
+            VALUES (?, ?, ?, ?, ?)
             ON CONFLICT(message_id) DO UPDATE SET
-                rating = excluded.rating, updated_at = CURRENT_TIMESTAMP
-        ''', (message_id, row['account_id'], row['position_id'], rating))
+                rating = excluded.rating,
+                lesson_key = excluded.lesson_key,
+                updated_at = CURRENT_TIMESTAMP
+        ''', (message_id, row['account_id'], row['position_id'], rating,
+              str(payload.get('lesson_key') or '')[:150]))
         conn.commit()
     return jsonify({'ok': True, 'message_id': message_id, 'rating': rating})
 

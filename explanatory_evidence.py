@@ -10,8 +10,9 @@ import json
 import chess
 from pv_reasoning import legal_pv, fork_evidence
 from discovered_counterfactuals import revealed_lines
+from decision_context import decision_facts, mate_in_one, unanswered_mate_threat
 
-EVIDENCE_VERSION = 1
+EVIDENCE_VERSION = 2
 VALUES = {chess.PAWN: 1, chess.KNIGHT: 3, chess.BISHOP: 3,
           chess.ROOK: 5, chess.QUEEN: 9, chess.KING: 100}
 
@@ -60,6 +61,12 @@ def board_events(before, move, continuation=()):
         add('checkmate', f'{san} ends the game in checkmate', 'mating_net', 125)
     elif after.is_check():
         add('check', f'{san} gives check', 'forcing_moves', 46)
+    if not after.is_check() and not after.is_game_over():
+        potential_mates = unanswered_mate_threat(after)
+        if potential_mates:
+            add('mate_threat', f'{san} threatens mate next turn with '
+                f'{potential_mates[0]} if the opponent does not respond',
+                'mate_threat', 85)
     if victim:
         piece_name = chess.piece_name(victim.piece_type)
         add('capture', f'{san} captures the {piece_name} on {chess.square_name(move.to_square)}',
@@ -96,8 +103,9 @@ def board_events(before, move, continuation=()):
     loose = _newly_loose(before, after, not side)
     if loose:
         _, sq, piece = loose[0]
-        add('loose_piece', f'{san} exposes the undefended {chess.piece_name(piece.piece_type)} '
-            f'on {chess.square_name(sq)}', 'loose_piece_awareness', 60)
+        add('attack_loose_piece', f'{san} attacks or exposes the opponent’s undefended '
+            f'{chess.piece_name(piece.piece_type)} on {chess.square_name(sq)}',
+            'hanging_piece', 60, perspective='attack')
     # A trapped piece must have no legal escape when its side is actually to
     # move. Never infer a trap from pinned geometry or while under check.
     if not after.is_check():
@@ -115,6 +123,13 @@ def board_events(before, move, continuation=()):
     if (pawn and pawn.color == side and pawn.piece_type == chess.PAWN
             and _passed(after, move.to_square, side)):
         add('passed_pawn', f'{san} advances a passed pawn toward promotion', 'passed_pawn', 44)
+    # Explicit exchange evidence requires an actual recapture in the saved
+    # continuation, not merely a capture onto a guarded square.
+    line = legal_pv(before, continuation, first_move=move, max_plies=3)
+    if len(line) > 1 and victim and after.is_capture(line[1]) and line[1].to_square == move.to_square:
+        responder = after.san(line[1])
+        add('exchange', f'{san} is answered by {responder} in the analyzed exchange',
+            'simplification', 68)
     saved = []
     for sq, piece in before.piece_map().items():
         if piece.color != side or piece.piece_type == chess.KING:
@@ -166,7 +181,21 @@ def position_context(board):
                 loose.append(descriptor)
         if board.is_pinned(side, square):
             pins.append(descriptor)
+    enemy_attacked, enemy_loose = [], []
+    for square, piece in board.piece_map().items():
+        if piece.color == side or piece.piece_type == chess.KING:
+            continue
+        item = {'square': chess.square_name(square), 'piece': chess.piece_name(piece.piece_type),
+                'value': VALUES[piece.piece_type]}
+        if board.is_attacked_by(side, square):
+            enemy_attacked.append(item)
+            if not board.is_attacked_by(not side, square):
+                enemy_loose.append(item)
     return {'in_check': board.is_check(),
+            'mate_in_one_available': mate_in_one(board),
+            'opponent_mate_threat_if_unanswered': unanswered_mate_threat(board),
+            'opponent_attacked': sorted(enemy_attacked, key=lambda x: -x['value'])[:8],
+            'opponent_loose': sorted(enemy_loose, key=lambda x: -x['value'])[:8],
             'attacked': sorted(attacked, key=lambda x: -x['value'])[:8],
             'loose': sorted(loose, key=lambda x: -x['value'])[:8],
             'pinned': sorted(pins, key=lambda x: -x['value'])[:8],
@@ -228,8 +257,15 @@ def explanation_variations(board, best, played, best_pv, played_pv,
         if (len(line['pv_uci']) >= 2 and
                 not any(x['pv_uci'][:2] == line['pv_uci'][:2] for x in lines)):
             lines.append(line)
+    grounded = decision_facts(board, best, played, best_pv, played_pv,
+                              alternatives, best_cp, played_cp) if best in board.legal_moves else None
+    # Keep the lightweight summary, not duplicate PV traces, in persistence.
+    grounded_summary = None
+    if grounded:
+        grounded_summary = {k: v for k, v in grounded.items()
+                            if k not in {'good', 'bad'}}
     return {'version': EVIDENCE_VERSION, 'perspective': 'training_side',
-            'context': position_context(board),
+            'context': position_context(board), 'decision_context': grounded_summary,
             'assessment': {'recommended_cp': best_cp, 'played_cp': played_cp,
                            'difference_cp': (max(0, best_cp - played_cp)
                                              if best_cp is not None and played_cp is not None else None),
@@ -243,4 +279,4 @@ def decode_variations(raw):
             raw = json.loads(raw)
         except (ValueError, TypeError):
             return None
-    return raw if isinstance(raw, dict) and raw.get('version') == EVIDENCE_VERSION and isinstance(raw.get('lines'), list) else None
+    return raw if isinstance(raw, dict) and raw.get('version') in (1, EVIDENCE_VERSION) and isinstance(raw.get('lines'), list) else None

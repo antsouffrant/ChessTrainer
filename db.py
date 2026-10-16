@@ -310,11 +310,29 @@ CREATE INDEX IF NOT EXISTS idx_coach_messages_thread ON coach_messages(thread_id
 CREATE INDEX IF NOT EXISTS idx_coach_claims_position ON coach_claims(position_id, id);
 CREATE INDEX IF NOT EXISTS idx_concept_evidence_concept ON concept_evidence(concept_key, account_id);
 
+CREATE TABLE IF NOT EXISTS position_feedback (
+    position_id INTEGER NOT NULL,
+    account_id INTEGER NOT NULL,
+    category TEXT NOT NULL CHECK(category IN ('position', 'explanation', 'motif')),
+    rating INTEGER NOT NULL CHECK(rating IN (-1, 1)),
+    lesson_key TEXT,
+    primary_motif_key TEXT,
+    content_snapshot TEXT,
+    coaching_version TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY(position_id, category),
+    FOREIGN KEY(position_id) REFERENCES training_positions(id) ON DELETE CASCADE,
+    FOREIGN KEY(account_id) REFERENCES accounts(id)
+);
+CREATE INDEX IF NOT EXISTS idx_position_feedback_account ON position_feedback(account_id, category, rating);
+
 CREATE TABLE IF NOT EXISTS coach_message_feedback (
     message_id INTEGER PRIMARY KEY,
     account_id INTEGER NOT NULL,
     position_id INTEGER NOT NULL,
     rating INTEGER NOT NULL CHECK(rating IN (-1, 1)),
+    lesson_key TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY(message_id) REFERENCES coach_messages(id) ON DELETE CASCADE,
@@ -392,6 +410,10 @@ def _seed_learning_concepts(conn):
 def init_db():
     with connect() as conn:
         conn.executescript(SCHEMA)
+
+        # Existing chat thumbs remain intact. Context is optional for older rows.
+        if 'lesson_key' not in _columns(conn, 'coach_message_feedback'):
+            conn.execute('ALTER TABLE coach_message_feedback ADD COLUMN lesson_key TEXT')
 
         job_columns = _columns(conn, 'analysis_jobs')
         job_migrations = {

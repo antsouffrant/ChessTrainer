@@ -1,5 +1,15 @@
 # Personal Chess Trainer
 
+## October 16, 2026 — v47 grounded, branch-aware chess explanations
+
+- **Reasons before labels.** A solved-position explanation compares the original game move and the recommended move from the **same training position**, then uses their saved Stockfish PVs and relative evaluation (when available). Explanations distinguish what a move threatens, what a sampled variation actually demonstrates, and what a mate score establishes. They do not treat one analyzed PV as a proof against every possible defense.
+- **Attack vs. defense.** Tracking individual root pieces through moves, captures and recaptures identifies when an ostensibly endangered piece is captured in **both** lines. In that case, the coach says the recommended move is a counterattack, compensation, or a different use of the initiative — not that it protects the pawn. It only describes a piece as surviving a line when a comparable saved line actually supports that difference.
+- **Mate threats.** Legal mate-in-one moves and unanswered *next-turn* mate threats are now different observations. A threat after a hypothetical non-response does **not** mean mate is forced. A genuine forced mate is still sourced from Stockfish’s mate evaluation.
+- **Exchanges.** Recapture-aware continuation tracking calls out actual exchanges, distinguishing a trade from a free piece and considering the material returned. Evaluation loss is not automatically explained by the first capture in a sequence.
+- **Learning motifs.** Offensive **Attack Loose Pieces**, defensive **Protect Loose Pieces**, **Threaten Mate**, and **Piece Exchange** have distinct roles. A documented counterattack can supersede an incorrectly inferred defensive label. Existing learning history and saved evaluations are preserved, and classifier/coaching version increments trigger a metadata-only relabel/rewrite for existing saved training positions when the app launches. The Process-page Refresh can regenerate the expanded per-variation evidence without retrieving or reanalyzing games.
+- **Regression coverage.** Added `tests/test_decision_context_v47.py` with sample positions for an unavoidably captured pawn answered by a different attack, direct exchanges, legal mate threats, piece identity, positive-game-move comparisons, and evidence schema. Run `python -m unittest discover -s tests -v` after installing `requirements.txt`. Existing Node.js UI checks are also supported.
+
+
 ## October 16, 2026 — v46 game-list processes and durable analysis
 
 - **Retrieval** is a creation-only, distinct Lichess downloader. A successful import saves an immutable PGN batch under `data/batches/`, marks retrieval complete, and automatically queues **Analysis**. Further clicks on Analyze or Refresh never call the Lichess downloader. An interrupted retrieval can be retried on the *same* list, without creating a new list; a partial download is discarded and downloaded again, not byte-range resumed.
@@ -870,3 +880,49 @@ On application restart, interrupted new retrievals are marked paused and may
 be retried explicitly from Process. Analysis does not start automatically on
 application boot; only successful new-list retrieval triggers the handoff.
 All changes are additive migrations; no new Python dependencies are required.
+
+## Coaching quality analytics (v48)
+
+**Analytics** is a new top-level navigation destination, intentionally separate
+from the **Process** manager. It reports saved thumbs-up/down votes for:
+
+- **Training positions:** the usefulness of a solved training position, rated
+  on the right-hand side of the green success message.
+- **Explanations:** the usefulness of the displayed yellow explanation;
+  hover over the explanation (or focus the rating buttons) to rate it.
+- **Learning motifs:** whether the **primary** learning motif fits the solved
+  position; hover over the Learning Motifs area to rate it.
+- **Chat coaching:** the existing assistant-response thumbs in the coach panel,
+  now included in the same reporting hub.
+
+The new thumbs are available only after the position is learned/solved. They
+are saved in SQLite (`position_feedback`). Chat thumbs remain in the existing
+`coach_message_feedback` table, with an optional lesson-context column added
+in a backward-compatible migration. Each feedback item has **one current vote**;
+submitting a different thumbs rating updates that vote, not the denominator.
+Existing coach ratings are preserved, including ratings saved before v48.
+Votes persist when the position is revisited or reset; reset alone does not
+remove historical feedback. The saved explanation text and coaching version
+record what the user saw *at the time of voting*; a new vote updates that
+snapshot.
+
+The Analytics view shows counts and thumbs-up percentages for each category,
+plus group breakdowns and a recent feedback table. Filters include game list,
+lesson, opening, primary learning motif, learning mode, rating category and
+positive/negative. A **Download CSV** link exports *all* records matching the
+current filters, rather than only the 80 recent table rows. The CSV includes
+position / game / job IDs, opening and lesson metadata, motif, category,
+learning mode, rating timestamps, and a content snapshot for coaching QA.
+Unrated items are not included; an empty category has no positivity estimate
+(rather than a misleading 0%). All reports use the local database, so they
+continue to work without an active analysis or retrieval task.
+
+**Implementation:** `feedback_analytics.py`, `/analytics`,
+`/api/analytics/feedback`, `/api/analytics/feedback.csv`, and
+`/api/positions/<id>/feedback`. Existing game lists and historical positions
+do not need to be retrieved or re-analyzed to receive thumbs feedback.
+
+**QA:** `python -m unittest tests/test_feedback_analytics_v48.py` and
+`node --test tests/*.cjs`. Run `python app.py` from the project directory to
+apply SQLite migrations before testing manually. Existing `data/` should be
+preserved across updates.

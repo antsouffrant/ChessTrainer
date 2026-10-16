@@ -80,18 +80,41 @@
         </div>
         <div id="opponent-move" class="opponent-move hidden"></div>
         <button id="hint-toggle" class="hint-toggle secondary-button" type="button">Show hint</button>
-        <p id="coach-text" class="coach-text">Watch the last move, then find a strong response.</p>
+        <div id="explanation-feedback-area" class="rate-hover-zone explanation-feedback-area">
+          <p id="coach-text" class="coach-text">Watch the last move, then find a strong response.</p>
+          <div class="inline-feedback-votes hidden" data-feedback-category="explanation" role="group" aria-label="Was this explanation helpful?">
+            <span class="rating-prompt">Helpful explanation?</span>
+            <button type="button" class="inline-rating-button" data-rating="1" aria-label="Helpful explanation" title="Helpful explanation">👍</button>
+            <button type="button" class="inline-rating-button" data-rating="-1" aria-label="Unhelpful explanation" title="Unhelpful explanation">👎</button>
+          </div>
+        </div>
         <div id="category" class="eyebrow result-category hidden">TRAINING POSITION</div>
       </div>
 
-      <div id="feedback" class="feedback neutral hidden" aria-live="polite"></div>
+      <div id="feedback" class="feedback neutral hidden" aria-live="polite">
+        <span id="feedback-message"></span>
+        <div class="inline-feedback-votes hidden position-votes" data-feedback-category="position" role="group" aria-label="Was this training position helpful?">
+          <span class="rating-prompt">Helpful position?</span>
+          <button type="button" class="inline-rating-button" data-rating="1" aria-label="Helpful position" title="Helpful position">👍</button>
+          <button type="button" class="inline-rating-button" data-rating="-1" aria-label="Unhelpful position" title="Unhelpful position">👎</button>
+        </div>
+      </div>
 
       <div id="solution" class="solution hidden">
         <div><span>Engine preference</span><strong id="best-move"></strong></div>
         <div><span>Evaluation · White + / Black −</span><strong id="evaluation"></strong></div>
         <div class="game-moves-result"><span>Your game moves</span><div id="played-moves-list" class="played-moves-list"></div></div>
         <div><span title="Provisional heuristic, not a calibrated Elo rating">Estimated puzzle rating · provisional</span><strong id="puzzle-rating">—</strong></div>
-        <div class="concept-result-row"><span>Learning motifs</span><span id="lesson-concepts" class="lesson-concepts hidden"></span></div>
+        <div class="concept-result-row rate-hover-zone" id="motif-feedback-area">
+          <div class="concept-motif-heading"><span>Learning motifs</span>
+            <div class="inline-feedback-votes hidden" data-feedback-category="motif" role="group" aria-label="Does the primary learning motif fit this position?">
+              <span class="rating-prompt">Primary motif fits?</span>
+              <button type="button" class="inline-rating-button" data-rating="1" aria-label="Primary learning motif fits" title="Primary learning motif fits">👍</button>
+              <button type="button" class="inline-rating-button" data-rating="-1" aria-label="Primary learning motif does not fit" title="Primary learning motif does not fit">👎</button>
+            </div>
+          </div>
+          <span id="lesson-concepts" class="lesson-concepts hidden"></span>
+        </div>
       </div>
 
       <div id="solved-position-controls" class="solved-position-controls hidden" aria-label="Solved position controls">

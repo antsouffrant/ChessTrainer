@@ -28,6 +28,7 @@
       <a data-resume-lesson href="{% if nav_job_id %}{{ url_for('lessons', job_id=nav_job_id) }}{% else %}{{ url_for('index') }}{% endif %}"><i class="fa-solid fa-layer-group"></i><span>Lessons</span></a>
       <a href="{% if nav_job_id %}{{ url_for('openings', job_id=nav_job_id) }}{% else %}{{ url_for('index') }}{% endif %}"><i class="fa-solid fa-book-open"></i><span>Openings</span></a>
       <a href="{{ url_for('processes') }}"><i class="fa-solid fa-gears"></i><span>Process</span></a>
+      <a href="{{ url_for('analytics') }}"><i class="fa-solid fa-chart-simple"></i><span>Analytics</span></a>
       <a href="{{ url_for('settings_page', job_id=nav_job_id) if nav_job_id else url_for('settings_page') }}"><i class="fa-solid fa-sliders"></i><span>Settings</span></a>
     </div>
   </nav>

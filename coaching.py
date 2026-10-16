@@ -5,6 +5,7 @@ from typing import Iterable, Mapping, Optional
 import chess
 
 from position_context import inspect_response, piece_description
+from decision_context import decision_facts, concrete_explanation, has_decisive_context, unanswered_mate_threat
 from immediate_decision import immediate_decision
 from root_explanation import root_move_impact
 from branch_diagnostics import decisive_contrast
@@ -13,7 +14,7 @@ from critical_moments import (critical_decision_evidence, decode_critical_eviden
 from pv_reasoning import comparative_insight, fork_evidence, legal_pv
 from narrative_editor import mate_explanation, polish_comparison, concise
 
-COACHING_VERSION = 'rules-v19-contextual-critical-realizations'
+COACHING_VERSION = 'rules-v20-branch-aware-mates-exchanges'
 
 PIECE_NAMES = {
     chess.PAWN: 'pawn',
@@ -456,29 +457,37 @@ def generate_coaching_text(
     if board.is_check():
         prompt = 'Your king is in check. Find a legal response that neutralizes the check without giving up more than necessary.'
     else:
+        # Mate threats take priority over loose-piece geometry. A threat is
+        # established by a legal mate-in-one after an unanswered (null) turn;
+        # this does not mean the mate is forced against all defenses.
+        immediate_mate_threat = unanswered_mate_threat(board)
+        if immediate_mate_threat:
+            prompt = ('The opponent threatens checkmate on the next move if you '
+                      'ignore the threat. Look for a defense, forcing check, or counterattack.')
         # Only explain an opponent threat as newly created when the preceding
         # board state demonstrates it; older pressure may just be incidental.
-        if context and context.get('last_discovered_lines') and \
+        if not immediate_mate_threat and context and context.get('last_discovered_lines') and \
                 context['last_discovered_lines'][0]['kind'] == 'discovered_attack':
             line = context['last_discovered_lines'][0]
             prompt = (f'The last move revealed an attack on your '
                       f'{line["target_piece"]} on {chess.square_name(line["target_square"])}. '
                       'Find the best response.')
-        elif context and context['new_loose']:
+        elif not immediate_mate_threat and context and context['new_loose']:
             sq = context['new_loose'][0]
             prompt = f'The last move left your {piece_description(board, sq)} newly attacked and undefended. How should you respond?'
-        elif context and context['new_pressure']:
+        elif not immediate_mate_threat and context and context['new_pressure']:
             sq = context['new_pressure'][0]
             prompt = f'The last move added pressure to your {piece_description(board, sq)}. Decide whether you must defend, trade, or counterattack.'
-        elif context and context['new_pins_on_us']:
+        elif not immediate_mate_threat and context and context['new_pins_on_us']:
             sq = context['new_pins_on_us'][0]
             prompt = (f'The opponent’s last move pinned your {piece_description(board, sq)}. '
                       'Check which captures and defenses are still legal before deciding how to respond.')
-        elif context and context['new_pins_on_them']:
+        elif not immediate_mate_threat and context and context['new_pins_on_them']:
             prompt = ('The opponent’s last move has left a piece pinned to its king. '
                       'Look for a forcing move that takes advantage of the restricted defense.')
         else:
-            prompt = None
+            if not immediate_mate_threat:
+                prompt = None
         if prompt is None:
             if category == 'allowed_checkmate':
                 prompt = 'The opponent has a direct mating threat. Identify the threat and find the move that stops it now.'
@@ -509,6 +518,21 @@ def generate_coaching_text(
     played_label = played_move_san or played_move_uci
     if best is None:
         return prompt, 'The saved best move is no longer legal in this position; refresh the game metadata.'
+
+    # Primary explanation is a comparison of *two* actual saved variations,
+    # including piece identity, recaptures, direct mate threats, and whether
+    # threatened material is lost in both lines. This prevents one-ply motifs
+    # from claiming that a counterattack saves an inevitably lost pawn.
+    factual = decision_facts(board, best, played, best_pv_uci, played_pv_uci,
+                             alternative_pvs_json, eval_before_cp, eval_after_cp)
+    grounded = concrete_explanation(board, factual, category=category,
+                                    mate_before=mate_before)
+    if grounded and has_decisive_context(board, factual):
+        # Forced mate beyond one ply has more precise existing mate-number
+        # evidence. Do not replace it with an incidental capture from a PV.
+        if category != 'allowed_checkmate' or factual['opponent_mate_bad']:
+            if category != 'missed_checkmate' or (factual['good']['steps'] and factual['good']['steps'][0]['checkmate']):
+                return prompt, grounded
 
     features = _best_move_features(board, best)
     comparison = comparative_insight(board, best, played, best_pv_uci, played_pv_uci)

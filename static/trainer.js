@@ -107,6 +107,7 @@ let solutionBestMoveSan = null;
 
 const boardEl = document.getElementById('chessboard');
 const feedbackEl = document.getElementById('feedback');
+const feedbackMessageEl = document.getElementById('feedback-message');
 const solutionEl = document.getElementById('solution');
 const learnedCheckbox = document.getElementById('learned-checkbox');
 const learnedToggleWrapEl = document.getElementById('learned-toggle-wrap');
@@ -212,6 +213,7 @@ function renderConcepts(concepts = []) {
   el.innerHTML = '';
   if (!concepts.length) {
     el.classList.add('hidden');
+    updatePositionRatingUI();
     return;
   }
   for (const concept of concepts) {
@@ -222,7 +224,84 @@ function renderConcepts(concepts = []) {
     el.appendChild(chip);
   }
   el.classList.remove('hidden');
+  updatePositionRatingUI();
 }
+
+// Feedback belongs to the position, not a transient playlist or render cycle.
+const positionRatings = new Map();
+let ratingRequestSerial = 0;
+let explainedPositionId = null;
+function positionSolvedForRating() {
+  const p = currentPosition();
+  return Boolean(p && (solved || Number(p.learned) === 1));
+}
+function updatePositionRatingUI() {
+  const p = currentPosition();
+  const ratings = positionRatings.get(Number(p?.id)) || {};
+  const ready = positionSolvedForRating();
+  document.querySelectorAll('.inline-feedback-votes[data-feedback-category]').forEach(group => {
+    const category = group.dataset.feedbackCategory;
+    const eligible = ready &&
+      (category !== 'motif' || Boolean(document.querySelector('#lesson-concepts .lesson-concept-chip.primary'))) &&
+      (category !== 'explanation' || explainedPositionId === Number(p?.id));
+    group.classList.toggle('hidden', !eligible);
+    group.querySelectorAll('[data-rating]').forEach(button => {
+      const selected = eligible && Number(ratings[category] || 0) === Number(button.dataset.rating);
+      button.classList.toggle('active', selected);
+      button.setAttribute('aria-pressed', String(selected));
+    });
+  });
+}
+async function loadPositionRatings(positionId) {
+  const id = Number(positionId || 0);
+  if (!id) return;
+  const serial = ++ratingRequestSerial;
+  try {
+    const response = await fetch(`/api/positions/${id}/feedback`);
+    if (!response.ok) return;
+    const data = await response.json();
+    if (serial !== ratingRequestSerial) return; // An earlier read must not erase a newly saved vote.
+    positionRatings.set(id, data.ratings || {});
+    if (Number(currentPosition()?.id) === id) updatePositionRatingUI();
+  } catch (_) { /* Unavailable votes must not block training. */ }
+}
+async function ratePositionFeedback(button) {
+  const position = currentPosition();
+  const id = Number(position?.id || 0);
+  if (!id || !positionSolvedForRating()) return;
+  const group = button.closest('[data-feedback-category]');
+  const category = group?.dataset.feedbackCategory;
+  const rating = Number(button.dataset.rating);
+  if (!['position', 'explanation', 'motif'].includes(category) || ![-1, 1].includes(rating)) return;
+  const buttons = [...group.querySelectorAll('[data-rating]')];
+  ++ratingRequestSerial; // Invalidate any in-flight GET from an earlier render.
+  buttons.forEach(item => item.disabled = true);
+  try {
+    const response = await fetch(`/api/positions/${id}/feedback`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        category, rating, lesson_key: new URLSearchParams(location.search).get('concept') || '',
+        content_snapshot: category === 'explanation' ? coachTextEl?.textContent || '' : ''
+      })
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || 'Could not save rating');
+    positionRatings.set(id, data.ratings || {});
+    if (Number(currentPosition()?.id) === id) updatePositionRatingUI();
+    group.title = rating === 1 ? 'Thanks — helpful rating saved.' : 'Thanks — unhelpful rating saved.';
+  } catch (err) {
+    group.title = err.message || 'Could not save rating';
+  } finally {
+    buttons.forEach(item => item.disabled = false);
+  }
+}
+
+document.querySelectorAll('.inline-feedback-votes[data-feedback-category]').forEach(group => {
+  group.addEventListener('click', event => {
+    const button = event.target.closest('[data-rating]');
+    if (button && !button.disabled) ratePositionFeedback(button);
+  });
+});
 
 function parseFen(fen) {
   const board = {};
@@ -852,7 +931,7 @@ function setHistoryPly(ply) {
   if (!solved) {
     feedbackEl.className = 'feedback neutral';
   feedbackEl.classList.remove('hidden');
-    feedbackEl.textContent = historyPly === target
+    feedbackMessageEl.textContent = historyPly === target
       ? ''
       : 'Reviewing the game. Move forward to return to the puzzle.';
     feedbackEl.classList.toggle('hidden', historyPly === target);
@@ -1080,7 +1159,7 @@ function handleSquareClick(squareName, board) {
   if (!legalMove) {
     feedbackEl.className = 'feedback neutral';
   feedbackEl.classList.remove('hidden');
-    feedbackEl.textContent = analysisModeActive()
+    feedbackMessageEl.textContent = analysisModeActive()
       ? 'That move is not legal in this analysis position.'
       : 'That move is not legal. Keep looking.';
     paintSelection();
@@ -1287,7 +1366,7 @@ async function playAnalysisMove(from, to, legalMove) {
     if (actionToken !== analysisActionToken || displayedPositionId !== position.id || !analysisModeActive()) return;
     feedbackEl.className = 'feedback bad';
   feedbackEl.classList.remove('hidden');
-    feedbackEl.textContent = 'Could not play that analysis move.';
+    feedbackMessageEl.textContent = 'Could not play that analysis move.';
     return;
   }
 
@@ -1331,6 +1410,7 @@ function renderSolvedDetails(result) {
       ? result.accepted_move_explanation
       : (result.coach_explanation || 'Review how the move changes the threats, defenders, and resulting position.');
     coachTextEl.classList.remove('hidden');
+    explainedPositionId = Number(currentPosition()?.id);
   }
   document.getElementById('best-move').textContent = result.best_move_san || result.best_move_uci || '—';
   const beforeWhite = whitePov(result.eval_before_cp, result.mate_before, result.evaluation_perspective || 'user', result.user_color || currentPosition()?.user_color);
@@ -1356,6 +1436,7 @@ function renderSolvedDetails(result) {
   }
   document.getElementById('puzzle-rating').textContent = result.estimated_rating ? `≈ ${result.estimated_rating}` : '—';
   renderConcepts(result.concepts || currentPosition()?.concepts || []);
+  updatePositionRatingUI();
   solutionEl.classList.remove('hidden');
   maybeOfferProactiveCoach(currentPosition());
 }
@@ -1408,7 +1489,7 @@ async function attemptMove(from, to, legalMove = null) {
     renderBoard(position, position.fen, true);
     feedbackEl.className = 'feedback bad';
   feedbackEl.classList.remove('hidden');
-    feedbackEl.textContent = 'Could not submit the move. Try again.';
+    feedbackMessageEl.textContent = 'Could not submit the move. Try again.';
     return;
   }
 
@@ -1419,7 +1500,7 @@ async function attemptMove(from, to, legalMove = null) {
     renderBoard(position, position.fen, true);
     feedbackEl.className = 'feedback bad';
   feedbackEl.classList.remove('hidden');
-    feedbackEl.textContent = result.error || 'Could not verify that move. Try again.';
+    feedbackMessageEl.textContent = result.error || 'Could not verify that move. Try again.';
     return;
   }
   if (!result.legal) {
@@ -1427,7 +1508,7 @@ async function attemptMove(from, to, legalMove = null) {
     renderBoard(position, position.fen, true);
     feedbackEl.className = 'feedback neutral';
   feedbackEl.classList.remove('hidden');
-    feedbackEl.textContent = 'That move is not legal. Keep looking.';
+    feedbackMessageEl.textContent = 'That move is not legal. Keep looking.';
     return;
   }
 
@@ -1441,7 +1522,7 @@ async function attemptMove(from, to, legalMove = null) {
       showBoardMark('wrong');
       feedbackEl.className = 'feedback bad';
   feedbackEl.classList.remove('hidden');
-      feedbackEl.textContent = 'Not quite — try again.';
+      feedbackMessageEl.textContent = 'Not quite — try again.';
 
       previewTimers.push(setTimeout(() => {
         if (displayedPositionId !== position.id || solved) return;
@@ -1490,13 +1571,15 @@ async function attemptMove(from, to, legalMove = null) {
     showBoardMark('correct');
     feedbackEl.className = 'feedback good';
   feedbackEl.classList.remove('hidden');
-    feedbackEl.textContent = result.accepted_alternative
+    feedbackMessageEl.textContent = result.accepted_alternative
       ? 'Strong move — accepted as near-optimal and position marked learned.'
       : 'Correct — position marked learned.';
 
     position.estimated_rating = result.estimated_rating ?? position.estimated_rating;
     position.difficulty_score = result.difficulty_score ?? position.difficulty_score;
     renderSolvedDetails(result);
+    updatePositionRatingUI();
+    loadPositionRatings(position.id);
     if (!result.accepted_alternative) loadSolvedDetails(position);
     engineToggleEl.disabled = false;
     if (engineToggleWrapEl) engineToggleWrapEl.classList.remove('hidden');
@@ -1542,7 +1625,7 @@ async function refreshCurrentPosition() {
   } catch (error) {
     feedbackEl.className = 'feedback bad';
   feedbackEl.classList.remove('hidden');
-    feedbackEl.textContent = error.message || 'Could not reset this puzzle.';
+    feedbackMessageEl.textContent = error.message || 'Could not reset this puzzle.';
   } finally {
     refreshPositionEl.disabled = false;
     refreshPositionEl.textContent = originalLabel;
@@ -1560,7 +1643,7 @@ async function rateCoachResponse(button) {
     const response = await fetch(`/api/coach/messages/${messageId}/feedback`, {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({rating})
+      body: JSON.stringify({rating, lesson_key: new URLSearchParams(location.search).get('concept') || ''})
     });
     const result = await response.json();
     if (!response.ok) throw new Error(result.error || 'Could not save feedback');
@@ -1650,6 +1733,8 @@ async function showPosition(index) {
   // Prevent an earlier puzzle's delayed context/solution from painting over
   // this card while its next chunk is in flight.
   displayedPositionId = null;
+  explainedPositionId = null;
+  ++ratingRequestSerial;
   inputLocked = true;
   solved = false;
   updateNavigationMeta();
@@ -1663,7 +1748,7 @@ async function showPosition(index) {
         boardEl.classList.remove('position-loading');
         feedbackEl.className = 'feedback bad';
         feedbackEl.classList.remove('hidden');
-        feedbackEl.textContent = error.message || 'Could not load this position.';
+        feedbackMessageEl.textContent = error.message || 'Could not load this position.';
       }
       return;
     }
@@ -1709,11 +1794,13 @@ async function showPosition(index) {
   document.getElementById('puzzle-rating').textContent = '—';
   feedbackEl.className = solved ? 'feedback good' : 'feedback neutral';
   feedbackEl.classList.remove('hidden');
-  feedbackEl.textContent = solved ? 'Already learned. Review the game or move to another puzzle.' : '';
+  feedbackMessageEl.textContent = solved ? 'Already learned. Review the game or move to another puzzle.' : '';
   feedbackEl.classList.toggle('hidden', !solved);
   solutionEl.classList.add('hidden');
   coachThreadReadyPositionId = null;
   renderConcepts([]);
+  updatePositionRatingUI();
+  loadPositionRatings(p.id);
   learnedCheckbox.checked = Boolean(p.learned);
   if (learnedToggleWrapEl) learnedToggleWrapEl.classList.add('hidden');
   solvedPositionControlsEl?.classList.add('hidden');
@@ -1750,10 +1837,11 @@ async function showPosition(index) {
     showBoardMark('correct');
     feedbackEl.className = 'feedback good';
     feedbackEl.classList.remove('hidden');
-    feedbackEl.textContent = '✓ Solved position — review the correct move or continue.';
+    feedbackMessageEl.textContent = '✓ Solved position — review the correct move or continue.';
     solutionEl.classList.remove('hidden');
     if (p.estimated_rating) document.getElementById('puzzle-rating').textContent = `≈ ${p.estimated_rating}`;
     renderConcepts(p.concepts || []);
+    updatePositionRatingUI();
     engineToggleEl.disabled = false;
     engineToggleWrapEl?.classList.remove('hidden');
     solvedPositionControlsEl?.classList.remove('hidden');
@@ -1780,7 +1868,7 @@ async function showPosition(index) {
 
   feedbackEl.className = 'feedback neutral';
   feedbackEl.classList.remove('hidden');
-  feedbackEl.textContent = '';
+  feedbackMessageEl.textContent = '';
   feedbackEl.classList.add('hidden');
   previewOpponentMove(p, false);
 }
@@ -1830,7 +1918,7 @@ async function loadPositions(preservePosition = true) {
     if (!positions.length) {
       displayedPositionId = null;
       document.getElementById('position-title').textContent = 'No confirmed positions yet';
-      feedbackEl.textContent = analysisComplete ? 'Playlist complete. Choose another lesson.' : 'Analysis is still running. This page will update automatically.';
+      feedbackMessageEl.textContent = analysisComplete ? 'Playlist complete. Choose another lesson.' : 'Analysis is still running. This page will update automatically.';
       updateNavigationMeta();
     } else if (!preservePosition || displayedPositionId === null) {
       const requestedIndex = requestedPositionPending ? positions.findIndex(p => Number(p.id) === requestedPositionPending) : -1;
@@ -1848,7 +1936,7 @@ async function loadPositions(preservePosition = true) {
   } catch (error) {
     feedbackEl.className = 'feedback bad';
     feedbackEl.classList.remove('hidden');
-    feedbackEl.textContent = error.message || 'Could not load training playlist.';
+    feedbackMessageEl.textContent = error.message || 'Could not load training playlist.';
   } finally { positionsRequestPending = false; }
 }
 
@@ -2041,7 +2129,7 @@ learnedCheckbox.addEventListener('change', async () => {
       if (displayedPositionId === p.id && !solved) {
         feedbackEl.className = 'feedback neutral';
         feedbackEl.classList.remove('hidden');
-        feedbackEl.textContent = 'Marked for practice again. Solve this position anew.';
+        feedbackMessageEl.textContent = 'Marked for practice again. Solve this position anew.';
       }
       return;
     }
@@ -2056,13 +2144,14 @@ learnedCheckbox.addEventListener('change', async () => {
     updateNavigationMeta();
     feedbackEl.className = 'feedback good';
     feedbackEl.classList.remove('hidden');
-    feedbackEl.textContent = 'Position learned. It will stay out of the active training mix unless you reset it later.';
+    feedbackMessageEl.textContent = 'Position learned. It will stay out of the active training mix unless you reset it later.';
+    updatePositionRatingUI();
     if (engineToggleEl.checked) refreshEngineEvaluation();
   } catch (error) {
     learnedCheckbox.checked = !requested;
     feedbackEl.className = 'feedback bad';
   feedbackEl.classList.remove('hidden');
-    feedbackEl.textContent = error.message || 'Could not update learned state.';
+    feedbackMessageEl.textContent = error.message || 'Could not update learned state.';
   }
 });
 
