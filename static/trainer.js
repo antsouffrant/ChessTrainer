@@ -465,8 +465,16 @@ function analysisModeActive() {
   return solved && Boolean(engineToggleEl?.checked);
 }
 
+function fenTurnColor(fen) {
+  // The solved board normally shows the *result* of the user's correct move,
+  // so the next piece to move may belong to the opponent, not the learner.
+  const turn = String(fen || '').split(/\s+/)[1];
+  return turn === 'w' ? 'white' : turn === 'b' ? 'black' : null;
+}
+
 function interactionColor(position) {
-  return analysisModeActive() ? analysisTurn : position.user_color;
+  if (!solved) return position.user_color;
+  return analysisModeActive() ? (analysisTurn || fenTurnColor(currentDisplayedFen())) : fenTurnColor(currentDisplayedFen());
 }
 
 function clearPreviewTimers() {
@@ -536,7 +544,11 @@ function renderBoard(position, fen = position.fen, interactive = true) {
   ensureBoardGrid(position);
   hideEngineArrow();
   boardEl.querySelectorAll('.moving-piece').forEach(el => el.remove());
-  const canInteract = interactive && ((analysisModeActive() && analysisTurn) || (!solved && !inputLocked));
+  // A solved position is ready for a new branch even before Stockfish is
+  // explicitly enabled. Its first move will enable analysis automatically.
+  const canInteract = Boolean(interactive && (solved
+    ? (analysisModeActive() ? (analysisTurn || fenTurnColor(fen)) : fenTurnColor(fen))
+    : !inputLocked));
   const activeColor = interactionColor(position);
   renderedBoardMap = board;
   boardInteractive = Boolean(canInteract);
@@ -558,7 +570,7 @@ boardDragController = window.installBoardPointerDrag(boardEl, {
     paintSelection();
   },
   onDrop: (from, to) => {
-    const legalMove = boardInteractive ? resolveLegalMove(from, to) : null;
+    const legalMove = boardInteractive ? resolveBoardMove(from, to) : null;
     selectedSquare = null;
     paintSelection();
     if (legalMove) submitBoardMove(from, to, legalMove);
@@ -1045,7 +1057,7 @@ function setHistoryPly(ply) {
   historyPly = Math.max(0, Math.min(Number(ply), target));
   inputLocked = historyPly !== target || solved;
   const canInteract = (!solved && historyPly === target) || analysisModeActive();
-  renderBoard(currentPosition(), fenAtHistoryPly(historyPly), canInteract);
+  renderBoard(currentPosition(), fenAtHistoryPly(historyPly), solved || canInteract);
   clearHighlights();
   updateHistoryUI();
 
@@ -1071,7 +1083,7 @@ function showSolvedReviewPosition() {
   selectedSquare = null;
   clearBoardMark();
   clearHighlights();
-  renderBoard(currentPosition(), solvingMoveFen, analysisModeActive());
+  renderBoard(currentPosition(), solvingMoveFen, true);
   updateHistoryUI();
   if (engineToggleEl.checked) refreshEngineEvaluation();
   return true;
@@ -1092,7 +1104,7 @@ function showAnalysisCursor(cursor) {
     showingSolvedMove = reviewStage === 'solved';
     analysisLegalMoves = [];
     analysisTurn = null;
-    renderBoard(currentPosition(), analysisBase.fen, false);
+    renderBoard(currentPosition(), analysisBase.fen, true);
   } else {
     const frame = analysisFrames[nextCursor - 1];
     reviewStage = 'analysis';
@@ -1100,7 +1112,7 @@ function showAnalysisCursor(cursor) {
     showingSolvedMove = false;
     analysisLegalMoves = Array.isArray(frame.legalMoves) ? frame.legalMoves : [];
     analysisTurn = frame.turn || null;
-    renderBoard(currentPosition(), frame.fen, analysisModeActive());
+    renderBoard(currentPosition(), frame.fen, true);
   }
   updateHistoryUI();
   if (engineToggleEl.checked) refreshEngineEvaluation();
@@ -1232,7 +1244,9 @@ function previewOpponentMove(position, retry = false) {
 }
 
 function currentLegalMoves() {
-  if (analysisModeActive()) return Array.isArray(analysisLegalMoves) ? analysisLegalMoves : [];
+  // Context moves belong to the original puzzle FEN, not necessarily to the
+  // displayed solved position. Never use them for a post-solve first move.
+  if (solved) return analysisModeActive() && Array.isArray(analysisLegalMoves) ? analysisLegalMoves : [];
   return Array.isArray(currentContext?.legal_moves) ? currentContext.legal_moves : [];
 }
 
@@ -1246,6 +1260,14 @@ function resolveLegalMove(from, to) {
     || matches[0];
 }
 
+function resolveBoardMove(from, to) {
+  if (!from || !to || from === to) return null;
+  // After solving, Stockfish has not yet populated legal moves. The server
+  // validates this provisional UCI move (including automatic queen promotion)
+  // without requiring the learner to flip the toggle manually.
+  return resolveLegalMove(from, to) || (solved && !currentLegalMoves().length ? `${from}${to}` : null);
+}
+
 function legalTargetsFrom(squareName) {
   return currentLegalMoves()
     .filter(move => move.startsWith(squareName))
@@ -1253,7 +1275,7 @@ function legalTargetsFrom(squareName) {
 }
 
 function handleSquareClick(squareName, board) {
-  if ((!analysisModeActive() && solved) || (!analysisModeActive() && inputLocked)) return;
+  if (!boardInteractive) return;
   const position = currentPosition();
   const activeColor = interactionColor(position);
   if (!selectedSquare) {
@@ -1276,7 +1298,7 @@ function handleSquareClick(squareName, board) {
     return;
   }
 
-  const legalMove = resolveLegalMove(selectedSquare, squareName);
+  const legalMove = resolveBoardMove(selectedSquare, squareName);
   if (!legalMove) {
     feedbackEl.className = 'feedback neutral';
   feedbackEl.classList.remove('hidden');
@@ -1467,6 +1489,9 @@ async function playAnalysisMove(from, to, legalMove) {
   clearHighlights();
   hideEngineArrow();
   boardInteractive = false;
+  boardEl.classList.remove('is-interactive');
+  // Ignore any older response from an explicit engine evaluation.
+  engineRequestToken += 1;
 
   const animationPromise = new Promise(resolve => animateMove(position, from, to, resolve, false));
   let response;
@@ -1487,7 +1512,11 @@ async function playAnalysisMove(from, to, legalMove) {
     if (actionToken !== analysisActionToken || displayedPositionId !== position.id || !analysisModeActive()) return;
     feedbackEl.className = 'feedback bad';
   feedbackEl.classList.remove('hidden');
-    feedbackMessageEl.textContent = 'Could not play that analysis move.';
+    feedbackMessageEl.textContent = 'That move is not legal, or could not be played. Try another move.';
+    // The board must remain usable even if the first post-solve move was
+    // illegal or the server was temporarily unavailable.
+    renderBoard(position, startingFen, true);
+    refreshEngineEvaluation();
     return;
   }
 
@@ -1495,7 +1524,7 @@ async function playAnalysisMove(from, to, legalMove) {
   if (analysisCursor < analysisFrames.length) analysisFrames = analysisFrames.slice(0, analysisCursor);
   analysisFrames.push({
       fen: result.fen,
-      moveUci: legalMove,
+      moveUci: result.move_uci || legalMove,
       moveSan: result.move_san || legalMove,
       legalMoves: Array.isArray(result.legal_moves) ? result.legal_moves : [],
       turn: result.turn || null,
@@ -1511,6 +1540,15 @@ async function playAnalysisMove(from, to, legalMove) {
 }
 
 function submitBoardMove(from, to, legalMove) {
+  if (solved && !analysisModeActive()) {
+    // The first post-solve move both enters analysis and plays that very move.
+    // Do not request an engine evaluation first: its asynchronous board redraw
+    // could interrupt a drag gesture or overwrite the in-flight move.
+    engineToggleEl.checked = true;
+    clearBoardMark();
+    updateHistoryUI();
+    engineEvalEl.textContent = '…';
+  }
   if (analysisModeActive()) return playAnalysisMove(from, to, legalMove);
   return attemptMove(from, to, legalMove);
 }
@@ -1672,7 +1710,7 @@ async function attemptMove(from, to, legalMove = null) {
     reviewStage = 'solved';
     historyPly = contextTargetPly();
     learnedCheckbox.checked = true;
-    renderBoard(position, result.attempted_fen, false);
+    renderBoard(position, result.attempted_fen, true);
     updateHistoryUI();
     if (result.accepted_alternative) {
       // Preserve the move the learner actually played in yellow while showing
@@ -1959,7 +1997,7 @@ async function showPosition(index) {
   updateCoachMode();
   // Draw the actual board and restore solved feedback BEFORE fetching the
   // full game history, coaching thread, or slow engine explanations.
-  renderBoard(p, restoredSolvedFen || p.fen, false);
+  renderBoard(p, restoredSolvedFen || p.fen, solved);
   if (solved) {
     if (solvingMoveUci?.length >= 4) {
       highlight(solvingMoveUci.slice(0, 2), 'correct');
@@ -2194,7 +2232,7 @@ engineToggleEl.addEventListener('change', () => {
     engineEvalEl.textContent = '—';
     hideEngineArrow();
     // Preserve the temporary line and current board; only live engine input stops.
-    renderBoard(currentPosition(), currentDisplayedFen(), false);
+    renderBoard(currentPosition(), currentDisplayedFen(), true);
     updateHistoryUI();
   }
 });

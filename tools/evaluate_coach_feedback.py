@@ -45,7 +45,10 @@ def normalize(row):
         'category': row.get('category') or row.get('position_category') or 'mistake',
         'centipawn_loss': row.get('centipawn_loss') or '0',
         'mate_before': row.get('mate_before') or '',
-        'current_motif': row.get('current_motif') or row.get('current_primary_motif_key') or row.get('primary_motif_key') or '',
+        'eval_before_cp': row.get('eval_before_cp') or '',
+        'eval_after_cp': row.get('eval_after_cp') or '',
+        'alternative_pvs_json': row.get('alternative_pvs_json') or '[]',
+        'current_motif': row.get('current_motif') or row.get('motif_at_vote_key') or row.get('current_primary_motif_key') or row.get('primary_motif_key') or '',
         'suggested_motif': row.get('suggested_motif') or row.get('suggested_motif_key') or '',
         'original_text': row.get('original_text') or row.get('content_snapshot') or '',
         'suggested_text': row.get('suggested_text') or '',
@@ -103,7 +106,10 @@ def analyze(rows):
                     played_pv_uci=pv(rec['played_pv_uci']),
                     best_pv_uci=pv(rec['best_pv_uci']),
                     labels=labels, category=rec['category'],
-                    mate_before=int(rec['mate_before']) if rec['mate_before'] else None)
+                    mate_before=int(rec['mate_before']) if rec['mate_before'] else None,
+                    eval_before_cp=int(float(rec['eval_before_cp'])) if rec['eval_before_cp'] else None,
+                    eval_after_cp=int(float(rec['eval_after_cp'])) if rec['eval_after_cp'] else None,
+                    alternative_pvs_json=pv(rec['alternative_pvs_json']))
                 result['predicted_explanation'] = explanation
                 result['explanation_has_boilerplate'] = str(bool(re.search(
                     r'analyzed continuation|Why .+ falls short|Stockfish evaluates', explanation, re.I))).lower()

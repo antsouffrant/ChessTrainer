@@ -15,7 +15,7 @@ from pv_reasoning import comparative_insight, fork_evidence, legal_pv
 from narrative_editor import mate_explanation, polish_comparison, concise
 from semantic_coaching import causal_coaching
 
-COACHING_VERSION = 'rules-v26-feedback-hierarchy-refutations'
+COACHING_VERSION = 'rules-v27-causal-comprehension'
 
 PIECE_NAMES = {
     chess.PAWN: 'pawn',
@@ -529,6 +529,9 @@ def generate_coaching_text(
     # from claiming that a counterattack saves an inevitably lost pawn.
     factual = decision_facts(board, best, played, best_pv_uci, played_pv_uci,
                              alternative_pvs_json, eval_before_cp, eval_after_cp)
+    # A legal king move may both resolve check *and* activate the king in an
+    # endgame. Don't discard a substantiated causal finding merely because
+    # the original position starts in check; preserve forcing mate evidence.
     # Rank consequences before composing prose. A direct reply, a later
     # demonstrated loss, and positional consequences are NOT equally strong
     # evidence. This semantic layer speaks first when it can explain the
@@ -538,7 +541,7 @@ def generate_coaching_text(
         board, best, played, best_pv_uci, played_pv_uci,
         alternative_pvs_json, eval_before_cp, eval_after_cp,
         category, mate_before, facts=factual)
-    if semantic and (not board.is_check() or semantic['motif'] in {'mate_defense', 'mating_net'}):
+    if semantic and (not board.is_check() or semantic['evidence_level'] >= 2):
         return prompt, semantic['text']
     features = _best_move_features(board, best)
     comparison = comparative_insight(board, best, played, best_pv_uci, played_pv_uci)

@@ -88,3 +88,62 @@ Stockfish run when engine settings change. Systematic refutation scanning
 currently covers *local* checks, double attacks, skewers and uncovered line
 attacks **when their material payoff occurs in the near continuation**;
 it does not claim full tactical completeness.
+
+## v60: cumulative correction analysis and causal-comprehension iteration
+
+The user supplied a further Coach regression-candidates CSV with 51 proposed
+negative-feedback corrections (25 motif substitutions, 26 explanation rewrites)
+spanning 33 distinct training positions. These corrections are stored as a
+minimal, anonymized fixture:
+
+`tests/fixtures/coach_regression_candidates_v60.jsonl`
+
+The original 109-record positive/negative fixture remains in the archive.
+**The 51-record fixture is selected failures only**: it is not an accuracy
+estimate or representative sample of all puzzles, and multiple ratings can
+refer to the same position. Individual proposed corrections are suggestions,
+not independently verified chess truth.
+
+The v60 coaching update adds:
+
+- `causal_selection.py`: a single deterministic ranking policy consumed by
+  both explanation selection and primary-motif classification. It prefers
+  demonstrated consequences, short causal chains, specific mechanisms, and
+  close proximity to the training decision. It penalizes remote, speculative
+  motifs and broad fallback labels without inventing tactics.
+- `continuation_refutations.py`: in addition to forks, skewers and discovered
+  attacks with demonstrated payoffs, identifies short sequences in which a
+  captured defender's disappearance enables a later capture. An aligned
+  slider does not count as a skewer unless it *actually* checks the king.
+- `semantic_coaching.py`: endgame king activation and newly doubled pawns
+  require near-root, branch-comparable evidence. Neutral exchanges no longer
+  risk using an unset material-loss variable. The chosen explanation states
+  a chess idea instead of narrating the reasoning machinery.
+- `learning.py`: the primary label is aligned with the same leading causal
+  finding while protecting exact tablebase verdicts, forced mating obligations,
+  and established hanging-piece provenance.
+
+Run the pure-Python ranking and fixture checks without chess dependencies:
+
+```bash
+python -m unittest -q tests.test_causal_comprehension_v60 tests.test_feedback_hierarchy_v58
+```
+
+Install `requirements.txt` to run the **chess-specific** acceptance tests and
+replay the two fixture generations (no Stockfish needed for offline replay):
+
+```bash
+python tools/evaluate_coach_feedback.py \
+  --input tests/fixtures/coach_feedback_v58.jsonl \
+  --output coach_approved_and_corrected_v60.csv
+python tools/evaluate_coach_feedback.py \
+  --input tests/fixtures/coach_regression_candidates_v60.jsonl \
+  --output coach_corrected_failures_v60.csv
+```
+
+A successful run gives comparative *suggested-motif agreement* and material
+for manual review of explanation semantics; it cannot automatically prove
+correctness or improvement. Check candidate legality, evaluation perspective,
+PV coverage and plausible alternative refutations before promoting a proposal
+to a verified acceptance case. Preserve earlier approved motifs as stability
+checks, rather than optimizing only on downvotes.

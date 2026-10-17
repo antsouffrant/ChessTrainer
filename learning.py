@@ -9,12 +9,13 @@ from position_context import inspect_response
 from immediate_decision import immediate_decision
 from decision_context import decision_facts
 from semantic_coaching import evidence_findings
+from causal_selection import primary_causal_finding, finding_score
 from loose_piece_provenance import differential_loss_motif, confirmed_differential_loss
 from motif_relevance import select_relevant_primary
 from motif_hierarchy import choose_specific, validate_ontology
 from pv_reasoning import fork_evidence, legal_pv, comparative_insight
 
-CLASSIFIER_VERSION = '2.7-evidence-hierarchy'
+CLASSIFIER_VERSION = '2.8-shared-causal-selection'
 
 # A deliberately compact curriculum: these are common, teachable amateur
 # failure modes that we can identify with reasonably explainable board rules.
@@ -826,6 +827,31 @@ def classify_learning_concepts(
     chosen = choose_specific(chosen, supported,
                              protected={'mate_defense', 'back_rank_mate',
                                         'mating_net', 'endgame_precision'})
+    # Final alignment: explanations and primary motifs must describe the
+    # same verified *cause*, not merely nearby board features. This uses the
+    # same ranked findings as causal_coaching; a later generic metadata pass
+    # may no longer silently overwrite a demonstrated mechanism. Forced mate,
+    # tablebase verdicts, and confirmed piece provenance remain protected.
+    leading_cause = primary_causal_finding(causal or [])
+    meaningful_evasion = (not check_evasion or (
+        leading_cause is not None and leading_cause.horizon == 0
+        and leading_cause.confidence >= 2
+        and leading_cause.motif in {'king_activity', 'capture_loose_piece',
+                                    'removal_of_defender', 'fork', 'pin',
+                                    'material_sacrifice', 'exchange_sacrifice'}))
+    if (leading_cause is not None and not forced_primary and meaningful_evasion
+            and chosen != 'endgame_precision' and leading_cause.motif in CONCEPTS
+            and finding_score(leading_cause) >= 72 and leading_cause.horizon <= 2):
+        provenance_protected = bool(witnessed and chosen in {
+            'loose_piece_awareness', 'dont_hang_pieces', 'lost_material'
+        } and leading_cause.key not in {'material_loss', 'line_refutation'})
+        capture_protected = bool(root_evidence and root_evidence.get('kind') == 'free_capture'
+                                 and leading_cause.key not in {'clean_capture', 'line_refutation'})
+        if not provenance_protected and not capture_protected:
+            add(leading_cause.motif,
+                min(0.99, 0.76 + 0.07 * leading_cause.confidence),
+                leading_cause.assessment)
+            chosen = leading_cause.motif
     ordered = sorted(labels.values(), key=lambda label: (
         label.key != chosen, -relevance_scores.get(label.key, 0.0),
         -label.confidence, -CONCEPTS[label.key]['priority']))

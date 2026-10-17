@@ -32,7 +32,9 @@ def _skewer_victim(after, attacking_square, victim_color):
         return None
     df = chess.square_file(king_sq) - chess.square_file(attacking_square)
     dr = chess.square_rank(king_sq) - chess.square_rank(attacking_square)
-    if df == 0 and dr == 0:
+    if df == 0 and dr == 0 or king_sq not in after.attacks(attacking_square):
+        # A different piece may have given check. Don't infer a skewer from
+        # an aligned king unless this attacker actually checks it.
         return None
     diagonal = abs(df) == abs(dr)
     straight = df == 0 or dr == 0
@@ -87,7 +89,7 @@ def scan_branch(board, root_move, raw, *, branch, max_threat_ply=3):
         # Captures in the saved continuation by the same side, reasonably
         # close to the threat. The target must be one of the threatened pieces.
         payoff = None
-        for j in range(ply + 1, min(len(snapshots), ply + 4)):
+        for j in range(ply + 1, min(len(snapshots), ply + 5)):
             b, a, follow, follow_san = snapshots[j]
             if b.turn != before.turn or not b.is_capture(follow):
                 continue
@@ -96,16 +98,49 @@ def scan_branch(board, root_move, raw, *, branch, max_threat_ply=3):
                 captured = chess.Piece(chess.PAWN, not b.turn)
             if not captured or captured.color == before.turn:
                 continue
-            if follow.to_square in {sq for sq, _ in targets} or follow.to_square == victim:
+            # Do not describe a recapturable trade as material won. A saved
+            # next-ply recapture of equal or greater value cancels this
+            # *particular* payoff; a different downstream consequence must
+            # establish any broader compensation.
+            if j + 1 < len(snapshots):
+                next_board, _, reply, _ = snapshots[j + 1]
+                recaptured = next_board.piece_at(reply.to_square)
+                moved = b.piece_at(follow.from_square)
+                if (reply.to_square == follow.to_square
+                        and next_board.is_capture(reply)
+                        and recaptured and moved and
+                        VALUES[moved.piece_type] >= VALUES[captured.piece_type]):
+                    continue
+            # The same piece may remove an opposing defender at the root,
+            # allowing us to take what that defender previously guarded.
+            removed = before.piece_at(move.to_square) if before.is_capture(move) else None
+            defender_removed = bool(
+                removed and removed.color != before.turn and
+                follow.to_square != move.to_square and
+                follow.to_square in before.attacks(move.to_square) and
+                before.piece_at(follow.to_square) is not None and
+                before.piece_at(follow.to_square).color == removed.color and
+                not after.is_attacked_by(removed.color, follow.to_square))
+            if (follow.to_square in {sq for sq, _ in targets}
+                    or follow.to_square == victim or defender_removed):
                 payoff = (follow_san, captured, follow.to_square)
                 break
         if not payoff:
             continue
         payoff_san, captured, square = payoff
+        removed = before.piece_at(move.to_square) if before.is_capture(move) else None
+        was_guarded = bool(
+            removed and removed.color != before.turn and
+            square != move.to_square and square in before.attacks(move.to_square) and
+            before.piece_at(square) is not None and
+            before.piece_at(square).color == removed.color and
+            not after.is_attacked_by(removed.color, square))
         if victim == square and is_check:
             motif, kind = 'skewer', 'skewers the king and the piece behind it'
         elif (is_check and large_targets) or len(large_targets) >= 2:
             motif, kind = 'fork', 'creates a double attack'
+        elif was_guarded:
+            motif, kind = 'removal_of_defender', 'removes a defender'
         else:
             # Discovered attack: the mover leaves an origin square that
             # obstructed a line from another slider to the captured target.
@@ -120,10 +155,12 @@ def scan_branch(board, root_move, raw, *, branch, max_threat_ply=3):
                 continue
             motif, kind = 'discovered_attack', 'uncovers an attack'
         if branch == 'best':
-            text = (f'{san} {kind}; after the reply, {payoff_san} wins '
-                    f'the opponent\'s {chess.piece_name(captured.piece_type)}.')
+            text = (f'{san} {kind}, and {payoff_san} later wins '
+                    f'the {chess.piece_name(captured.piece_type)}.')
         else:
-            text = (f'In the game, the opponent can answer with {san}, which {kind}; '
+            root_name = snapshots[0][3]
+            text = (f'In the game you played {root_name}. Your opponent can '
+                    f'respond with {san}, which {kind}; '
                     f'{payoff_san} then wins your {chess.piece_name(captured.piece_type)}.')
         findings.append(Refutation(motif, branch, ply, san, payoff_san, text))
     return findings

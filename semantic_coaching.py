@@ -20,8 +20,9 @@ import chess
 from decision_context import decision_facts, trace_variation
 from loose_piece_provenance import differential_loss_motif
 from coaching_language import game_continuation
+from causal_selection import ranked_findings
 
-VERSION = 'chess-idea-coaching-v6-feedback-refutations'
+VERSION = 'chess-idea-coaching-v7-causal-comprehension'
 VALUES = {chess.PAWN: 1, chess.KNIGHT: 3, chess.BISHOP: 3,
           chess.ROOK: 5, chess.QUEEN: 9, chess.KING: 0}
 CENTRAL = {chess.D4, chess.E4, chess.D5, chess.E5}
@@ -339,6 +340,74 @@ def _pawn_sacrifice_plan(board, best, facts):
     return None
 
 
+def _active_king_advantage(board, best, played):
+    """A *root-level* endgame king activation, not a remote tactical guess.
+
+    Centralization alone does not prove a win. Require the more active choice
+    to be a king move in a simplified game and the inferior alternative to
+    concede a meaningful square. Neither choice may expose the king to check.
+    """
+    mover = board.piece_at(best.from_square)
+    if not mover or mover.piece_type != chess.KING or not played:
+        return None
+    queens = sum(len(board.pieces(chess.QUEEN, color)) for color in (chess.WHITE, chess.BLACK))
+    majors = sum(len(board.pieces(piece_type, color)) for color in (chess.WHITE, chess.BLACK)
+                 for piece_type in (chess.ROOK, chess.QUEEN))
+    if queens or majors > 2:
+        return None
+    if board.is_checkmate():
+        return None
+    rival = _after(board, played)
+    good = _after(board, best)
+    if good.is_check() or rival.is_check():
+        return None
+    def central_distance(square):
+        f, r = chess.square_file(square), chess.square_rank(square)
+        return min(abs(f - x) + abs(r - y) for x in (3, 4) for y in (3, 4))
+    g = central_distance(best.to_square)
+    b = central_distance(good.king(board.turn) if played.from_square != best.from_square
+                         else played.to_square)
+    if b - g < 2:
+        return None
+    return {'square': _s(best.to_square), 'gain': b - g}
+
+
+def _doubled_pawn_files(board, color):
+    counts = {file: 0 for file in range(8)}
+    for square in board.pieces(chess.PAWN, color):
+        counts[chess.square_file(square)] += 1
+    return {f for f, n in counts.items() if n >= 2}
+
+
+def _pawn_structure_contrast(board, best, played, facts):
+    """Only a newly demonstrated doubled-pawn concession near the decision.
+
+    Both saved branches must reach the compared horizon; otherwise saying a
+    pawn structure was 'avoided' would extrapolate from a shorter PV.
+    """
+    bad, good = facts.get('bad'), facts.get('good')
+    if not played or not bad or len(bad['steps']) < 2 or len(good['steps']) < 2:
+        return None
+    def replay_two(steps):
+        child = board.copy(stack=False)
+        for step in steps[:2]:
+            move = chess.Move.from_uci(step['uci'])
+            if move not in child.legal_moves:
+                return None
+            child.push(move)
+        return child
+    better, worse = replay_two(good['steps']), replay_two(bad['steps'])
+    if better is None or worse is None:
+        return None
+    root = _doubled_pawn_files(board, board.turn)
+    new_bad = _doubled_pawn_files(worse, board.turn) - root
+    avoided = new_bad - _doubled_pawn_files(better, board.turn)
+    if not avoided:
+        return None
+    file = min(avoided)
+    return chess.FILE_NAMES[file], bad['steps'][1]['san']
+
+
 def evidence_findings(board, best, played, best_pv=None, played_pv=None,
                       alternatives=None, best_cp=None, played_cp=None,
                       category='', mate_before=None, facts=None):
@@ -456,8 +525,8 @@ def evidence_findings(board, best, played, best_pv=None, played_pv=None,
             # a more specific explanation. Quiet trades are otherwise too
             # easily mislabeled as wins or losses of hanging pieces.
             early_consequence = any(f.impact >= 75 and f.horizon <= 1 for f in findings)
-            if not early_consequence:
-                loss = next((c for c in _material_losses(facts) if c['ply'] <= 3), None)
+            loss = (None if early_consequence else
+                    next((c for c in _material_losses(facts) if c['ply'] <= 3), None))
             if loss:
                 step = bad['steps'][loss['ply']]
                 add('simplification', 'simplification', 1, 2, 88,
@@ -480,6 +549,21 @@ def evidence_findings(board, best, played, best_pv=None, played_pv=None,
         else:
             add('queen_trade_castling', 'king_safety', 2, 2, 89,
                 f'{bad_name} permits a queen trade that forces your king to move, losing castling rights.')
+
+    # Strategic comprehension is grounded at the decision, not a long-line
+    # geometry label. Distinguish active kings and *actual* pawn concessions.
+    if bad_move and not facts['positive']:
+        active = _active_king_advantage(board, best, bad_move)
+        if active:
+            add('active_king', 'king_activity', 0, 2, 84,
+                f'{best_name} activates your king on {active["square"]}; '
+                f'{bad_name} leaves it farther from the center of the endgame.')
+        doubled = _pawn_structure_contrast(board, best, bad_move, facts)
+        if doubled:
+            file, reply = doubled
+            add('doubled_pawns', 'pawn_structure', 1, 2, 93,
+                f'In the game you played {bad_name}, allowing {reply} to leave you '
+                f'with doubled {file}-pawns. {best_name} preserves your pawn structure.')
 
     if facts['our_mate_good'] and not facts['our_mate_bad']:
         add('mate_threat', 'mate_threat', 0, 3, 95,
@@ -599,10 +683,7 @@ def evidence_findings(board, best, played, best_pv=None, played_pv=None,
 
     # Downweight non-mating remote incidents. Exception: a verified pawn
     # sacrifice whose bishop payoff is causally rooted in the pawn advance.
-    findings.sort(key=lambda f: (
-        -(f.impact - (65 if f.horizon > 2 and f.key not in {'pawn_sacrifice_plan', 'mate_forced'} else 0)),
-        f.horizon, -f.confidence, f.key))
-    return findings, facts
+    return ranked_findings(findings), facts
 
 
 def causal_coaching(board, best, played, best_pv=None, played_pv=None,

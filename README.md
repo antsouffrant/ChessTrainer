@@ -1,4 +1,4 @@
-# Personal Chess Trainer
+# Personal Chess Trainer — v60
 
 A local Flask application that retrieves Lichess games, evaluates them with Stockfish, and builds training positions, lessons, opening playlists, and position-aware chess coaching. Saved game lists, evaluations, training progress, and thumbs feedback use a local SQLite database.
 
@@ -111,3 +111,22 @@ reporter. Run `python tools/evaluate_coach_feedback.py --input tests/fixtures/co
 installing the dependencies in `requirements.txt`. **Refresh Metadata** uses
 the new text and classifier versions without rerunning Stockfish; **Restart
 Analysis** is destructive and not needed for this coaching-only update.
+
+## v59 — Direct board analysis after solving
+
+After a puzzle is solved, the displayed board accepts normal click-to-move or drag-and-drop input without requiring the Stockfish checkbox first. The first attempted move switches the board to Analysis and applies that same move to the displayed FEN; no second gesture is necessary. The server validates legal moves and handles queen promotion as the default. The board uses the FEN's active side, which may be the opponent after the learner's correct move. Navigating game history or revisiting solved positions preserves this convenience. Unsolved positions still require the ordinary training move verification. Manual Stockfish toggling remains available, and failed moves leave the analysis board ready for further input.
+
+## Coaching comprehension and regression (v60)
+
+The coaching and primary-motif engines share a causal ranking layer
+(`causal_selection.py`). It favors demonstrated near-term tactics and concrete
+strategic consequences over generic context or incidental long-PV effects.
+`continuation_refutations.py` checks short supported replies and defender
+removal, while `semantic_coaching.py` adds positional differentiation for
+endgame king activity and demonstrated pawn-structure damage.
+
+See `FEEDBACK_BENCHMARK.md` for the historical 109-record feedback corpus,
+the additional 51 proposed correction cases, tests, offline benchmark command,
+and caveats about unverified user-proposed corrections. Existing local
+feedback and training databases are unchanged; use **Refresh Metadata** to
+regenerate current coaching from saved positions and PVs.
