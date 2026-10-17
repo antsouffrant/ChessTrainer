@@ -229,6 +229,103 @@ function renderConcepts(concepts = []) {
 
 // Feedback belongs to the position, not a transient playlist or render cycle.
 const positionRatings = new Map();
+const positionCorrections = new Map();
+let suggestedMotifOptions = [];
+const correctionDialog = document.getElementById('coaching-correction-dialog');
+const correctionForm = document.getElementById('coaching-correction-form');
+let correctionTarget = null;
+
+function nextFeedbackRating(currentRating, clickedRating) {
+  return Number(currentRating) === Number(clickedRating) ? 0 : Number(clickedRating);
+}
+
+function alphabeticalMotifs(options = []) {
+  return [...options].sort((a, b) =>
+    String(a.name || '').localeCompare(String(b.name || ''), undefined, {sensitivity:'base'}) ||
+    String(a.key || '').localeCompare(String(b.key || '')));
+}
+
+function closeCorrectionDialog() {
+  if (correctionDialog?.open) correctionDialog.close();
+  correctionTarget = null;
+}
+function openCorrectionDialog(category, targetId, existing = {}, snapshot = '') {
+  if (!correctionDialog) return;
+  correctionTarget = {category, targetId, snapshot};
+  const motif = category === 'motif';
+  const position = category === 'position';
+  const names = {motif: 'Choose a better learning motif', position: 'Improve this training position',
+                 explanation: 'Suggest a better explanation', coaching: 'Suggest a better coach response'};
+  document.getElementById('coaching-correction-title').textContent = names[category] || 'Improve coaching';
+  document.getElementById('coaching-correction-help').textContent = motif
+    ? 'Which specific primary motif best explains this position? Your selection will be saved as a proposed gold-standard label.'
+    : position ? 'What is wrong with this training position, or how could it be more useful?'
+    : 'What should the coach have said instead? Your wording will be saved alongside the original response.';
+  const textField = document.getElementById('coaching-correction-text-field');
+  const selectField = document.getElementById('coaching-correction-motif-field');
+  const textInput = document.getElementById('coaching-correction-text');
+  const select = document.getElementById('coaching-correction-motif');
+  textField.hidden = motif; selectField.hidden = !motif;
+  textInput.required = !motif; select.required = motif;
+  textInput.value = existing.suggested_text || '';
+  select.replaceChildren(new Option('Choose a learning motif…', ''));
+  const currentKey = currentPosition()?.concepts?.find(c => c.is_primary)?.key || '';
+  for (const option of alphabeticalMotifs(suggestedMotifOptions)) {
+    if (option.key === currentKey) continue;
+    select.add(new Option(`${option.name} · ${option.family}`, option.key));
+  }
+  select.value = existing.suggested_motif_key || '';
+  if (motif && !suggestedMotifOptions.length) {
+    fetch(`/api/positions/${targetId}/feedback`).then(r => r.ok ? r.json() : null).then(data => {
+      if (!data || correctionTarget?.targetId !== targetId || correctionTarget?.category !== 'motif') return;
+      suggestedMotifOptions = data.motif_options || [];
+      select.replaceChildren(new Option('Choose a learning motif…', ''));
+      for (const option of alphabeticalMotifs(suggestedMotifOptions)) {
+        if (option.key !== currentKey) select.add(new Option(`${option.name} · ${option.family}`, option.key));
+      }
+      select.value = existing.suggested_motif_key || '';
+    }).catch(() => {});
+  }
+  document.getElementById('coaching-correction-error').hidden = true;
+  if (!correctionDialog.open) correctionDialog.showModal();
+  requestAnimationFrame(() => (motif ? select : textInput).focus());
+}
+correctionDialog?.addEventListener('close', () => { correctionTarget = null; });
+document.getElementById('coaching-correction-close')?.addEventListener('click', closeCorrectionDialog);
+document.getElementById('coaching-correction-skip')?.addEventListener('click', closeCorrectionDialog);
+correctionForm?.addEventListener('submit', async event => {
+  event.preventDefault();
+  if (!correctionTarget) return;
+  const {category, targetId, snapshot} = correctionTarget;
+  const motif = category === 'motif';
+  const value = motif ? document.getElementById('coaching-correction-motif').value
+                      : document.getElementById('coaching-correction-text').value.trim();
+  if (!value) return;
+  const btn = document.getElementById('coaching-correction-save');
+  const err = document.getElementById('coaching-correction-error');
+  btn.disabled = true; err.hidden = true;
+  try {
+    const chat = category === 'coaching';
+    const url = chat ? `/api/coach/messages/${targetId}/feedback` : `/api/positions/${targetId}/feedback`;
+    const payload = {rating: -1, lesson_key: new URLSearchParams(location.search).get('concept') || ''};
+    if (!chat) { payload.category = category; payload.content_snapshot = snapshot; }
+    if (motif) payload.suggested_motif_key = value;
+    else payload.suggested_text = value;
+    const response = await fetch(url, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || 'Could not save correction');
+    if (chat) {
+      const element = document.querySelector(`.coach-response-feedback[data-message-id="${targetId}"]`);
+      if (element) element.dataset.suggestedText = data.suggested_text || '';
+    } else {
+      positionRatings.set(targetId, data.ratings || {});
+      positionCorrections.set(targetId, data.corrections || {});
+      if (Number(currentPosition()?.id) === targetId) updatePositionRatingUI();
+    }
+    closeCorrectionDialog();
+  } catch (e) {err.textContent = e.message || 'Could not save correction'; err.hidden = false;}
+  finally {btn.disabled = false;}
+});
 let ratingRequestSerial = 0;
 let explainedPositionId = null;
 function positionSolvedForRating() {
@@ -249,7 +346,10 @@ function updatePositionRatingUI() {
       const selected = eligible && Number(ratings[category] || 0) === Number(button.dataset.rating);
       button.classList.toggle('active', selected);
       button.setAttribute('aria-pressed', String(selected));
+      button.title = selected ? 'Remove this rating' : button.getAttribute('aria-label');
     });
+    group.querySelector('.feedback-edit-correction')?.classList.toggle(
+      'hidden', !eligible || Number(ratings[category] || 0) !== -1);
   });
 }
 async function loadPositionRatings(positionId) {
@@ -262,6 +362,8 @@ async function loadPositionRatings(positionId) {
     const data = await response.json();
     if (serial !== ratingRequestSerial) return; // An earlier read must not erase a newly saved vote.
     positionRatings.set(id, data.ratings || {});
+    positionCorrections.set(id, data.corrections || {});
+    if (Array.isArray(data.motif_options)) suggestedMotifOptions = data.motif_options;
     if (Number(currentPosition()?.id) === id) updatePositionRatingUI();
   } catch (_) { /* Unavailable votes must not block training. */ }
 }
@@ -271,8 +373,11 @@ async function ratePositionFeedback(button) {
   if (!id || !positionSolvedForRating()) return;
   const group = button.closest('[data-feedback-category]');
   const category = group?.dataset.feedbackCategory;
-  const rating = Number(button.dataset.rating);
-  if (!['position', 'explanation', 'motif'].includes(category) || ![-1, 1].includes(rating)) return;
+  const chosenRating = Number(button.dataset.rating);
+  if (!['position', 'explanation', 'motif'].includes(category) || ![-1, 1].includes(chosenRating)) return;
+  // Clicking the selected thumb withdraws the vote (and its correction).
+  const priorRating = Number(positionRatings.get(id)?.[category] || 0);
+  const rating = nextFeedbackRating(priorRating, chosenRating);
   const buttons = [...group.querySelectorAll('[data-rating]')];
   ++ratingRequestSerial; // Invalidate any in-flight GET from an earlier render.
   buttons.forEach(item => item.disabled = true);
@@ -287,8 +392,13 @@ async function ratePositionFeedback(button) {
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || 'Could not save rating');
     positionRatings.set(id, data.ratings || {});
+    positionCorrections.set(id, data.corrections || {});
     if (Number(currentPosition()?.id) === id) updatePositionRatingUI();
-    group.title = rating === 1 ? 'Thanks — helpful rating saved.' : 'Thanks — unhelpful rating saved.';
+    group.title = rating === 0 ? 'Rating removed.' : rating === 1
+      ? 'Helpful rating saved; any correction was removed.' : 'Rating saved — you can suggest an improvement.';
+    if (rating === -1) openCorrectionDialog(category, id,
+      positionCorrections.get(id)?.[category] || {}, category === 'explanation' ? coachTextEl?.textContent || '' : '');
+    else if (correctionTarget?.targetId === id && correctionTarget?.category === category) closeCorrectionDialog();
   } catch (err) {
     group.title = err.message || 'Could not save rating';
   } finally {
@@ -298,6 +408,16 @@ async function ratePositionFeedback(button) {
 
 document.querySelectorAll('.inline-feedback-votes[data-feedback-category]').forEach(group => {
   group.addEventListener('click', event => {
+    const edit = event.target.closest('.feedback-edit-correction');
+    if (edit && !edit.disabled) {
+      const id = Number(currentPosition()?.id || 0);
+      const category = group.dataset.feedbackCategory;
+      if (id && Number(positionRatings.get(id)?.[category] || 0) === -1) {
+        openCorrectionDialog(category, id, positionCorrections.get(id)?.[category] || {},
+          category === 'explanation' ? coachTextEl?.textContent || '' : '');
+      }
+      return;
+    }
     const button = event.target.closest('[data-rating]');
     if (button && !button.disabled) ratePositionFeedback(button);
   });
@@ -532,9 +652,10 @@ function coachMessageHtml(message) {
   const messageId = Number(message.id || 0);
   const rating = Number(message.feedback_rating || 0);
   const feedback = role === 'assistant' && messageId && !historical && !brilliant
-    ? `<div class="coach-response-feedback" data-message-id="${messageId}" aria-label="Rate this coaching response">
-         <button type="button" class="coach-feedback-button${rating === 1 ? ' active' : ''}" data-rating="1" title="Helpful coaching response" aria-label="Thumbs up">👍</button>
-         <button type="button" class="coach-feedback-button${rating === -1 ? ' active' : ''}" data-rating="-1" title="Unhelpful coaching response" aria-label="Thumbs down">👎</button>
+    ? `<div class="coach-response-feedback" data-message-id="${messageId}" data-suggested-text="${escapeCoachHtml(message.feedback_suggested_text || '')}" aria-label="Rate this coaching response">
+         <button type="button" class="coach-feedback-button${rating === 1 ? ' active' : ''}" data-rating="1" title="Helpful coaching response" aria-label="Thumbs up" aria-pressed="${rating === 1}">👍</button>
+         <button type="button" class="coach-feedback-button${rating === -1 ? ' active' : ''}" data-rating="-1" title="Unhelpful coaching response" aria-label="Thumbs down" aria-pressed="${rating === -1}">👎</button>
+         <button type="button" class="feedback-edit-correction${rating === -1 ? '' : ' hidden'}" title="Edit your suggestion" aria-label="Edit coaching suggestion">Edit suggestion</button>
        </div>`
     : '';
   return `<div class="coach-message ${role}${historical ? ' historic-coach-message' : ''}${brilliant ? ' brilliant-coach-message' : ''}"${messageId ? ` data-message-id="${messageId}"` : ''}><div class="coach-message-label">${historical ? 'Coach · Chess history' : brilliant ? 'Coach · From your games' : label}</div>${verdict}<div class="coach-message-body">${escapeCoachHtml(message.content)}${historicalLink || brilliantLink ? `<div class="historic-coach-link-row">${historicalLink || brilliantLink}</div>` : ''}</div>${feedback}</div>`;
@@ -1635,8 +1756,10 @@ async function refreshCurrentPosition() {
 async function rateCoachResponse(button) {
   const container = button.closest('.coach-response-feedback');
   const messageId = Number(container?.dataset.messageId || 0);
-  const rating = Number(button.dataset.rating || 0);
-  if (!messageId || ![-1, 1].includes(rating)) return;
+  const chosenRating = Number(button.dataset.rating || 0);
+  if (!messageId || ![-1, 1].includes(chosenRating)) return;
+  const priorRating = Number(container.querySelector('.coach-feedback-button.active')?.dataset.rating || 0);
+  const rating = nextFeedbackRating(priorRating, chosenRating);
   const buttons = [...container.querySelectorAll('.coach-feedback-button')];
   buttons.forEach(item => item.disabled = true);
   try {
@@ -1647,11 +1770,19 @@ async function rateCoachResponse(button) {
     });
     const result = await response.json();
     if (!response.ok) throw new Error(result.error || 'Could not save feedback');
-    buttons.forEach(item => item.classList.toggle('active', Number(item.dataset.rating) === rating));
-    container.classList.add('saved');
-    container.title = rating === 1
-      ? 'Saved as helpful coaching feedback.'
-      : 'Saved as unhelpful coaching feedback.';
+    buttons.forEach(item => {
+      const selected = Number(item.dataset.rating) === rating;
+      item.classList.toggle('active', selected);
+      item.setAttribute('aria-pressed', String(selected));
+      item.title = selected ? 'Remove this rating' : item.getAttribute('aria-label');
+    });
+    container.classList.toggle('saved', rating !== 0);
+    container.dataset.suggestedText = result.suggested_text || '';
+    container.querySelector('.feedback-edit-correction')?.classList.toggle('hidden', rating !== -1);
+    container.title = rating === 0 ? 'Rating removed.' : rating === 1
+      ? 'Helpful rating saved; correction cleared.' : 'Unhelpful rating saved.';
+    if (rating === -1) openCorrectionDialog('coaching', messageId, {suggested_text: container.dataset.suggestedText});
+    else if (correctionTarget?.category === 'coaching' && correctionTarget?.targetId === messageId) closeCorrectionDialog();
   } catch (_) {
     container.classList.add('error');
   } finally {
@@ -2072,12 +2203,22 @@ window.addEventListener('resize', () => {
   if (solved && engineToggleEl.checked) refreshEngineEvaluation();
 });
 
-function isCoachInteraction(target) {
-  return Boolean(target?.closest?.('.coach-panel, .game-share'));
+function isEditableKeyboardTarget(target) {
+  return Boolean(target?.isContentEditable || target?.closest?.(
+    'input, textarea, select, [role="textbox"], [contenteditable]:not([contenteditable="false"])'));
 }
 
-function chessKeyboardContextActive() {
-  return trainerKeyboardArmed && !isCoachInteraction(document.activeElement);
+function isCoachInteraction(target) {
+  return Boolean(target?.closest?.('.coach-panel, .game-share, .coaching-correction-dialog')) ||
+    isEditableKeyboardTarget(target);
+}
+
+function chessKeyboardContextActive(event) {
+  // Any open feedback dialog or focused text field owns arrow keys, even if a
+  // previous interaction armed the board for review navigation.
+  return trainerKeyboardArmed && !correctionDialog?.open &&
+    !isCoachInteraction(event?.target) && !isCoachInteraction(document.activeElement) &&
+    !event?.isComposing;
 }
 
 trainerRootEl?.addEventListener('pointerdown', event => {
@@ -2098,7 +2239,7 @@ boardEl?.addEventListener('pointerdown', event => {
 pgnMovesEl?.addEventListener('pointerdown', () => pgnMovesEl.focus({preventScroll: true}));
 
 document.addEventListener('keydown', e => {
-  if (!chessKeyboardContextActive()) return;
+  if (!chessKeyboardContextActive(e)) return;
   if (!['ArrowLeft', 'ArrowRight'].includes(e.key)) return;
   e.preventDefault();
   if (e.key === 'ArrowLeft' && e.shiftKey && currentIndex > 0) navigatePuzzle(-1);
@@ -2158,6 +2299,15 @@ learnedCheckbox.addEventListener('change', async () => {
 
 
 coachChatEl?.addEventListener('click', event => {
+  const edit = event.target.closest('.feedback-edit-correction');
+  if (edit) {
+    const group = edit.closest('.coach-response-feedback');
+    const messageId = Number(group?.dataset.messageId || 0);
+    if (messageId && group.querySelector('.coach-feedback-button[data-rating="-1"].active')) {
+      openCorrectionDialog('coaching', messageId, {suggested_text: group.dataset.suggestedText || ''});
+    }
+    return;
+  }
   const button = event.target.closest('.coach-feedback-button');
   if (button) rateCoachResponse(button);
 });

@@ -320,6 +320,8 @@ CREATE TABLE IF NOT EXISTS position_feedback (
     content_snapshot TEXT,
     coaching_version TEXT,
     classifier_version_at_vote TEXT,
+    suggested_text TEXT,
+    suggested_motif_key TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY(position_id, category),
@@ -334,6 +336,7 @@ CREATE TABLE IF NOT EXISTS coach_message_feedback (
     position_id INTEGER NOT NULL,
     rating INTEGER NOT NULL CHECK(rating IN (-1, 1)),
     lesson_key TEXT,
+    suggested_text TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY(message_id) REFERENCES coach_messages(id) ON DELETE CASCADE,
@@ -415,6 +418,8 @@ def init_db():
         # Existing chat thumbs remain intact. Context is optional for older rows.
         if 'lesson_key' not in _columns(conn, 'coach_message_feedback'):
             conn.execute('ALTER TABLE coach_message_feedback ADD COLUMN lesson_key TEXT')
+        if 'suggested_text' not in _columns(conn, 'coach_message_feedback'):
+            conn.execute('ALTER TABLE coach_message_feedback ADD COLUMN suggested_text TEXT')
 
         job_columns = _columns(conn, 'analysis_jobs')
         job_migrations = {
@@ -549,6 +554,9 @@ def init_db():
         # classifier identity. Historical votes leave this field NULL.
         if 'classifier_version_at_vote' not in _columns(conn, 'position_feedback'):
             conn.execute('ALTER TABLE position_feedback ADD COLUMN classifier_version_at_vote TEXT')
+        for column in ('suggested_text', 'suggested_motif_key'):
+            if column not in _columns(conn, 'position_feedback'):
+                conn.execute(f'ALTER TABLE position_feedback ADD COLUMN {column} TEXT')
         _seed_learning_concepts(conn)
         # Retire the generic candidate-comparison pseudo-motif from older
         # releases. Refresh/reclassification will assign a supported, specific

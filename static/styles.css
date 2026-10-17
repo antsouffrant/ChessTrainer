@@ -2912,72 +2912,25 @@ body.theme-wood .mini-square.dark { background: #7b4d2e; }
 @media (hover:none) {.rate-hover-zone .inline-feedback-votes {opacity:1;pointer-events:auto}}
 @media (max-width:640px) {.rating-prompt {white-space:normal}.inline-feedback-votes {flex-wrap:wrap}}
 
-/* v48 · quality analytics, deliberately distinct from process monitoring */
-.analytics-hub {display:grid;gap:18px;max-width:1480px;margin:0 auto;padding-bottom:34px}
-.analytics-hero {display:flex;justify-content:space-between;align-items:center;gap:24px;padding:26px;border-radius:20px}
-.analytics-hero h1 {font-size:clamp(1.5rem,3vw,2.15rem);margin:5px 0 9px}
-.analytics-hero p {max-width:780px;line-height:1.5;margin:0}
-.analytics-download {display:inline-flex;align-items:center;gap:9px;white-space:nowrap;text-decoration:none}
-.analytics-filters {padding:20px 24px;border-radius:18px}
-.analytics-filter-heading {display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;gap:12px}
-.analytics-filter-heading h2,.analytics-table-panel h2 {font-size:1.08rem;margin:0}
-.analytics-filter-grid {display:grid;grid-template-columns:repeat(4,minmax(145px,1fr));gap:12px}
-.analytics-filter-grid label {display:flex;flex-direction:column;gap:6px;color:var(--muted);font-size:.79rem;font-weight:700}
-.analytics-filter-grid select {width:100%;min-width:0;color:var(--text);background:#1c222a;border:1px solid var(--line);border-radius:9px;padding:9px 10px;min-height:39px}
-.analytics-overview {display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:12px}
-.analytics-score {border-radius:16px;padding:18px;display:flex;flex-direction:column;gap:9px;min-height:150px}
-.analytics-score > span:first-child {font-weight:750;font-size:.87rem}
-.analytics-score strong {font-size:clamp(1.5rem,2.2vw,2.35rem);line-height:1.1;font-variant-numeric:tabular-nums}
-.analytics-score small,.analytics-score #analytics-total-detail {font-size:.75rem;color:var(--muted);line-height:1.35}
-.analytics-score-track,.analytics-mini-track {height:6px;width:100%;background:rgba(255,255,255,.095);border-radius:99px;overflow:hidden;display:block;margin-top:auto}
-.analytics-score-track > span,.analytics-mini-track > span {display:block;height:100%;background:#67bf91;border-radius:inherit}
-.analytics-summary-note {margin:-8px 2px 0;font-size:.8rem}
-.analytics-breakdowns {display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
-.analytics-table-panel {padding:20px;border-radius:16px;min-width:0}
-.analytics-table-panel > p {font-size:.8rem;line-height:1.5;margin:8px 0 16px}
-.analytics-table-scroll {overflow:auto;max-width:100%;}
-.analytics-table {border-collapse:collapse;width:100%;font-size:.78rem;text-align:left}
-.analytics-table th {text-align:left;font-size:.71rem;color:var(--muted);letter-spacing:.02em;white-space:nowrap}
-.analytics-table th,.analytics-table td {padding:10px 9px;border-bottom:1px solid rgba(255,255,255,.085);vertical-align:top}
-.analytics-table th:first-child,.analytics-table td:first-child {padding-left:0}
-.analytics-table td small {display:block;color:var(--muted);font-size:.69rem;margin-top:3px}
-.analytics-percent-row {display:flex;align-items:center;gap:8px;min-width:105px}
-.analytics-mini-track {min-width:35px;flex:1;margin:0}
-.analytics-records-heading {display:flex;align-items:center;justify-content:space-between;gap:12px}
-.analytics-records-panel .analytics-table {min-width:800px}
-.analytics-records-panel a {color:#c8dfee}
-.analytics-empty {font-size:.82rem;color:var(--muted);padding:14px 0}
-.analytics-vote {white-space:nowrap;padding:4px 7px;border-radius:8px;background:rgba(255,255,255,.05)}
-.analytics-vote.positive {color:#a1edc3}.analytics-vote.negative {color:#f0bdaf}
-.analytics-error {padding:12px 15px;color:#f0b2ad;background:rgba(220,85,85,.09);border:1px solid rgba(220,85,85,.25);border-radius:12px}
-@media(max-width:1180px) {.analytics-overview {grid-template-columns:repeat(3,minmax(0,1fr))}.analytics-breakdowns {grid-template-columns:repeat(2,minmax(0,1fr))}}
-@media(max-width:860px) {.analytics-filter-grid {grid-template-columns:repeat(2,minmax(0,1fr))}.analytics-breakdowns {grid-template-columns:1fr}}
-@media(max-width:640px) {.analytics-hero {flex-direction:column;align-items:stretch}.analytics-overview {grid-template-columns:repeat(2,minmax(0,1fr))}.analytics-filter-grid {grid-template-columns:1fr}.analytics-filters,.analytics-table-panel {padding:14px}}
+/* Feedback corrections: spacious, keyboard accessible, and independent of hover controls. */
+.coaching-correction-dialog { width:min(94vw,540px); max-height:min(86vh,730px); overflow-y:auto; border:1px solid rgba(255,255,255,.17);
+  border-radius:17px; background:#1c232d; color:var(--text); padding:0; box-shadow:0 24px 72px rgba(0,0,0,.65); }
+.coaching-correction-dialog::backdrop {background:rgba(0,0,0,.68)}
+.coaching-correction-form {display:grid; gap:18px; padding:27px;}
+.correction-form-header {display:flex; align-items:start; justify-content:space-between; gap:15px;}
+.correction-form-header h2 {margin:7px 0 0; line-height:1.3; font-size:1.25rem;}
+.coaching-correction-form p {margin:0; line-height:1.55;}
+.coaching-correction-form label {display:grid; gap:9px; font-size:.87rem; font-weight:650;}
+.coaching-correction-form textarea, .coaching-correction-form select {width:100%; min-width:0; box-sizing:border-box; border:1px solid rgba(255,255,255,.25);
+  border-radius:10px; padding:12px; background:#101923; color:var(--text); font:inherit; line-height:1.5;}
+.coaching-correction-form textarea {resize:vertical; min-height:115px;}
+.coaching-correction-form [hidden] {display:none!important;}
+.correction-form-actions {display:flex; flex-wrap:wrap; justify-content:flex-end; gap:12px;}
+.correction-error {color:#f8ada9;}
 
-/* v51 · Coach sections get breathing room and an export schema explainer. */
-.analytics-hub {gap:28px; padding:10px 0 46px;}
-.analytics-hero {padding:32px 36px; gap:32px;}
-.analytics-filters {padding:26px 30px;}
-.analytics-filter-heading {margin-bottom:20px;}
-.analytics-filter-grid {gap:18px 20px;}
-.analytics-overview {gap:16px;}
-.analytics-score {padding:23px; min-height:162px; gap:12px;}
-.analytics-summary-note {margin:-12px 4px 2px; line-height:1.6;}
-.analytics-breakdowns {gap:22px;}
-.analytics-table-panel {padding:28px;}
-.analytics-table-panel > p {margin:12px 0 22px;}
-.analytics-table th, .analytics-table td {padding:13px 10px;}
-.analytics-records-heading {margin-bottom:18px;}
-.analytics-export-guide {padding:24px 28px;display:grid;grid-template-columns:1.3fr 1fr;gap:28px;align-items:start;border-radius:16px;}
-.analytics-export-guide h2 {margin:0 0 12px;font-size:1.05rem;}
-.analytics-export-guide p {font-size:.85rem;line-height:1.65;margin:0;}
-@media(max-width:860px){.analytics-export-guide{grid-template-columns:1fr;gap:14px}}
-@media(max-width:640px){.analytics-hub{gap:20px}.analytics-hero{padding:24px}.analytics-filters,.analytics-table-panel,.analytics-export-guide{padding:20px}.analytics-overview{gap:10px}}
-
-@media(min-width:1181px){.analytics-breakdowns{grid-template-columns:repeat(2,minmax(0,1fr))}}
-
-/* Coach reset is independent from game-list analysis reset. */
-.coach-actions{display:flex;align-items:center;gap:12px;flex-wrap:wrap;justify-content:flex-end}
-.coach-reset-feedback{min-height:44px;white-space:nowrap}
-#coach-reset-note{margin:0 3px;line-height:1.5}
-@media(max-width:640px){.coach-actions{width:100%;justify-content:flex-start}}
+/* v57: make correcting a downvote independent from unchecking its thumb. */
+.feedback-edit-correction {border:1px solid rgba(220,220,220,.3);background:rgba(255,255,255,.08);
+  color:inherit;border-radius:7px;padding:5px 7px;font:inherit;font-size:.75rem;line-height:1.1;
+  cursor:pointer;white-space:nowrap}
+.feedback-edit-correction:hover,.feedback-edit-correction:focus-visible {background:rgba(255,255,255,.18)}
+.feedback-edit-correction.hidden {display:none !important}

@@ -6,6 +6,7 @@
   <title>{% block title %}Personal Chess Trainer{% endblock %}</title>
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.7.2/css/all.min.css">
   <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+  {% block extra_head %}{% endblock %}
 </head>
 <body class="{% if ui_settings.get('wooden_board_enabled') %}theme-wood{% endif %}" data-server-coordinates="{{ 1 if ui_settings.get('show_square_coordinates') else 0 }}" data-server-wood-theme="{{ 1 if ui_settings.get('wooden_board_enabled') else 0 }}">
   <div class="board-bg" aria-hidden="true"></div>

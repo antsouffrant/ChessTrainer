@@ -748,7 +748,7 @@ def coach_history(conn, position_id: int, account_id: int) -> list[dict]:
         return []
     rows = conn.execute('''
         SELECT cm.id, cm.role, cm.content, cm.structured_json, cm.created_at,
-               cmf.rating AS feedback_rating
+               cmf.rating AS feedback_rating, cmf.suggested_text AS feedback_suggested_text
         FROM coach_messages cm
         LEFT JOIN coach_message_feedback cmf ON cmf.message_id = cm.id
         WHERE cm.thread_id = ?

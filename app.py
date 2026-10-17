@@ -31,7 +31,8 @@ from process_runtime import PROCESS_LOCK
 from retrieval import retrieve_game_list
 from list_readiness import list_state
 from feedback_analytics import (
-    record_position_vote, position_votes, report_rows, report_facets, report_summary, csv_bytes,
+    record_position_vote, position_votes, position_feedback_details, motif_feedback_options,
+    report_rows, report_facets, report_summary, csv_bytes, regression_candidate_rows,
 )
 from process_policy import queue_analysis, restart_analysis
 from opening_playlist import enrich_opening_playlist, board_identity
@@ -1132,7 +1133,7 @@ def lesson_detail(job_id, concept_key):
               AND lc.key <> 'candidate_evaluation'
               AND (lc.source = 'built_in' OR lc.status IN ('personal','promoted'))
             GROUP BY lc.key, lc.name, lc.priority
-            ORDER BY lc.priority DESC, lc.name ASC
+            ORDER BY lc.name COLLATE NOCASE ASC, lc.key ASC
         ''', (job_id,)).fetchall()
         has_position = conn.execute('''
             SELECT 1
@@ -1723,8 +1724,7 @@ def lesson_plans(job_id):
               AND lc.key <> 'candidate_evaluation'
               AND (lc.source = 'built_in' OR lc.status IN ('personal', 'promoted'))
             GROUP BY lc.key, lc.name, lc.family, lc.description, lc.source, lc.status, lc.priority
-            ORDER BY game_count DESC, primary_positions DESC, position_count DESC,
-                     avg_confidence DESC, lc.priority DESC, lc.name ASC
+            ORDER BY lc.name COLLATE NOCASE ASC, lc.key ASC
         ''', (job_id,)).fetchall()
         lessons = [dict(row) for row in rows]
     return jsonify(lessons)
@@ -2539,6 +2539,17 @@ def analytics_feedback_csv():
     )
 
 
+@app.get('/api/coach/regression.csv')
+def coach_regression_csv():
+    """User-corrected downvotes, ready for human review and regression fixtures."""
+    with connect() as conn:
+        rows = regression_candidate_rows(report_rows(conn, request.args))
+    return send_file(
+        io.BytesIO(csv_bytes(rows)), mimetype='text/csv; charset=utf-8',
+        as_attachment=True, download_name='chess_regression_candidates.csv',
+    )
+
+
 @app.post('/api/coach/feedback/reset')
 def coach_reset_feedback():
     """Clear saved thumbs ratings without affecting positions or analysis."""
@@ -2573,18 +2584,22 @@ def position_feedback(position_id):
         if request.method == 'GET':
             if not conn.execute('SELECT 1 FROM training_positions WHERE id = ?', (position_id,)).fetchone():
                 return jsonify({'error': 'Position not found'}), 404
-            return jsonify({'ratings': position_votes(conn, position_id)})
+            return jsonify({'ratings': position_votes(conn, position_id),
+                            'corrections': position_feedback_details(conn, position_id),
+                            'motif_options': motif_feedback_options(conn, position_id)})
         payload = request.get_json(silent=True) or {}
         category = str(payload.get('category') or '')
         try:
             rating = int(payload.get('rating'))
         except (ValueError, TypeError):
-            return jsonify({'error': 'Rating must be 1 or -1'}), 400
+            return jsonify({'error': 'Rating must be -1, 0, or 1'}), 400
         try:
             ratings = record_position_vote(
                 conn, position_id, category, rating,
                 lesson_key=payload.get('lesson_key') or '',
                 text=payload.get('content_snapshot') or '',
+                suggested_text=payload.get('suggested_text'),
+                suggested_motif_key=payload.get('suggested_motif_key'),
             )
         except ValueError as exc:
             return jsonify({'error': str(exc)}), 400
@@ -2592,7 +2607,9 @@ def position_feedback(position_id):
             return jsonify({'error': str(exc)}), 404
         except PermissionError as exc:
             return jsonify({'error': str(exc)}), 403
-    return jsonify({'ok': True, 'ratings': ratings})
+    with connect() as conn:
+        details = position_feedback_details(conn, position_id)
+    return jsonify({'ok': True, 'ratings': ratings, 'corrections': details})
 
 
 @app.get('/api/positions/<int:position_id>/solution')
@@ -2803,9 +2820,17 @@ def coach_message_feedback(message_id):
     try:
         rating = int(payload.get('rating'))
     except (TypeError, ValueError):
-        return jsonify({'error': 'Rating must be 1 or -1'}), 400
-    if rating not in (-1, 1):
-        return jsonify({'error': 'Rating must be 1 or -1'}), 400
+        return jsonify({'error': 'Rating must be -1, 0, or 1'}), 400
+    if rating not in (-1, 0, 1):
+        return jsonify({'error': 'Rating must be -1, 0, or 1'}), 400
+
+    suggested_text = payload.get('suggested_text')
+    if suggested_text is not None:
+        if not isinstance(suggested_text, str) or len(suggested_text) > 6000:
+            return jsonify({'error': 'Correction must be at most 6000 characters'}), 400
+        suggested_text = suggested_text.strip()
+    if rating == 1:
+        suggested_text = None
 
     with connect() as conn:
         row = conn.execute('''
@@ -2818,17 +2843,32 @@ def coach_message_feedback(message_id):
             return jsonify({'error': 'Coach message not found'}), 404
         if row['role'] != 'assistant':
             return jsonify({'error': 'Only coach responses can be rated'}), 400
+        if rating == 0:
+            # Remove the whole record, including any user correction, when a
+            # selected thumb is clicked a second time.
+            conn.execute('DELETE FROM coach_message_feedback WHERE message_id = ?', (message_id,))
+            conn.commit()
+            return jsonify({'ok': True, 'message_id': message_id, 'rating': 0,
+                            'suggested_text': None})
         conn.execute('''
-            INSERT INTO coach_message_feedback(message_id, account_id, position_id, rating, lesson_key)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO coach_message_feedback(message_id, account_id, position_id, rating, lesson_key, suggested_text)
+            VALUES (?, ?, ?, ?, ?, ?)
             ON CONFLICT(message_id) DO UPDATE SET
                 rating = excluded.rating,
                 lesson_key = excluded.lesson_key,
+                suggested_text = CASE
+                    WHEN excluded.rating = 1 THEN NULL
+                    WHEN excluded.suggested_text IS NOT NULL THEN excluded.suggested_text
+                    WHEN coach_message_feedback.rating = -1 THEN coach_message_feedback.suggested_text
+                    ELSE NULL END,
                 updated_at = CURRENT_TIMESTAMP
         ''', (message_id, row['account_id'], row['position_id'], rating,
-              str(payload.get('lesson_key') or '')[:150]))
+              str(payload.get('lesson_key') or '')[:150], suggested_text))
         conn.commit()
-    return jsonify({'ok': True, 'message_id': message_id, 'rating': rating})
+    with connect() as conn:
+        updated = conn.execute('SELECT suggested_text FROM coach_message_feedback WHERE message_id=?', (message_id,)).fetchone()
+    return jsonify({'ok': True, 'message_id': message_id, 'rating': rating,
+                    'suggested_text': updated['suggested_text'] if updated else None})
 
 
 @app.post('/api/engine/evaluate')

@@ -1,5 +1,6 @@
 {% extends 'base.html' %}
-{% block title %}Trainer · Personal Chess Trainer{% endblock %}
+{% block title %}Trainer · Personal Chess Trainer
+{% endblock %}
 {% block content %}
 <section class="trainer-layout" id="trainer-root" data-job-id="{{ job_id }}">
   <div class="lesson-training-progress glass" id="lesson-training-progress" aria-label="Current playlist learning progress">
@@ -86,6 +87,7 @@
             <span class="rating-prompt">Helpful explanation?</span>
             <button type="button" class="inline-rating-button" data-rating="1" aria-label="Helpful explanation" title="Helpful explanation">👍</button>
             <button type="button" class="inline-rating-button" data-rating="-1" aria-label="Unhelpful explanation" title="Unhelpful explanation">👎</button>
+            <button type="button" class="feedback-edit-correction hidden" aria-label="Edit suggested correction" title="Edit suggested correction">Edit suggestion</button>
           </div>
         </div>
         <div id="category" class="eyebrow result-category hidden">TRAINING POSITION</div>
@@ -97,6 +99,7 @@
           <span class="rating-prompt">Helpful position?</span>
           <button type="button" class="inline-rating-button" data-rating="1" aria-label="Helpful position" title="Helpful position">👍</button>
           <button type="button" class="inline-rating-button" data-rating="-1" aria-label="Unhelpful position" title="Unhelpful position">👎</button>
+            <button type="button" class="feedback-edit-correction hidden" aria-label="Edit suggested correction" title="Edit suggested correction">Edit suggestion</button>
         </div>
       </div>
 
@@ -111,6 +114,7 @@
               <span class="rating-prompt">Primary motif fits?</span>
               <button type="button" class="inline-rating-button" data-rating="1" aria-label="Primary learning motif fits" title="Primary learning motif fits">👍</button>
               <button type="button" class="inline-rating-button" data-rating="-1" aria-label="Primary learning motif does not fit" title="Primary learning motif does not fit">👎</button>
+            <button type="button" class="feedback-edit-correction hidden" aria-label="Edit suggested correction" title="Edit suggested correction">Edit suggestion</button>
             </div>
           </div>
           <span id="lesson-concepts" class="lesson-concepts hidden"></span>
@@ -179,6 +183,22 @@
   </div>
 </aside>
 
+<dialog id="coaching-correction-dialog" class="coaching-correction-dialog" aria-labelledby="coaching-correction-title">
+  <form id="coaching-correction-form" class="coaching-correction-form">
+    <div class="correction-form-header"><div><span class="eyebrow">IMPROVE THE COACH</span><h2 id="coaching-correction-title">Suggest a better explanation</h2></div>
+      <button type="button" id="coaching-correction-close" class="secondary-button" aria-label="Close correction form">✕</button></div>
+    <p id="coaching-correction-help" class="muted"></p>
+    <label id="coaching-correction-text-field">Your suggested improvement
+      <textarea id="coaching-correction-text" rows="4" maxlength="6000" placeholder="Explain what the coach should have said…"></textarea>
+    </label>
+    <label id="coaching-correction-motif-field" hidden>Better primary learning motif
+      <select id="coaching-correction-motif"><option value="">Choose a learning motif…</option></select>
+    </label>
+    <p id="coaching-correction-error" class="correction-error" role="alert" hidden></p>
+    <div class="correction-form-actions"><button type="button" id="coaching-correction-skip" class="secondary-button">Not now</button>
+      <button type="submit" class="primary-button" id="coaching-correction-save">Save suggestion</button></div>
+  </form>
+</dialog>
 <script>
 window.TRAINER_JOB_ID = {{ job_id }};
 window.TRAINER_CONCEPT = {{ concept_key|tojson }};
@@ -194,4 +214,5 @@ window.TRAINER_RATING_MAX = {{ rating_max|tojson }};
 </script>
 <script src="{{ url_for('static', filename='board_pointer_drag.js') }}"></script>
 <script src="{{ url_for('static', filename='trainer.js') }}"></script>
+
 {% endblock %}

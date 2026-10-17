@@ -7,6 +7,7 @@
   const results = document.getElementById('analytics-results');
   const error = document.getElementById('analytics-error');
   const download = document.getElementById('analytics-export');
+  const regressionDownload = document.getElementById('coach-regression-export');
   const fmt = n => Number(n || 0).toLocaleString();
   const escape = text => String(text ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
   const title = {position:'Position',explanation:'Explanation',motif:'Motif',coaching:'Chat coaching'};
@@ -50,7 +51,7 @@
     document.getElementById('analytics-record-count').textContent = `${fmt(data.overall.total)} matching ratings`;
     const body = document.querySelector('#analytics-records tbody');
     if (!data.recent.length) {
-      body.innerHTML = '<tr><td colspan="7" class="analytics-empty">No feedback yet for these filters. Rate a solved position or chat response in Training to begin.</td></tr>';
+      body.innerHTML = '<tr><td colspan="8" class="analytics-empty">No feedback yet for these filters. Rate a solved position or chat response in Training to begin.</td></tr>';
       return;
     }
     body.innerHTML = data.recent.map(r => {
@@ -61,6 +62,7 @@
       const when = r.updated_at ? escape(String(r.updated_at).slice(0, 16)) : '—';
       return `<tr><td>${escape(title[r.feedback_type] || r.feedback_type)}</td>
         <td><span class="analytics-vote ${r.rating === 1 ? 'positive':'negative'}">${r.rating === 1 ? '👍 Yes' : '👎 No'}</span></td>
+        <td class="coach-correction-preview" title="${escape(r.suggested_motif_name || r.suggested_text || '')}">${escape(String(r.suggested_motif_name || r.suggested_text || '—').slice(0, 130))}</td>
         <td>${escape(label)}</td><td>${escape(lesson)}${motif}</td><td>${escape(opening)}</td>
         <td><a href="/trainer/${encodeURIComponent(r.job_id)}?position=${encodeURIComponent(r.position_id)}">#${fmt(r.position_id)}</a>
         <small>${escape(r.learning_mode || '')}${r.move_number ? ` · move ${fmt(r.move_number)}` : ''}</small></td>
@@ -71,6 +73,7 @@
     const token = ++requestToken;
     const query = params().toString();
     download.href = '/api/analytics/feedback.csv' + (query ? `?${query}` : '');
+    if (regressionDownload) regressionDownload.href = '/api/coach/regression.csv' + (query ? `?${query}` : '');
     error.classList.add('hidden');
     loading.textContent = 'Loading feedback…';
     loading.classList.remove('hidden');
