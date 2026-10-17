@@ -829,6 +829,16 @@ def _refresh_position_labels(conn, position_id, row_or_values):
             new_key = evidence.get('motif')
             from learning import CONCEPTS
             if new_key in CONCEPTS:
+                from motif_hierarchy import BROAD_FALLBACKS, ancestors
+                current_primary = next((x.key for x in labels if x.is_primary), None)
+                # Do not undo the hierarchy-selected, concrete primary motif
+                # just because a generic material loss is annotated later.
+                can_override = (current_primary is None or
+                    current_primary in BROAD_FALLBACKS or
+                    current_primary in ancestors(new_key))
+                if not can_override:
+                    new_key = None
+            if new_key in CONCEPTS:
                 current = next((label for label in labels if label.key == new_key), None)
                 if current is None:
                     from coaching_language import game_continuation

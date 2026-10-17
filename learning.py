@@ -11,9 +11,10 @@ from decision_context import decision_facts
 from semantic_coaching import evidence_findings
 from loose_piece_provenance import differential_loss_motif, confirmed_differential_loss
 from motif_relevance import select_relevant_primary
+from motif_hierarchy import choose_specific, validate_ontology
 from pv_reasoning import fork_evidence, legal_pv, comparative_insight
 
-CLASSIFIER_VERSION = '2.6-loose-piece-provenance'
+CLASSIFIER_VERSION = '2.7-evidence-hierarchy'
 
 # A deliberately compact curriculum: these are common, teachable amateur
 # failure modes that we can identify with reasonably explainable board rules.
@@ -62,6 +63,7 @@ CONCEPT_CATALOG = [
 ]
 
 CONCEPTS = {item['key']: item for item in CONCEPT_CATALOG}
+validate_ontology(CONCEPTS)
 
 PIECE_VALUES = {
     chess.PAWN: 1,
@@ -687,7 +689,7 @@ def classify_learning_concepts(
                               'material_loss', 'clean_capture', 'exchange_loss',
                               'material_sacrifice', 'exchange_sacrifice',
                               'double_attack', 'pawn_sacrifice_plan',
-                              'capture_mate_trap', 'queen_trade_castling'} and
+                              'capture_mate_trap', 'queen_trade_castling', 'line_refutation'} and
                 cause.motif in CONCEPTS):
             # A demonstrated fork or discovered check is more instructive
             # than a generic material-loss label for that same sequence.
@@ -806,6 +808,24 @@ def classify_learning_concepts(
     if not labels:
         chosen = 'piece_activity'
         add(chosen, 0.52, 'Compare useful squares and activity rather than assuming a forcing tactic.')
+    # A broad learning theme can describe the position yet obscure the
+    # decisive mechanism. Promote only independently supported, near-root
+    # findings; do not use catalogue priorities as proof of a tactic.
+    supported = {}
+    for finding in (causal or []):
+        if (finding.motif in labels and finding.confidence >= 2
+                and finding.horizon <= 3 and finding.impact >= 75):
+            strength = min(1.0, finding.confidence / 3 * 0.6 + finding.impact / 130 * 0.4)
+            prev = supported.get(finding.motif, (0, 10))
+            if strength > prev[0]:
+                supported[finding.motif] = (strength, finding.horizon)
+    # An immediate confirmed tactic is stronger than incidental PV geometry.
+    for key in (root_primary, immediate_primary):
+        if key in labels and labels[key].confidence >= 0.90:
+            supported[key] = (max(labels[key].confidence, supported.get(key, (0, 0))[0]), 0)
+    chosen = choose_specific(chosen, supported,
+                             protected={'mate_defense', 'back_rank_mate',
+                                        'mating_net', 'endgame_precision'})
     ordered = sorted(labels.values(), key=lambda label: (
         label.key != chosen, -relevance_scores.get(label.key, 0.0),
         -label.confidence, -CONCEPTS[label.key]['priority']))

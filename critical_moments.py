@@ -221,4 +221,4 @@ def critical_explanation(evidence):
     if not played or not event:
         return ''
     introduction = f'The alternative {played}' if alt else f'In the game you played {played}'
-    return f'{introduction}; the analyzed continuation shows {event.rstrip(".")}.'.replace('..','.')
+    return f'{introduction}, allowing {event.rstrip(".")}.'.replace('..', '.')

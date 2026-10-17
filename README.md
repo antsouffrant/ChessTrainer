@@ -102,3 +102,12 @@ This source archive intentionally includes regression tests but excludes runtime
 - Motifs in feedback, lesson picker, and lesson listings are alphabetized by name.
 
 The SQLite schema is unchanged; unchecking removes rows instead of storing a zero-valued vote.
+
+### Coaching feedback and regression (v58)
+
+See `FEEDBACK_BENCHMARK.md` for an anonymized 109-record Coach feedback fixture,
+a motif hierarchy, near-root refutation scans and an offline regression
+reporter. Run `python tools/evaluate_coach_feedback.py --input tests/fixtures/coach_feedback_v58.jsonl --output coach_report.csv` after
+installing the dependencies in `requirements.txt`. **Refresh Metadata** uses
+the new text and classifier versions without rerunning Stockfish; **Restart
+Analysis** is destructive and not needed for this coaching-only update.

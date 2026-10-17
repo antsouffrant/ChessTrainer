@@ -43,3 +43,16 @@ Restart is an irreversible clean-iteration operation. Export Coach CSV first to 
 ## Validation
 
 Run `python -m unittest discover -s tests` with the packages in `requirements.txt`, plus `node tests/*.cjs` individually. SQLite/process and browser-contract tests run even without python-chess; true chess-board tests require python-chess. Full Stockfish and optional Syzygy integration require local engine/table files and must be verified in the running app.
+
+## Feedback-driven hierarchy and regression (v58)
+
+The primary motif uses `motif_hierarchy.py`: specific concepts are linked to
+broader fallback teaching themes, and a specific label wins only if there is
+separate near-root chess evidence. `continuation_refutations.py` inspects both
+the best-move and played-move PVs to find local, materially realized tactics;
+long lines are not taken as proofs of forced outcomes. When an observed line
+shows the opponent's refutation, the explanation identifies the user game
+move and the actual reply in chess language. `FEEDBACK_BENCHMARK.md` documents
+the imported user-proposed corrections and `tools/evaluate_coach_feedback.py`
+provides an offline regression report. Feedback suggestions are preserved as
+proposals until independently reviewed.

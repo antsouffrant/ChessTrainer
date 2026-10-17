@@ -1,0 +1,144 @@
+#!/usr/bin/env python3
+"""Offline, reproducible Coach CSV/fixture audit (no Stockfish, no game retrieval).
+
+Usage:
+  python tools/evaluate_coach_feedback.py --input tests/fixtures/coach_feedback_v58.jsonl --output my_report.csv
+  python tools/evaluate_coach_feedback.py --input "chess_coaching_feedback.csv" --output my_report.csv
+
+Feedback corrections are PROPOSED reference answers, not an automatically
+verified gold standard. For proposed motifs we calculate exact-match rate;
+prose improvements must be reviewed as chess reasoning, not string matches.
+"""
+from __future__ import annotations
+import argparse
+import csv
+import json
+import re
+import sys
+from collections import Counter
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+
+def load_rows(path):
+    path = Path(path)
+    if path.suffix == '.jsonl':
+        with path.open(encoding='utf-8') as handle:
+            return [json.loads(line) for line in handle if line.strip()]
+    with path.open(encoding='utf-8-sig', newline='') as handle:
+        return list(csv.DictReader(handle))
+
+
+def normalize(row):
+    return {
+        'case_id': row.get('case_id') or row.get('regression_case_id') or '',
+        'feedback_type': row.get('feedback_type') or '',
+        'rating': int(row.get('rating') or 0),
+        'review_status': row.get('review_status') or '',
+        'fen': row.get('fen') or '',
+        'played_move_uci': row.get('played_move_uci') or '',
+        'best_move_uci': row.get('best_move_uci') or '',
+        'best_pv_uci': row.get('best_pv_uci') or '',
+        'played_pv_uci': row.get('played_pv_uci') or '',
+        'category': row.get('category') or row.get('position_category') or 'mistake',
+        'centipawn_loss': row.get('centipawn_loss') or '0',
+        'mate_before': row.get('mate_before') or '',
+        'current_motif': row.get('current_motif') or row.get('current_primary_motif_key') or row.get('primary_motif_key') or '',
+        'suggested_motif': row.get('suggested_motif') or row.get('suggested_motif_key') or '',
+        'original_text': row.get('original_text') or row.get('content_snapshot') or '',
+        'suggested_text': row.get('suggested_text') or '',
+    }
+
+
+def analyze(rows):
+    # `chess` is optional for loading fixtures/report schema, but required to
+    # genuinely re-run classification or explanation generation.
+    try:
+        import chess
+        from learning import classify_learning_concepts
+        from coaching import generate_coaching_text
+    except ImportError as exc:
+        raise RuntimeError('Install dependencies from requirements.txt before evaluating chess positions') from exc
+    outcomes = []
+    for raw in rows:
+        rec = normalize(raw)
+        if rec['feedback_type'] not in ('position', 'explanation', 'motif'):
+            continue
+        result = dict(rec)
+        result.update({'predicted_motif': '', 'predicted_explanation': '',
+                       'motif_matches_proposal': '', 'positive_motif_preserved': '',
+                       'explanation_has_boilerplate': '', 'assessment': '', 'error': ''})
+        try:
+            board = chess.Board(rec['fen'])
+            best = chess.Move.from_uci(rec['best_move_uci'])
+            played = chess.Move.from_uci(rec['played_move_uci'])
+            if best not in board.legal_moves or played not in board.legal_moves:
+                raise ValueError('Candidate move is not legal in saved FEN')
+            def pv(value):
+                if isinstance(value, list):
+                    return value
+                try:
+                    obj = json.loads(value or '[]')
+                    return obj if isinstance(obj, list) else []
+                except (TypeError, ValueError):
+                    return []
+            labels = classify_learning_concepts(
+                board, played, best, rec['category'], int(float(rec['centipawn_loss'] or 0)),
+                mate_before=int(rec['mate_before']) if rec['mate_before'] else None,
+                best_pv_uci=pv(rec['best_pv_uci']), played_pv_uci=pv(rec['played_pv_uci']))
+            result['predicted_motif'] = next((x.key for x in labels if x.is_primary), '')
+            if rec['feedback_type'] == 'motif':
+                if rec['rating'] < 0 and rec['suggested_motif']:
+                    result['motif_matches_proposal'] = str(result['predicted_motif'] == rec['suggested_motif']).lower()
+                if rec['rating'] > 0:
+                    result['positive_motif_preserved'] = str(result['predicted_motif'] == rec['current_motif']).lower()
+            if rec['feedback_type'] == 'explanation':
+                prompt, explanation = generate_coaching_text(
+                    fen=rec['fen'], previous_fen=None,
+                    opponent_move_uci=None, opponent_move_san=None,
+                    played_move_uci=rec['played_move_uci'], played_move_san=None,
+                    best_move_uci=rec['best_move_uci'], best_move_san=None,
+                    played_pv_uci=pv(rec['played_pv_uci']),
+                    best_pv_uci=pv(rec['best_pv_uci']),
+                    labels=labels, category=rec['category'],
+                    mate_before=int(rec['mate_before']) if rec['mate_before'] else None)
+                result['predicted_explanation'] = explanation
+                result['explanation_has_boilerplate'] = str(bool(re.search(
+                    r'analyzed continuation|Why .+ falls short|Stockfish evaluates', explanation, re.I))).lower()
+                # User-proposed wording is intentionally not binary graded.
+                result['assessment'] = 'manual_review_proposed_wording' if rec['rating'] < 0 else 'approved_reference'
+            else:
+                result['assessment'] = 'proposed_not_verified' if rec['rating'] < 0 else 'approved_reference'
+        except (ValueError, TypeError, KeyError, AssertionError) as exc:
+            result['error'] = str(exc)
+        outcomes.append(result)
+    return outcomes
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument('--input', required=True)
+    ap.add_argument('--output', required=True)
+    args = ap.parse_args(argv)
+    rows = load_rows(args.input)
+    results = analyze(rows)
+    if not results:
+        raise SystemExit('No position/explanation/motif feedback records')
+    out = Path(args.output)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with out.open('w', newline='', encoding='utf-8') as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(results[0]))
+        writer.writeheader()
+        writer.writerows(results)
+    stats = Counter((r['feedback_type'], r['rating']) for r in results)
+    proposed = [r for r in results if r['feedback_type'] == 'motif' and r['suggested_motif'] and r['rating'] < 0]
+    correct = sum(r['motif_matches_proposal'] == 'true' for r in proposed)
+    print('Feedback distribution:', dict(stats))
+    print(f'Proposed motif agreement: {correct}/{len(proposed)} (not an independently validated score)')
+    print(f'Report: {out}')
+    return 0
+
+if __name__ == '__main__':
+    raise SystemExit(main())

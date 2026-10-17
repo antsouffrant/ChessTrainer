@@ -21,7 +21,7 @@ from decision_context import decision_facts, trace_variation
 from loose_piece_provenance import differential_loss_motif
 from coaching_language import game_continuation
 
-VERSION = 'chess-idea-coaching-v5-provenance'
+VERSION = 'chess-idea-coaching-v6-feedback-refutations'
 VALUES = {chess.PAWN: 1, chess.KNIGHT: 3, chess.BISHOP: 3,
           chess.ROOK: 5, chess.QUEEN: 9, chess.KING: 0}
 CENTRAL = {chess.D4, chess.E4, chess.D5, chess.E5}
@@ -457,9 +457,17 @@ def evidence_findings(board, best, played, best_pv=None, played_pv=None,
             # easily mislabeled as wins or losses of hanging pieces.
             early_consequence = any(f.impact >= 75 and f.horizon <= 1 for f in findings)
             if not early_consequence:
+                loss = next((c for c in _material_losses(facts) if c['ply'] <= 3), None)
+            if loss:
+                step = bad['steps'][loss['ply']]
+                add('simplification', 'simplification', 1, 2, 88,
+                    f'{best_name} trades {give["piece"]} for {take["piece"]}, '
+                    f'avoiding the material loss that follows {bad_name} and '
+                    f'{step["san"]}.')
+            else:
                 add('simplification', 'simplification', 1, 2, 66,
                     f'{best_name} exchanges {give["piece"]} for {take["piece"]}, '
-                    'simplifying without an immediate material gain.')
+                    'simplifying the position.')
 
     if bad_move and after_bad and facts['opponent_mate_bad'] == [] and _trade_for_castling(board, bad_move, facts):
         if root and root['free']:
@@ -496,8 +504,14 @@ def evidence_findings(board, best, played, best_pv=None, played_pv=None,
             f'{best_name} offers a pawn to open a route for your bishop, which later captures the pawn on {sacrifice}.')
 
     if bad and _exchange_loss(facts) and (gap is None or gap >= 60):
-        add('exchange_loss', 'exchange', 2, 2, 99,
-            f'{bad_name} loses the exchange in the analyzed continuation—a rook for a minor piece.')
+        rook_loss = next((c for c in bad['captures']
+                          if not c['by_solver'] and c['value'] == 5 and c['ply'] <= 3), None)
+        if rook_loss:
+            text = (f'In the game you played {bad_name}, allowing your opponent '
+                    f'to win the exchange with {rook_loss["san"]}—a rook for a minor piece.')
+        else:
+            text = f'{bad_name} loses the exchange—a rook for a minor piece.'
+        add('exchange_loss', 'exchange', 2, 2, 99, text)
 
     if bad_move and bad and (gap is None or gap >= 60):
         for lost in sorted(_material_losses(facts), key=lambda c: (c['ply'], -c['value'])):
@@ -511,7 +525,8 @@ def evidence_findings(board, best, played, best_pv=None, played_pv=None,
                 bad_name, lost['san'],
                 f'capture your {_piece(piece)} on {victim_square}' if victim_square else
                 f'capture your {_piece(piece)}',
-                ply=lost['ply'], alternative=(facts.get('contrast_role') == 'tempting alternative'))
+                ply=lost['ply'], preceding=[x['san'] for x in bad['steps'][1:lost['ply']]],
+                alternative=(facts.get('contrast_role') == 'tempting alternative'))
             add('material_loss', differential_loss_motif(board, bad_move, lost), lost['ply'], 2,
                 (111 if is_root_piece and lost['value'] >= 5 else
                  100 if is_root_piece else 88 if lost['value'] >= 3 else 64),
@@ -562,6 +577,25 @@ def evidence_findings(board, best, played, best_pv=None, played_pv=None,
     # A remote capture/recapture is not a root explanation. If none of the
     # candidate findings is sufficiently local, leave the question open for
     # more analysis instead of fabricating a far-future tactical cause.
+
+    # Reuse the SAME near-root tactical scan on both compared branches. A
+    # mistake may overlook an opponent fork, while the solution may create
+    # one. Geometry alone is not enough: the saved legal moves must include
+    # a subsequent capture of the relevant target.
+    from continuation_refutations import scan_branch
+    if bad_move and bad and (gap is None or gap >= 60):
+        for ref in scan_branch(board, bad_move, played_pv, branch='played'):
+            if ref.ply <= 2 and bad['material_delta'] < good['material_delta']:
+                add('line_refutation', ref.motif, ref.ply, 2,
+                    110 if ref.ply == 1 else 93, ref.text)
+    for ref in scan_branch(board, best, best_pv, branch='best'):
+        # A verified free rook/queen at the training move is closer and more
+        # relevant than a separate tactic later in that same PV.
+        if root and root['free'] and VALUES[root['victim'].piece_type] >= 5:
+            continue
+        if ref.ply <= 2 and (not bad or good['material_delta'] > bad['material_delta']):
+            add('line_refutation', ref.motif, ref.ply, 2,
+                112 if ref.ply == 0 else 96, ref.text)
 
     # Downweight non-mating remote incidents. Exception: a verified pawn
     # sacrifice whose bishop payoff is causally rooted in the pawn advance.
