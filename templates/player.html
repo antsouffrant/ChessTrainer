@@ -1,0 +1,52 @@
+{% extends 'base.html' %}
+{% block title %}Player · Personal Chess Trainer{% endblock %}
+{% block extra_head %}<link rel="stylesheet" href="{{ url_for('static', filename='player.css') }}">{% endblock %}
+{% block content %}
+<main id="player-hub" class="player-hub">
+  <header class="player-hero glass">
+    <div><span class="eyebrow">PLAYER · LEARNING PROGRESS</span><h1>Your learning</h1>
+      <p class="muted">Explore practice, first-try accuracy, repetitions, and solve times across your game lists, motifs, and openings.</p></div>
+    <div class="player-actions">
+      <button class="secondary-button" id="player-reset-records" type="button"><i class="fa-solid fa-trash-can" aria-hidden="true"></i> Reset Player records</button>
+      <a class="secondary-button" id="player-attempt-export" href="/api/player/attempts.csv" download><i class="fa-solid fa-list" aria-hidden="true"></i> Attempt events CSV</a>
+      <a class="primary-button" id="player-session-export" href="/api/player/sessions.csv" download><i class="fa-solid fa-download" aria-hidden="true"></i> Sessions CSV</a>
+    </div>
+  </header>
+  <form class="player-filters glass" id="player-filters">
+    <div class="player-filter-header"><h2>Explore progress</h2><button class="secondary-button" type="reset">Clear filters</button></div>
+    <div class="player-filter-grid">
+      <label>Game list<select name="job_id"><option value="">All game lists</option></select></label>
+      <label>Primary motif<select name="primary_motif_key"><option value="">All motifs</option></select></label>
+      <label>Opening<select name="opening_key"><option value="">All openings</option></select></label>
+      <label>Learning mode<select name="learning_mode"><option value="">All learning modes</option></select></label>
+      <label>Position ID<input name="position_id" inputmode="numeric" type="number" min="1" placeholder="Any position"></label>
+    </div>
+  </form>
+  <p class="muted player-note" id="player-reset-note" role="status">Both CSV exports reflect the current filters. Reset deletes Player sessions and attempts for the selected <strong>game list</strong> (or all game lists if none is selected), regardless of the other filters. Export both CSVs first. Learned status, analysis, training positions, and Coach feedback are preserved.</p>
+  <p class="muted player-note">A position counts toward your practice history only after a legal attempt. Solve time pauses when the tab is hidden or unfocused. Long solves above your Settings time limit are excluded from time averages, not from solved counts.</p>
+  <p class="player-error hidden" id="player-error" role="alert"></p>
+  <p class="muted" id="player-loading" role="status">Loading learning progress…</p>
+  <div id="player-results" class="hidden">
+    <section class="player-metrics" aria-label="Learning statistics">
+      <article class="player-metric glass"><span>Total positions</span><strong id="player-total">0</strong><small>In matching game lists</small></article>
+      <article class="player-metric glass"><span>Learned positions</span><strong id="player-learned">0</strong><small id="player-learned-detail">0% of positions</small></article>
+      <article class="player-metric glass"><span>Attempted positions</span><strong id="player-attempted">0</strong><small id="player-attempts-detail">0 moves attempted</small></article>
+      <article class="player-metric glass"><span>First-time solve rate</span><strong id="player-first-try">—</strong><small id="player-first-detail">Of attempted sessions</small></article>
+      <article class="player-metric glass"><span>Attempts per solve</span><strong id="player-avg-attempts">—</strong><small id="player-solved-detail">Solved practice sessions</small></article>
+      <article class="player-metric glass"><span>Average solve time</span><strong id="player-avg-time">—</strong><small id="player-time-detail">Valid active solve times</small></article>
+    </section>
+    <div class="player-charts">
+      <section class="glass player-panel"><h2>Attempts until solved</h2><p class="muted">Number of attempts in each completed practice session.</p><div id="player-attempt-hist"></div></section>
+      <section class="glass player-panel"><h2>Learning over time</h2><p class="muted">Completed sessions and first-attempt solves by date.</p><div id="player-progress-time"></div></section>
+    </div>
+    <section class="player-breakdowns" aria-label="Learning breakdowns">
+      <article class="glass player-panel"><h2>By primary learning motif</h2><p class="muted">Find concepts needing more repetitions.</p><div id="player-by-motif"></div></article>
+      <article class="glass player-panel"><h2>By opening</h2><p class="muted">Compare your performance across openings.</p><div id="player-by-opening"></div></article>
+      <article class="glass player-panel"><h2>By learning mode</h2><p class="muted">Explore performance by training style.</p><div id="player-by-mode"></div></article>
+    </section>
+    <section class="glass player-panel"><h2>Recent practice sessions</h2><p class="muted">Includes incomplete attempted puzzles; unattempted puzzles do not appear.</p><div class="player-table-scroll"><table class="player-table"><thead><tr><th>Position</th><th>Motif</th><th>Attempts</th><th>Result</th><th>Solve time</th><th>Started</th></tr></thead><tbody id="player-recent"></tbody></table></div></section>
+    <section class="glass player-panel player-data-note"><h2>Learning data</h2><p>Your sessions CSV contains the puzzle, opening, primary motif at first attempt, attempt count, first-try result, and solve timing status. The attempt-events CSV preserves every legal submitted move and its outcome for later extensions. Prior practice statistics cannot be reconstructed precisely from legacy attempt counters; new event tracking begins with this version.</p></section>
+  </div>
+</main>
+<script src="{{ url_for('static', filename='player.js') }}"></script>
+{% endblock %}

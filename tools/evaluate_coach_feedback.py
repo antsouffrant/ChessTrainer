@@ -38,6 +38,13 @@ def normalize(row):
         'rating': int(row.get('rating') or 0),
         'review_status': row.get('review_status') or '',
         'fen': row.get('fen') or '',
+        'previous_fen': row.get('previous_fen') or '',
+        'opponent_move_uci': row.get('opponent_move_uci') or '',
+        'opponent_move_san': row.get('opponent_move_san') or '',
+        'best_move_san': row.get('best_move_san') or '',
+        'played_move_san': row.get('played_move_san') or '',
+        'critical_events_json': row.get('critical_events_json') or '',
+        'explanatory_lines_json': row.get('explanatory_lines_json') or '',
         'played_move_uci': row.get('played_move_uci') or '',
         'best_move_uci': row.get('best_move_uci') or '',
         'best_pv_uci': row.get('best_pv_uci') or '',
@@ -72,7 +79,8 @@ def analyze(rows):
         result = dict(rec)
         result.update({'predicted_motif': '', 'predicted_explanation': '',
                        'motif_matches_proposal': '', 'positive_motif_preserved': '',
-                       'explanation_has_boilerplate': '', 'assessment': '', 'error': ''})
+                       'explanation_has_boilerplate': '', 'positive_explanation_changed': '',
+                       'approved_explanation_review': '', 'assessment': '', 'error': ''})
         try:
             board = chess.Board(rec['fen'])
             best = chess.Move.from_uci(rec['best_move_uci'])
@@ -90,7 +98,9 @@ def analyze(rows):
             labels = classify_learning_concepts(
                 board, played, best, rec['category'], int(float(rec['centipawn_loss'] or 0)),
                 mate_before=int(rec['mate_before']) if rec['mate_before'] else None,
-                best_pv_uci=pv(rec['best_pv_uci']), played_pv_uci=pv(rec['played_pv_uci']))
+                best_pv_uci=pv(rec['best_pv_uci']), played_pv_uci=pv(rec['played_pv_uci']),
+                previous_fen=rec['previous_fen'] or None,
+                opponent_move_uci=rec['opponent_move_uci'] or None)
             result['predicted_motif'] = next((x.key for x in labels if x.is_primary), '')
             if rec['feedback_type'] == 'motif':
                 if rec['rating'] < 0 and rec['suggested_motif']:
@@ -99,20 +109,29 @@ def analyze(rows):
                     result['positive_motif_preserved'] = str(result['predicted_motif'] == rec['current_motif']).lower()
             if rec['feedback_type'] == 'explanation':
                 prompt, explanation = generate_coaching_text(
-                    fen=rec['fen'], previous_fen=None,
-                    opponent_move_uci=None, opponent_move_san=None,
-                    played_move_uci=rec['played_move_uci'], played_move_san=None,
-                    best_move_uci=rec['best_move_uci'], best_move_san=None,
+                    fen=rec['fen'], previous_fen=rec['previous_fen'] or None,
+                    opponent_move_uci=rec['opponent_move_uci'] or None,
+                    opponent_move_san=rec['opponent_move_san'] or None,
+                    played_move_uci=rec['played_move_uci'], played_move_san=rec['played_move_san'] or None,
+                    best_move_uci=rec['best_move_uci'], best_move_san=rec['best_move_san'] or None,
                     played_pv_uci=pv(rec['played_pv_uci']),
                     best_pv_uci=pv(rec['best_pv_uci']),
                     labels=labels, category=rec['category'],
                     mate_before=int(rec['mate_before']) if rec['mate_before'] else None,
                     eval_before_cp=int(float(rec['eval_before_cp'])) if rec['eval_before_cp'] else None,
                     eval_after_cp=int(float(rec['eval_after_cp'])) if rec['eval_after_cp'] else None,
-                    alternative_pvs_json=pv(rec['alternative_pvs_json']))
+                    alternative_pvs_json=pv(rec['alternative_pvs_json']),
+                    critical_events_json=rec['critical_events_json'] or None,
+                    explanatory_lines_json=rec['explanatory_lines_json'] or None)
                 result['predicted_explanation'] = explanation
                 result['explanation_has_boilerplate'] = str(bool(re.search(
                     r'analyzed continuation|Why .+ falls short|Stockfish evaluates', explanation, re.I))).lower()
+                # A changed previously-approved explanation must be reviewed,
+                # not automatically treated as a net improvement.
+                if rec['rating'] > 0:
+                    changed = explanation.strip() != rec['original_text'].strip()
+                    result['positive_explanation_changed'] = str(changed).lower()
+                    result['approved_explanation_review'] = 'review_changed_approved' if changed else 'preserved_exactly'
                 # User-proposed wording is intentionally not binary graded.
                 result['assessment'] = 'manual_review_proposed_wording' if rec['rating'] < 0 else 'approved_reference'
             else:
@@ -143,6 +162,11 @@ def main(argv=None):
     correct = sum(r['motif_matches_proposal'] == 'true' for r in proposed)
     print('Feedback distribution:', dict(stats))
     print(f'Proposed motif agreement: {correct}/{len(proposed)} (not an independently validated score)')
+    preserved = [r for r in results if r['feedback_type'] == 'motif' and r['rating'] > 0 and not r['error']]
+    n_preserved = sum(r['positive_motif_preserved'] == 'true' for r in preserved)
+    print(f'Previously approved motif labels retained: {n_preserved}/{len(preserved)} (not a chess truth score)')
+    changed_explanations = [r for r in results if r['approved_explanation_review'] == 'review_changed_approved']
+    print(f'Previously approved explanations changed and needing review: {len(changed_explanations)}')
     print(f'Report: {out}')
     return 0
 

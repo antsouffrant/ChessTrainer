@@ -1,4 +1,4 @@
-# Personal Chess Trainer — v60
+# Personal Chess Trainer — v61
 
 A local Flask application that retrieves Lichess games, evaluates them with Stockfish, and builds training positions, lessons, opening playlists, and position-aware chess coaching. Saved game lists, evaluations, training progress, and thumbs feedback use a local SQLite database.
 
@@ -27,6 +27,7 @@ Open <http://127.0.0.1:5000>. Keep the `data/` folder when installing a newer so
 | **Openings** | Review opening families and training-position playlists. |
 | **Process** | Manage per-list Retrieval, Analysis and Metadata Refresh, including pause/resume and clean restart. |
 | **Coach** | Review thumbs feedback for positions, explanations, motifs, and interactive coaching; filter, compare versions, export CSV, or reset feedback. |
+| **Player** | View learning progress by game list, motif and opening: first-time solve accuracy, attempts per solve, active solve time, trends, histograms, and session/attempt CSV exports. |
 | **Settings** | Configure presentation and analysis settings, including Stockfish behavior. |
 
 ## Guided feedback and regression candidates
@@ -130,3 +131,52 @@ the additional 51 proposed correction cases, tests, offline benchmark command,
 and caveats about unverified user-proposed corrections. Existing local
 feedback and training databases are unchanged; use **Refresh Metadata** to
 regenerate current coaching from saved positions and PVs.
+
+## Player learning analytics (v61)
+
+The new Player page uses two SQLite tables: `player_solve_sessions` and `player_solve_attempts`. Each legal training attempt is an event, with a session starting only on the first attempt of an unsolved puzzle. This preserves repeat solve history without collecting statistics from untouched puzzles. A foreground-aware clock accumulates active solving time while the Training page is visible and focused. Puzzle solves exceeding the configurable **Maximum recorded puzzle solve time** (default 300 seconds) are excluded from time averages, but still count as solves. Change the limit in Settings → Trainer. The Player page supports game-list, motif, opening, learning mode, and position filters, plus separate CSV exports for sessions and attempt events.
+
+The first-time solve rate counts only each puzzle's earliest attempted session so replaying an easy puzzle cannot inflate the score. **Existing attempts and learned flags remain in place, but historical first-try accuracy and solve durations cannot be reliably backfilled.** See `LEARNING_PIPELINE.md` for definitions, timestamps, and reset semantics.
+
+### Player tracking clock-in/out (v62)
+
+The Training progress header contains **Learning stats on/off**. The preference is
+remembered in the current browser across game lists (default: on). Turning it
+off stops the foreground solve timer and ends any unfinished tracked practice
+session. Future legal moves still solve puzzles and change the ordinary learned
+status and legacy attempts, but do **not** create Player session/attempt events.
+Turning it back on begins a fresh tracked session on the next legal attempt.
+Already recorded Player history is never deleted by this switch. The Player
+dashboard's total/learned positions still reflect ordinary puzzle progress.
+
+Note: First-try statistics describe the first *recorded* training encounter;
+training with the clock turned off is intentionally not reconstructible.
+
+
+### Player data export and reset (v63)
+
+On **Player**, use *Sessions CSV* and *Attempt events CSV* for filtered
+exports. *Reset Player records* deletes practice sessions/attempts for the
+selected game list, or all lists when unfiltered by game list, after explicit
+confirmation. It preserves learned-position flags, engine analysis, game lists,
+and Coach feedback. Other Player filters never limit deletion; see
+`LEARNING_PIPELINE.md` for the complete data contract. Download both CSVs first.
+
+### v64: evidence-and-purpose coaching
+
+The Coach model now looks for **demonstrated material recovery after a
+sacrifice**, and the *positional purpose* of some balanced trades (such as
+creating doubled opponent pawns), rather than describing every exchange as
+simple simplification or every sacrifice as an unexplained investment.
+Straightforward captures and trades remain concise when the saved variations
+show no more instructive cause. The motif taxonomy is deliberately stable;
+classification and prose use the same ranked causal evidence.
+
+The full 281-rating positive/negative Coach feedback snapshot and reproducible
+evaluation process are documented in `FEEDBACK_BENCHMARK.md`. Refresh Metadata
+regenerates coaching text and motif assignments **without reanalyzing games**;
+previous Coach feedback is retained. Chess-specific tests and benchmark replay
+require installing dependencies from `requirements.txt`.
+
+The top navigation keeps your requested order: **Home, Training, Lessons,
+Openings, Player, Coach, Process, Settings**.

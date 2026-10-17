@@ -2934,3 +2934,28 @@ body.theme-wood .mini-square.dark { background: #7b4d2e; }
   cursor:pointer;white-space:nowrap}
 .feedback-edit-correction:hover,.feedback-edit-correction:focus-visible {background:rgba(255,255,255,.18)}
 .feedback-edit-correction.hidden {display:none !important}
+
+/* v62 — compact, persistent opt-in control for Player activity collection. */
+.lesson-training-progress-summary .player-tracking-control {
+  display:inline-flex; align-items:center; gap:8px; white-space:nowrap;
+  border:1px solid rgba(255,255,255,.18); border-radius:999px;
+  padding:5px 10px; color:#d9e2e7; background:rgba(255,255,255,.045);
+  font-size:.76rem; font-weight:700; cursor:pointer; user-select:none;
+}
+.player-tracking-control input { position:absolute; width:1px; height:1px; opacity:0; }
+.player-tracking-switch {
+  width:29px; height:17px; border-radius:999px; position:relative; flex:none;
+  background:#62666a; transition:background .18s ease;
+}
+.player-tracking-switch::before {
+  content:''; position:absolute; top:3px; left:3px; width:11px; height:11px;
+  background:#fff; border-radius:50%; transition:transform .18s ease;
+}
+.player-tracking-control input:checked + .player-tracking-switch { background:#48aa7b; }
+.player-tracking-control input:checked + .player-tracking-switch::before { transform:translateX(12px); }
+.player-tracking-control input:focus-visible + .player-tracking-switch {
+  outline:2px solid #edda91; outline-offset:3px;
+}
+@media (max-width: 680px) {
+  .lesson-training-progress-summary .player-tracking-control { padding:5px 9px; }
+}

@@ -21,8 +21,9 @@ from decision_context import decision_facts, trace_variation
 from loose_piece_provenance import differential_loss_motif
 from coaching_language import game_continuation
 from causal_selection import ranked_findings
+from causal_consequences import sacrifice_compensation, structural_exchange_gain
 
-VERSION = 'chess-idea-coaching-v7-causal-comprehension'
+VERSION = 'chess-idea-coaching-v8-evidence-and-purpose'
 VALUES = {chess.PAWN: 1, chess.KNIGHT: 3, chess.BISHOP: 3,
           chess.ROOK: 5, chess.QUEEN: 9, chess.KING: 0}
 CENTRAL = {chess.D4, chess.E4, chess.D5, chess.E5}
@@ -512,18 +513,34 @@ def evidence_findings(board, best, played, best_pv=None, played_pv=None,
         give = immediate_exchange['recapture']
         deficit = give['value'] - take['value']
         if deficit >= 2:
-            if give['value'] == 5 and take['value'] == 3:
-                add('exchange_sacrifice', 'exchange_sacrifice', 1, 3, 110,
-                    f'{best_name} sacrifices the exchange: a rook for a '
-                    f'{take["piece"]}. The trade gives up material for the resulting position.')
+            # Calling a sacrifice a "deliberate investment" does not teach
+            # the *reason* it works. Recover material only when the saved legal
+            # continuation actually does so; a sampled PV is not forced play.
+            compensation = sacrifice_compensation(good)
+            if compensation:
+                opening = (f'{best_name} sacrifices the exchange: a rook for a {take["piece"]}'
+                           if give['value'] == 5 and take['value'] == 3 else
+                           f'{best_name} sacrifices a {give["piece"]} for a {take["piece"]}')
+                statement = (f'{opening}. After {compensation["reply"]}, '
+                             f'{compensation["payoff"]} captures the opponent’s '
+                             f'{compensation["piece"]}, recovering the invested material '
+                             'in the saved continuation.')
+                add('compensated_sacrifice',
+                    'exchange_sacrifice' if give['value'] == 5 and take['value'] == 3
+                    else 'material_sacrifice', 1 if compensation['ply'] <= 4 else 3, 2,
+                    113 if compensation['ply'] <= 4 else 99, statement)
             else:
-                add('material_sacrifice', 'material_sacrifice', 1, 3, 109,
-                    f'{best_name} sacrifices a {give["piece"]} for a '
-                    f'{take["piece"]}. This is a deliberate material investment, not an even trade.')
+                # Root sacrifice is an established event; its *compensation*
+                # is not. Do not guess initiative or a material return.
+                add('observed_sacrifice',
+                    'exchange_sacrifice' if give['value'] == 5 and take['value'] == 3
+                    else 'material_sacrifice', 1, 1, 67,
+                    f'{best_name} gives up a {give["piece"]} for a {take["piece"]}. '
+                    'The saved continuation does not establish the compensation.')
         elif abs(deficit) <= 1:
-            # Only call it simplification when no immediate tactic provides
-            # a more specific explanation. Quiet trades are otherwise too
-            # easily mislabeled as wins or losses of hanging pieces.
+            # A balanced exchange can be the complete lesson. Look for a
+            # demonstrated *differential* consequence before making it longer.
+            structural = structural_exchange_gain(board, best, bad_move, good, bad)
             early_consequence = any(f.impact >= 75 and f.horizon <= 1 for f in findings)
             loss = (None if early_consequence else
                     next((c for c in _material_losses(facts) if c['ply'] <= 3), None))
@@ -533,6 +550,11 @@ def evidence_findings(board, best, played, best_pv=None, played_pv=None,
                     f'{best_name} trades {give["piece"]} for {take["piece"]}, '
                     f'avoiding the material loss that follows {bad_name} and '
                     f'{step["san"]}.')
+            elif structural:
+                add('structural_exchange', 'pawn_structure', 1, 2, 91,
+                    f'{best_name} exchanges {give["piece"]} for {take["piece"]}. '
+                    f'After {structural["reply"]}, your opponent has newly '
+                    f'doubled {structural["file"]}-pawns.')
             else:
                 add('simplification', 'simplification', 1, 2, 66,
                     f'{best_name} exchanges {give["piece"]} for {take["piece"]}, '

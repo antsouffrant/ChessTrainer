@@ -124,6 +124,9 @@ SETTING_DEFINITIONS = OrderedDict([
          'help': 'Combined verification, recurrence, distinctiveness, and teachability score required for promotion.'},
     ]),
     ('trainer', [
+        {'key': 'max_puzzle_solve_seconds', 'label': 'Maximum recorded puzzle solve time',
+         'type': 'int', 'default': 300, 'min': 30, 'max': 3600, 'step': 30, 'unit': 'sec',
+         'help': 'Completed puzzles taking longer than this active-time limit are excluded from average solve time. Attempts and solves still count. Timing pauses when the tab loses focus.'},
         {'key': 'near_optimal_cp', 'label': 'Near-optimal acceptance margin', 'type': 'int', 'default': 60, 'min': 0, 'max': 500, 'unit': 'cp',
          'help': 'A non-engine move may pass when it stays within this margin of the top move.'},
         {'key': 'min_improvement_over_game_cp', 'label': 'Minimum improvement over game move', 'type': 'int', 'default': 75, 'min': 0, 'max': 1000, 'unit': 'cp',

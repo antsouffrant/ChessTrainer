@@ -12,6 +12,11 @@
       <div class="lesson-training-progress-summary" aria-live="polite">
         <strong id="lesson-progress-count">Loading positions…</strong>
         <span id="lesson-progress-remaining"></span>
+        <label class="player-tracking-control" for="player-tracking-toggle" title="Choose whether your training attempts and solve time count toward Player statistics. Your puzzle progress is always saved.">
+          <input id="player-tracking-toggle" type="checkbox" checked>
+          <span class="player-tracking-switch" aria-hidden="true"></span>
+          <span id="player-tracking-label">Learning stats on</span>
+        </label>
       </div>
     </div>
     <div class="lesson-progress-track" id="lesson-progress-track" role="progressbar" aria-label="Positions learned in the current playlist" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">

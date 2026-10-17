@@ -15,7 +15,7 @@ from motif_relevance import select_relevant_primary
 from motif_hierarchy import choose_specific, validate_ontology
 from pv_reasoning import fork_evidence, legal_pv, comparative_insight
 
-CLASSIFIER_VERSION = '2.8-shared-causal-selection'
+CLASSIFIER_VERSION = '2.9-evidence-and-purpose'
 
 # A deliberately compact curriculum: these are common, teachable amateur
 # failure modes that we can identify with reasonably explainable board rules.

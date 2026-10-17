@@ -345,6 +345,49 @@ CREATE TABLE IF NOT EXISTS coach_message_feedback (
 );
 CREATE INDEX IF NOT EXISTS idx_coach_feedback_account ON coach_message_feedback(account_id, rating, updated_at);
 
+-- Activity history is append-only across manual puzzle resets. The first
+-- legal training attempt creates a session; merely showing a puzzle does not.
+CREATE TABLE IF NOT EXISTS player_solve_sessions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    position_id INTEGER NOT NULL,
+    account_id INTEGER NOT NULL,
+    job_id INTEGER NOT NULL,
+    game_id TEXT,
+    opening_key TEXT,
+    opening_name TEXT,
+    primary_motif_key TEXT,
+    learning_mode TEXT,
+    lesson_key TEXT,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    first_try_solved INTEGER NOT NULL DEFAULT 0,
+    active_seconds REAL NOT NULL DEFAULT 0,
+    solve_seconds REAL,
+    timing_status TEXT NOT NULL DEFAULT 'pending',
+    max_solve_seconds REAL NOT NULL DEFAULT 300,
+    started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    solved_at TEXT,
+    abandoned_at TEXT,
+    FOREIGN KEY(position_id) REFERENCES training_positions(id) ON DELETE CASCADE,
+    FOREIGN KEY(job_id) REFERENCES analysis_jobs(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_player_sessions_job ON player_solve_sessions(job_id, position_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_player_open_session
+ ON player_solve_sessions(position_id) WHERE solved_at IS NULL AND abandoned_at IS NULL;
+CREATE TABLE IF NOT EXISTS player_solve_attempts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id INTEGER NOT NULL,
+    position_id INTEGER NOT NULL,
+    attempt_number INTEGER NOT NULL,
+    move_uci TEXT NOT NULL,
+    correct INTEGER NOT NULL,
+    active_seconds_delta REAL,
+    attempted_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(session_id) REFERENCES player_solve_sessions(id) ON DELETE CASCADE,
+    FOREIGN KEY(position_id) REFERENCES training_positions(id) ON DELETE CASCADE,
+    UNIQUE(session_id, attempt_number)
+);
+CREATE INDEX IF NOT EXISTS idx_player_attempts_position ON player_solve_attempts(position_id);
+
 CREATE TABLE IF NOT EXISTS engine_eval_cache (
     fen TEXT PRIMARY KEY,
     best_move_uci TEXT,

@@ -15,7 +15,7 @@ from pv_reasoning import comparative_insight, fork_evidence, legal_pv
 from narrative_editor import mate_explanation, polish_comparison, concise
 from semantic_coaching import causal_coaching
 
-COACHING_VERSION = 'rules-v27-causal-comprehension'
+COACHING_VERSION = 'rules-v28-evidence-and-purpose'
 
 PIECE_NAMES = {
     chess.PAWN: 'pawn',

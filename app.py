@@ -35,6 +35,7 @@ from feedback_analytics import (
     report_rows, report_facets, report_summary, csv_bytes, regression_candidate_rows,
 )
 from process_policy import queue_analysis, restart_analysis
+from player_learning import record_attempt as record_player_attempt, abandon_session as abandon_player_session, summary as player_summary, facets as player_facets, export_rows as player_export_rows, csv_data as player_csv_data, reset_player_records
 from opening_playlist import enrich_opening_playlist, board_identity
 from adaptive_coach import (
     apply_adaptive_concepts_to_position, coach_history, handle_coach_message, get_or_create_thread,
@@ -2272,6 +2273,23 @@ def attempt(position_id):
         board.push(resolved)
         attempted_fen = board.fen()
 
+        # Append player-learning evidence only for genuine legal training moves.
+        # The old per-position counters are retained for backward compatibility.
+        # Already-learned positions can be reviewed in Analysis mode without
+        # creating another learning session.
+        learning_event = None
+        if not row['learned'] and (payload.get('track_learning', True) is False
+                                   or payload.get('start_new_learning_session') is True):
+            abandon_player_session(conn, position_id)
+        if not row['learned'] and payload.get('track_learning', True) is not False:
+            learning_event = record_player_attempt(
+                conn, row, move_uci=attempted_uci, correct=correct,
+                elapsed_seconds=payload.get('active_seconds_delta'),
+                lesson_key=payload.get('lesson_key'),
+                opening_key=payload.get('opening_key'),
+                max_solve_seconds=puzzle_settings['max_puzzle_solve_seconds'],
+            )
+
         if correct:
             conn.execute("""
                 UPDATE training_positions
@@ -2358,6 +2376,22 @@ def attempt(position_id):
         })
 
 
+@app.post('/api/positions/<int:position_id>/player/clock-out')
+def clock_out_player_session(position_id):
+    """End the current tracked attempt cycle without changing puzzle progress.
+
+    A user may continue solving with tracking off; that play still updates
+    the standard learned/attempt counters, but never enters Player reports.
+    """
+    with connect() as conn:
+        row = conn.execute('SELECT id FROM training_positions WHERE id=?', (position_id,)).fetchone()
+        if row is None:
+            return jsonify({'error': 'Position not found'}), 404
+        abandon_player_session(conn, position_id)
+        conn.commit()
+    return jsonify({'ok': True})
+
+
 @app.post('/api/positions/<int:position_id>/reset')
 def reset_training_position(position_id):
     payload = request.get_json(silent=True) or {}
@@ -2371,6 +2405,7 @@ def reset_training_position(position_id):
         if row is None:
             return jsonify({'error': 'Position not found'}), 404
 
+        abandon_player_session(conn, position_id)
         _set_account_position_learned(conn, row['account_id'], row, False)
         _set_opening_position_group_learned(conn, row, str(payload.get('opening_key') or '').strip(), False)
         conn.commit()
@@ -2498,6 +2533,54 @@ def enrich_job_motifs(job_id):
     status_response = motif_enrichment_status(job_id)
     info = status_response.get_json()
     return jsonify({**info, 'updated': updated})
+
+
+@app.get('/player')
+def player_view():
+    """Learning outcomes and attempt history; separate from coaching quality."""
+    return render_template('player.html')
+
+
+@app.get('/api/player/summary')
+def player_report():
+    with connect() as conn:
+        data = player_summary(conn, request.args)
+        data['facets'] = player_facets(conn)
+    return jsonify(data)
+
+
+@app.get('/api/player/<string:kind>.csv')
+def player_csv(kind):
+    if kind not in ('sessions', 'attempts'):
+        return jsonify({'error': 'Unknown Player export'}), 404
+    with connect() as conn:
+        rows = player_export_rows(conn, request.args, kind=kind)
+    return send_file(io.BytesIO(player_csv_data(rows, kind=kind)),
+                     mimetype='text/csv; charset=utf-8',
+                     as_attachment=True, download_name=f'chess_player_{kind}.csv')
+
+
+@app.post('/api/player/records/reset')
+def player_reset_records():
+    """Delete Player activity history only, optionally for one game list."""
+    payload = request.get_json(silent=True) or {}
+    if payload.get('confirmation') != 'RESET PLAYER':
+        return jsonify({'error': 'Explicit RESET PLAYER confirmation is required.'}), 400
+    raw_job = payload.get('job_id')
+    try:
+        job_id = int(raw_job) if raw_job not in (None, '') else None
+    except (TypeError, ValueError):
+        return jsonify({'error': 'Invalid game list ID'}), 400
+    if job_id is not None and job_id <= 0:
+        return jsonify({'error': 'Invalid game list ID'}), 400
+    with connect() as conn:
+        if job_id is not None and not conn.execute(
+            'SELECT 1 FROM analysis_jobs WHERE id=?', (job_id,)
+        ).fetchone():
+            return jsonify({'error': 'Game list not found'}), 404
+        deleted = reset_player_records(conn, job_id)
+        conn.commit()
+    return jsonify({'ok': True, 'job_id': job_id, 'deleted': deleted})
 
 
 @app.get('/coach')
@@ -3020,6 +3103,10 @@ def mark_learned(position_id):
             affected_ids.update(record['id'] for record in related_rows
                                 if board_identity(record['fen']) == identity)
 
+        # An explicit manual learned/unlearned toggle ends any unfinished
+        # attempt cycle; the next solve will be a new practice session.
+        for affected in affected_ids:
+            abandon_player_session(conn, affected)
         _set_account_position_learned(conn, row['account_id'], row, bool(learned))
         _set_opening_position_group_learned(conn, row, opening_key, bool(learned))
         conn.commit()

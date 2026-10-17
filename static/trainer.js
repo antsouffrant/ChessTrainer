@@ -75,6 +75,88 @@ let currentIndex = 0;
 let selectedSquare = null;
 let solved = false;
 let inputLocked = true;
+// Active learning time is measured only while the training tab is visible and
+// focused. No DB session is created until the user submits a legal move.
+// Persist the clock-in preference across game lists and browser sessions.
+// Turning this off suppresses Player events, never normal puzzle completion.
+const playerTrackingStorageKey = 'pct-player-tracking-enabled';
+let learningTrackingEnabled = localStorage.getItem(playerTrackingStorageKey) !== '0';
+const playerTrackingToggleEl = document.getElementById('player-tracking-toggle');
+const playerTrackingLabelEl = document.getElementById('player-tracking-label');
+let playerClockOutRequest = Promise.resolve();
+let restartTrackedSession = !learningTrackingEnabled;
+let learningClockPositionId = null;
+let learningClockElapsedMs = 0;
+let learningClockSince = null;
+function learningClockCanRun() {
+  return learningTrackingEnabled && document.visibilityState !== 'hidden' && (!document.hasFocus || document.hasFocus());
+}
+function learningClockPause() {
+  if (learningClockSince !== null) {
+    learningClockElapsedMs += Math.max(0, performance.now() - learningClockSince);
+    learningClockSince = null;
+  }
+}
+function learningClockResume() {
+  if (learningClockPositionId && learningClockSince === null && learningClockCanRun())
+    learningClockSince = performance.now();
+}
+function learningClockStart(positionId) {
+  learningClockPause();
+  learningClockPositionId = positionId;
+  learningClockElapsedMs = 0;
+  learningClockSince = null;
+  learningClockResume();
+}
+function learningClockSnapshot() {
+  learningClockPause();
+  return Math.round(learningClockElapsedMs) / 1000;
+}
+function learningClockCommit() {
+  learningClockElapsedMs = 0;
+  learningClockSince = null;
+  learningClockResume();
+}
+// Clocking out ends any incomplete recorded attempt cycle. Clocking back in
+// creates a new session on the next legal attempt; earlier data is preserved.
+function updatePlayerTrackingUI() {
+  if (playerTrackingToggleEl) playerTrackingToggleEl.checked = learningTrackingEnabled;
+  if (playerTrackingLabelEl) playerTrackingLabelEl.textContent = learningTrackingEnabled ? 'Learning stats on' : 'Learning stats off';
+}
+function setPlayerTrackingEnabled(enabled) {
+  if (learningTrackingEnabled === enabled) return;
+  learningClockPause();
+  learningTrackingEnabled = enabled;
+  localStorage.setItem(playerTrackingStorageKey, enabled ? '1' : '0');
+  learningClockElapsedMs = 0;
+  if (!enabled) {
+    restartTrackedSession = true;
+    learningClockSince = null;
+    const positionId = learningClockPositionId;
+    if (positionId) {
+      playerClockOutRequest = playerClockOutRequest.catch(() => {}).then(() =>
+        fetch(`/api/positions/${positionId}/player/clock-out`, {method:'POST', keepalive:true})
+      ).catch(() => {});
+    }
+  } else {
+    learningClockResume();
+  }
+  updatePlayerTrackingUI();
+}
+updatePlayerTrackingUI();
+playerTrackingToggleEl?.addEventListener('change', () => setPlayerTrackingEnabled(playerTrackingToggleEl.checked));
+if (typeof document.addEventListener === 'function') {
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') learningClockPause();
+    else learningClockResume();
+  });
+}
+if (typeof window.addEventListener === 'function') {
+  window.addEventListener('blur', learningClockPause);
+  window.addEventListener('focus', learningClockResume);
+  window.addEventListener('pagehide', learningClockPause);
+}
+
 let positionsTimer = null;
 let hudTimer = null;
 let previewTimers = [];
@@ -1632,19 +1714,28 @@ async function attemptMove(from, to, legalMove = null) {
   clearHighlights();
   boardInteractive = false;
   const animationPromise = new Promise(resolve => animateMove(position, from, to, resolve, false));
+  const trackLearning = learningTrackingEnabled;
+  const startNewLearningSession = trackLearning && restartTrackedSession;
+  const activeSecondsDelta = trackLearning ? learningClockSnapshot() : null;
 
   let response;
   let result;
   try {
+    // Do not accidentally merge a new clocked-in session with the session
+    // terminated by a previous toggle-off request.
+    await playerClockOutRequest.catch(() => {});
     response = await fetch(`/api/positions/${position.id}/attempt`, {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({move: moveUci, opening_key:openingKey})
+      body: JSON.stringify({move: moveUci, opening_key:openingKey, lesson_key:conceptKey,
+        track_learning:trackLearning, start_new_learning_session:startNewLearningSession,
+        active_seconds_delta:activeSecondsDelta})
     });
     result = await response.json();
   } catch (_) {
     await animationPromise;
     inputLocked = false;
+    learningClockResume();
     renderBoard(position, position.fen, true);
     feedbackEl.className = 'feedback bad';
   feedbackEl.classList.remove('hidden');
@@ -1656,6 +1747,7 @@ async function attemptMove(from, to, legalMove = null) {
   if (displayedPositionId !== position.id) return;
   if (!response.ok) {
     inputLocked = false;
+    learningClockResume();
     renderBoard(position, position.fen, true);
     feedbackEl.className = 'feedback bad';
   feedbackEl.classList.remove('hidden');
@@ -1663,6 +1755,7 @@ async function attemptMove(from, to, legalMove = null) {
     return;
   }
   if (!result.legal) {
+    learningClockResume();
     inputLocked = false;
     renderBoard(position, position.fen, true);
     feedbackEl.className = 'feedback neutral';
@@ -1675,6 +1768,8 @@ async function attemptMove(from, to, legalMove = null) {
   // captures/castling/promotion from the authoritative returned FEN.
   if (displayedPositionId !== position.id) return;
 
+  if (trackLearning && result.legal) restartTrackedSession = false;
+  learningClockCommit();
   if (!result.correct) {
       renderBoard(position, result.attempted_fen, false);
       highlight(to, 'wrong');
@@ -1691,6 +1786,8 @@ async function attemptMove(from, to, legalMove = null) {
       return;
     }
 
+  learningClockPause();
+  learningClockPositionId = null;
   solved = true;
     inputLocked = true;
     showingSolvedMove = true;
@@ -1897,6 +1994,8 @@ function updateNavigationMeta() {
 async function showPosition(index) {
   if (!positions.length) return;
   const token = ++positionDisplayToken;
+  learningClockPause();
+  learningClockPositionId = null;
   const chosenIndex = Math.max(0, Math.min(index, positions.length - 1));
   currentIndex = chosenIndex;
   // Prevent an earlier puzzle's delayed context/solution from painting over
@@ -2026,6 +2125,7 @@ async function showPosition(index) {
   renderPgnContext();
   queueNearbyPositions(chosenIndex);
 
+  if (!solved) learningClockStart(p.id);
   if (solved) {
     inputLocked = true;
     updateHistoryUI();

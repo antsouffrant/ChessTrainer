@@ -56,3 +56,24 @@ move and the actual reply in chess language. `FEEDBACK_BENCHMARK.md` documents
 the imported user-proposed corrections and `tools/evaluate_coach_feedback.py`
 provides an offline regression report. Feedback suggestions are preserved as
 proposals until independently reviewed.
+
+## v64: causal consequence and approved-case preservation
+
+In addition to the previously shared evidence-ranking policy, the model now
+asks whether a root **sacrifice has realized compensation** in a legal saved
+principal variation, and whether a **balanced exchange changes the pawn
+structure** compared with the inferior move. The shared `Finding` still owns
+both the coaching explanation and primary-motif selection. Evidence is
+explicitly limited to the replayed line; offered material and threatened
+pieces are not automatically considered won back. If evidence is weak,
+prefer a conservative sentence to claiming an unproven tactical purpose.
+
+`causal_consequences.py` implements those reusable consequence checks.
+`tests/fixtures/coach_feedback_full_v64.jsonl` contains the full 281-rating
+anonymized positive-and-negative reference cohort; consult
+`FEEDBACK_BENCHMARK.md` before revising ranking weights. Particularly, an
+approved *free capture* or ordinary equal trade is a valid, sufficient lesson
+in many positions: complexity is not a target metric. Position selection has
+not been broadened in this iteration because relevance feedback remains
+strong (86/87 rated positions approved). The single negative position is a
+review case, not evidence for a broad exclusion rule.
