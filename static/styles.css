@@ -2959,3 +2959,40 @@ body.theme-wood .mini-square.dark { background: #7b4d2e; }
 @media (max-width: 680px) {
   .lesson-training-progress-summary .player-tracking-control { padding:5px 9px; }
 }
+
+/* Proactive coaching taxonomy: one root, optional qualifier, one leaf. */
+.taxonomy-separator { color: var(--text-muted, #8f9aa9); margin: 0 3px; font-weight: 700; }
+.lesson-concept-chip.taxonomy-context { opacity: .88; font-weight: 600; }
+.lesson-concept-chip.taxonomy-move_type { opacity: .90; }
+.lesson-concept-chip.taxonomy-motif { font-weight: 750; }
+.position-taxonomy-path { font-size: .78rem; color: var(--text-muted, #9da5b6); margin-top: .35rem; }
+
+/* v69: taxonomy feedback happens directly on the displayed coaching path.
+   The transparent native select gives mouse, touch, and keyboard users the
+   familiar platform dropdown without adding a second feedback panel. */
+#lesson-concepts { align-items: center; justify-content: flex-end; }
+.taxonomy-pill {
+  position: relative; cursor: pointer; gap: 5px; align-items: center;
+  min-width: 0; max-width: min(100%, 320px); padding: 6px 10px;
+  transition: border-color .15s, background .15s;
+}
+.taxonomy-pill:hover { border-color: rgba(230,230,230,.6); background: rgba(255,255,255,.11); }
+.taxonomy-pill:focus-within { outline: 2px solid #e2c256; outline-offset: 2px; }
+.taxonomy-pill-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.taxonomy-pill-chevron { font-size: .95rem; margin-left: 2px; opacity: .75; pointer-events: none; }
+.taxonomy-pill-native-select {
+  position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0;
+  cursor: pointer; border: 0; margin: 0; padding: 0;
+}
+.taxonomy-pill-native-select:disabled { cursor: wait; }
+.taxonomy-pill-edited { border-color: rgba(105,200,156,.7)!important; background: rgba(57,145,107,.16)!important; }
+.taxonomy-pill-confirmed { border-color: rgba(105,200,156,.38); }
+.taxonomy-pill-edited::before,.taxonomy-pill-confirmed::before { content: '✓'; color: #76d8ab; margin-right: 2px; }
+.taxonomy-pill-optional {
+  font-weight: 500; font-size: .68rem; opacity: .68; margin-left: 3px;
+  border-style: dashed; background: transparent;
+}
+.taxonomy-pill-optional:hover, .taxonomy-pill-optional:focus-within { opacity: 1; }
+.taxonomy-feedback-note { margin-top: 6px; text-align: right; }
+#taxonomy-feedback-status { display: block; font-size: .72rem; color: var(--muted); line-height: 1.35; }
+@media(max-width:780px) { #lesson-concepts { justify-content: flex-start; } .taxonomy-feedback-note { text-align: left; } }

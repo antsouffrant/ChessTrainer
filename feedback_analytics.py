@@ -5,11 +5,13 @@ message vote. Re-voting updates the row rather than inflating sample sizes.
 """
 from __future__ import annotations
 
+from coaching_taxonomy import CONTEXTS, MOVE_TYPES, CANONICAL_KEYS, EVALUATION_OUTCOMES, canonical_motif_key
+
 import csv
 import io
 import hashlib
 
-RATING_KINDS = ('position', 'explanation', 'motif', 'coaching')
+RATING_KINDS = ('position', 'explanation', 'motif', 'coaching', 'taxonomy_context', 'taxonomy_move_type', 'taxonomy_motif')
 POSITION_KINDS = RATING_KINDS[:3]
 
 
@@ -31,6 +33,7 @@ def motif_feedback_options(conn, position_id=None):
     return [dict(row) for row in conn.execute('''
         SELECT lc.key, lc.name, lc.family FROM learning_concepts lc
         WHERE lc.key != 'candidate_evaluation' AND lc.status != 'retired'
+          AND lc.family <> 'Evaluation'
           AND (lc.source = 'built_in' OR (lc.status IN ('personal','promoted')
                AND (lc.account_id IS NULL OR lc.account_id = (
                    SELECT j.account_id FROM training_positions tp
@@ -114,6 +117,81 @@ def record_position_vote(conn, position_id, category, rating, lesson_key='', tex
     return position_votes(conn, position_id)
 
 
+
+TAXONOMY_FIELDS = ('context', 'move_type', 'motif')
+
+
+def taxonomy_feedback_options(conn):
+    """Canonical, non-retired curriculum labels, including evaluation outcomes."""
+    rows = conn.execute("""SELECT key, name, family FROM learning_concepts
+                           WHERE status <> 'retired' AND source = 'built_in'
+                           ORDER BY name COLLATE NOCASE, key""").fetchall()
+    return [dict(r) for r in rows if r['key'] in CANONICAL_KEYS]
+
+
+def taxonomy_feedback_choices(conn, position_id):
+    selected = {r['field_key']: r['selected_key'] for r in conn.execute(
+        'SELECT field_key,selected_key FROM position_taxonomy_feedback WHERE position_id=?',
+        (position_id,))}
+    tax = conn.execute("""SELECT context_key,move_type_key,motif_key,taxonomy_version
+                         FROM position_motif_taxonomy WHERE position_id=?""", (position_id,)).fetchone()
+    return {'selected': selected,
+            'predicted': {'context': tax['context_key'] or '' if tax else '',
+                          'move_type': tax['move_type_key'] or 'none' if tax else 'none',
+                          'motif': tax['motif_key'] or '' if tax else ''},
+            'options': {'context': [{'key': k, 'name': v} for k,v in CONTEXTS.items()],
+                        'move_type': [{'key': 'none', 'name': 'No tactical/strategic qualifier'}] +
+                                     [{'key': k, 'name': v} for k,v in MOVE_TYPES.items()],
+                        'motif': taxonomy_feedback_options(conn)}}
+
+
+def save_taxonomy_feedback(conn, position_id, field, selected_key):
+    """Overwrite one dropdown judgment; an empty value withdraws just that field.
+
+    The model snapshot is captured only when the user makes a selection, and
+    isn't altered by Refresh Metadata. Existing feedback for other fields and
+    historical motif/thumbs feedback are preserved.
+    """
+    if field not in TAXONOMY_FIELDS or not isinstance(selected_key, str):
+        raise ValueError('Invalid taxonomy feedback field or choice')
+    row = conn.execute("""SELECT tp.learned, j.account_id, tx.context_key,
+                                 tx.move_type_key, tx.motif_key, tx.taxonomy_version,
+                                 tp.coaching_version
+                          FROM training_positions tp
+                          JOIN analysis_jobs j ON j.id = tp.job_id
+                          LEFT JOIN position_motif_taxonomy tx ON tx.position_id=tp.id
+                          WHERE tp.id=?""", (position_id,)).fetchone()
+    if row is None:
+        raise LookupError('Position not found')
+    if not row['learned']:
+        raise PermissionError('Solve the position before submitting feedback')
+    if not row['motif_key']:
+        raise ValueError('This position has no classified learning motif yet')
+    valid = {'context': set(CONTEXTS),
+             'move_type': set(MOVE_TYPES) | {'none'},
+             'motif': {o['key'] for o in taxonomy_feedback_options(conn)}}[field]
+    if selected_key and selected_key not in valid:
+        raise ValueError('Choose a valid canonical taxonomy label')
+    if not selected_key:
+        conn.execute("""DELETE FROM position_taxonomy_feedback
+                        WHERE position_id=? AND field_key=?""", (position_id,field))
+    else:
+        original = {'context': row['context_key'], 'move_type': row['move_type_key'] or 'none',
+                    'motif': row['motif_key']}[field]
+        conn.execute("""INSERT INTO position_taxonomy_feedback
+            (position_id,account_id,field_key,selected_key,model_key_at_vote,
+             taxonomy_version_at_vote,coaching_version_at_vote)
+            VALUES (?,?,?,?,?,?,?)
+            ON CONFLICT(position_id,field_key) DO UPDATE SET
+                selected_key=excluded.selected_key, model_key_at_vote=excluded.model_key_at_vote,
+                taxonomy_version_at_vote=excluded.taxonomy_version_at_vote,
+                coaching_version_at_vote=excluded.coaching_version_at_vote,
+                updated_at=CURRENT_TIMESTAMP""",
+            (position_id,row['account_id'],field,selected_key,original,
+             row['taxonomy_version'],row['coaching_version']))
+    conn.commit()
+    return taxonomy_feedback_choices(conn, position_id)
+
 # A single record model across the three position votes and chat ratings.
 # The lesson is the selected lesson when provided, otherwise the primary motif.
 REPORT_SQL = '''
@@ -132,7 +210,7 @@ WITH primary_motifs AS (
   FROM position_feedback pf
   UNION ALL
   SELECT cf.position_id, cf.message_id, 'coaching', cf.rating,
-         cf.lesson_key, NULL, cm.content, NULL, NULL,
+         cf.lesson_key, NULL, cm.content, cf.coaching_version_at_vote, NULL,
          cf.suggested_text, NULL,
          (SELECT question.content FROM coach_messages question
           WHERE question.thread_id = cm.thread_id AND question.role = 'user'
@@ -140,11 +218,46 @@ WITH primary_motifs AS (
          cm.structured_json, cf.created_at, cf.updated_at
   FROM coach_message_feedback cf
   LEFT JOIN coach_messages cm ON cm.id = cf.message_id
+  UNION ALL
+  SELECT tf.position_id, NULL, 'taxonomy_' || tf.field_key,
+         CASE WHEN tf.selected_key=tf.model_key_at_vote THEN 1 ELSE -1 END,
+         NULL, NULL, tf.model_key_at_vote, tf.coaching_version_at_vote, tf.taxonomy_version_at_vote,
+         NULL, CASE WHEN tf.field_key='motif' THEN tf.selected_key ELSE NULL END,
+         NULL, NULL, tf.created_at, tf.updated_at
+  FROM position_taxonomy_feedback tf
 )
 SELECT v.feedback_type, v.rating, v.created_at, v.updated_at,
        v.position_id, v.message_id, v.content_snapshot, v.coaching_version,
+       COALESCE(NULLIF(v.coaching_version,''), tp.coaching_version) AS report_coaching_version,
+       CASE WHEN NULLIF(v.coaching_version,'') IS NOT NULL THEN 'feedback_snapshot'
+            ELSE 'current_position_fallback' END AS coaching_version_source,
        v.classifier_version_at_vote, v.chat_user_message, v.chat_structured_json,
        v.suggested_text, v.suggested_motif_key, suggested_motif.name AS suggested_motif_name,
+       tx.context_key AS current_context_key,
+       CASE tx.context_key WHEN 'attack' THEN 'Attacking Plans' WHEN 'defend' THEN 'Defensive Resources' END AS current_context_name,
+       tx.move_type_key AS current_move_type_key,
+       CASE tx.move_type_key WHEN 'tactical' THEN 'Tactical Calculation' WHEN 'strategic' THEN 'Strategic Comprehension' END AS current_move_type_name,
+       tx.motif_key AS current_taxonomy_motif_key, tx.taxonomy_version AS current_taxonomy_version,
+       CASE WHEN v.feedback_type='taxonomy_context' THEN v.content_snapshot END AS context_at_feedback,
+       CASE WHEN v.feedback_type='taxonomy_move_type' THEN v.content_snapshot END AS move_type_at_feedback,
+       CASE WHEN v.feedback_type='taxonomy_motif' THEN v.content_snapshot END AS taxonomy_motif_at_feedback,
+       CASE WHEN v.feedback_type='taxonomy_motif' THEN
+         (SELECT lc.name FROM learning_concepts lc WHERE lc.key=v.content_snapshot)
+       END AS model_taxonomy_name_at_feedback,
+       CASE WHEN v.feedback_type LIKE 'taxonomy_%' THEN
+           (SELECT tf.selected_key FROM position_taxonomy_feedback tf
+            WHERE tf.position_id=v.position_id AND ('taxonomy_' || tf.field_key)=v.feedback_type)
+       END AS selected_taxonomy_key,
+       CASE WHEN v.feedback_type='taxonomy_context' THEN
+         (SELECT CASE tf.selected_key WHEN 'attack' THEN 'Attacking Plans' WHEN 'defend' THEN 'Defensive Resources' END
+          FROM position_taxonomy_feedback tf WHERE tf.position_id=v.position_id AND tf.field_key='context')
+       WHEN v.feedback_type='taxonomy_move_type' THEN
+         (SELECT CASE tf.selected_key WHEN 'none' THEN 'No move type' WHEN 'tactical' THEN 'Tactical Calculation' WHEN 'strategic' THEN 'Strategic Comprehension' END
+          FROM position_taxonomy_feedback tf WHERE tf.position_id=v.position_id AND tf.field_key='move_type')
+       WHEN v.feedback_type='taxonomy_motif' THEN
+         (SELECT COALESCE(lc2.name, tf.selected_key) FROM position_taxonomy_feedback tf
+          LEFT JOIN learning_concepts lc2 ON lc2.key=tf.selected_key
+          WHERE tf.position_id=v.position_id AND tf.field_key='motif') END AS selected_taxonomy_name,
        tp.coaching_version AS current_coaching_version,
        tp.coach_prompt, tp.coach_explanation AS current_explanation,
        tp.fen, tp.previous_fen, tp.user_color,
@@ -154,7 +267,7 @@ SELECT v.feedback_type, v.rating, v.created_at, v.updated_at,
        tp.eval_before_cp, tp.eval_after_cp, tp.centipawn_loss,
        tp.mate_before, tp.mate_after,
        tp.best_pv_uci, tp.played_pv_uci, tp.alternative_pvs_json,
-       tp.critical_events_json, tp.explanatory_lines_json,
+       tp.critical_events_json, tp.explanatory_lines_json, tp.proactive_coach_json,
        tp.difficulty_score, tp.difficulty_version,
        tp.analysis_pass, tp.analysis_screen_depth, tp.analysis_deep_depth,
        tp.attempts, tp.correct_attempts, tp.created_at AS position_created_at,
@@ -178,11 +291,13 @@ JOIN training_positions tp ON tp.id = v.position_id
 JOIN analysis_jobs j ON j.id = tp.job_id
 JOIN accounts a ON a.id = j.account_id
 LEFT JOIN primary_motifs pm ON pm.position_id = tp.id
+LEFT JOIN position_motif_taxonomy tx ON tx.position_id = tp.id
 LEFT JOIN learning_concepts lesson ON lesson.key = COALESCE(NULLIF(v.lesson_key, ''), v.voted_motif_key, pm.key)
 LEFT JOIN learning_concepts voted_motif ON voted_motif.key = v.voted_motif_key
 LEFT JOIN learning_concepts suggested_motif ON suggested_motif.key = v.suggested_motif_key
 '''
-FILTERS = ('job_id', 'lesson_key', 'opening_key', 'primary_motif_key', 'learning_mode', 'feedback_type', 'rating', 'coaching_version', 'position_category')
+FILTERS = ('job_id', 'lesson_key', 'opening_key', 'primary_motif_key', 'learning_mode', 'feedback_type', 'rating', 'coaching_version', 'position_category',
+           'current_context_key', 'current_move_type_key')
 
 
 def report_rows(conn, filters=None):
@@ -206,7 +321,11 @@ def report_rows(conn, filters=None):
             params.append(value)
         else:
             params.append(value[:150])
-        clauses.append(f'voted.{name} = ?')
+        # Feedback snapshots survive metadata refreshes. The version filter
+        # must use the recorded version, falling back to the current position
+        # only for legacy chat/taxonomy rows without a version snapshot.
+        column = 'report_coaching_version' if name == 'coaching_version' else name
+        clauses.append(f'voted.{column} = ?')
     sql = 'SELECT * FROM (' + REPORT_SQL + ') AS voted'
     if clauses:
         sql += ' WHERE ' + ' AND '.join(clauses)
@@ -235,16 +354,409 @@ def report_facets(conn):
                   for row in conn.execute('''
         SELECT DISTINCT category FROM training_positions ORDER BY category
     ''')]
+    # The current position version is mutable; user feedback records preserve
+    # older versions. UNION both so a refresh never hides historical choices.
     versions = [dict(row) for row in conn.execute('''
-        SELECT DISTINCT coaching_version AS value, coaching_version AS label
-        FROM training_positions WHERE coaching_version IS NOT NULL AND coaching_version != ''
-        ORDER BY coaching_version DESC
+        SELECT value, value AS label FROM (
+            SELECT coaching_version AS value FROM training_positions
+            UNION SELECT coaching_version FROM position_feedback
+            UNION SELECT coaching_version_at_vote FROM position_taxonomy_feedback
+            UNION SELECT coaching_version_at_vote FROM coach_message_feedback
+        ) WHERE value IS NOT NULL AND value != '' ORDER BY value DESC
     ''')]
     return {'game_lists': jobs, 'lessons': lessons, 'openings': openings,
+            'contexts': [{'value': k, 'label': v} for k,v in CONTEXTS.items()],
+            'move_types': [{'value': k, 'label': v} for k,v in MOVE_TYPES.items()],
             'motifs': lessons, 'coaching_versions': versions,
             'position_categories': categories,
             'learning_modes': [{'value': row['learning_mode'], 'label': row['learning_mode'].replace('_', ' ').title()}
                                for row in conn.execute('SELECT DISTINCT learning_mode FROM training_positions WHERE learning_mode IS NOT NULL ORDER BY learning_mode')]}
+
+
+
+# Player-facing accuracy measures are coverage based, NOT percentages of
+# submitted dropdown feedback. All learned positions are the denominator,
+# including those where the user never touched the coach's proposed label.
+# A selection equal to the *current* coach assignment (or cleared selection)
+# is unchanged, even if the user previously corrected it and changed it back.
+# At-selection snapshots remain independently available in feedback exports.
+SOLVED_FILTER_COLUMNS = {
+    'job_id': 'tp.job_id',
+    'opening_key': 'tp.opening_key',
+    'learning_mode': 'tp.learning_mode',
+    'coaching_version': 'tp.coaching_version',
+    'position_category': 'tp.category',
+    'current_context_key': 'tx.context_key',
+    'current_move_type_key': 'tx.move_type_key',
+    'primary_motif_key': 'pc.concept_key',
+    'lesson_key': 'pc.concept_key',
+}
+
+
+def solved_taxonomy_rows(conn, filters=None):
+    """One row per solved puzzle, including puzzles with zero feedback edits."""
+    filters = filters or {}
+    clauses = ['tp.learned = 1']
+    params = []
+    for key, column in SOLVED_FILTER_COLUMNS.items():
+        value = str(filters.get(key) or '').strip()
+        if not value:
+            continue
+        if key == 'job_id':
+            if not value.isdecimal():
+                continue
+            value = int(value)
+        clauses.append(f'{column} = ?')
+        params.append(value)
+    sql = f"""
+    SELECT tp.id AS position_id, tp.job_id, tp.game_id, tp.fen,
+           tp.opening_key, tp.opening_name, tp.opening_eco, tp.learning_mode,
+           pc.concept_key AS primary_motif_key, lc.name AS primary_motif_name,
+           tx.motif_key AS taxonomy_motif_key, tx_motif.name AS taxonomy_motif_name,
+           j.date_range AS game_list_label,
+           tp.category AS position_category,
+           tp.coaching_version, tx.taxonomy_version,
+           tx.context_key, tx.move_type_key, tx.motif_key,
+           MAX(CASE WHEN tf.field_key = 'context' THEN tf.selected_key END) AS chosen_context,
+           MAX(CASE WHEN tf.field_key = 'move_type' THEN tf.selected_key END) AS chosen_move_type,
+           MAX(CASE WHEN tf.field_key = 'motif' THEN tf.selected_key END) AS chosen_motif,
+           MAX(CASE WHEN tf.field_key = 'context' THEN tf.model_key_at_vote END) AS original_context_at_selection,
+           MAX(CASE WHEN tf.field_key = 'move_type' THEN tf.model_key_at_vote END) AS original_move_type_at_selection,
+           MAX(CASE WHEN tf.field_key = 'motif' THEN tf.model_key_at_vote END) AS original_motif_at_selection
+    FROM training_positions tp
+    LEFT JOIN position_motif_taxonomy tx ON tx.position_id = tp.id
+    LEFT JOIN position_concepts pc ON pc.position_id = tp.id AND pc.is_primary = 1
+    LEFT JOIN position_taxonomy_feedback tf ON tf.position_id = tp.id
+    LEFT JOIN learning_concepts lc ON lc.key = pc.concept_key
+    LEFT JOIN learning_concepts tx_motif ON tx_motif.key = tx.motif_key
+    LEFT JOIN analysis_jobs j ON j.id = tp.job_id
+    WHERE {' AND '.join(clauses)}
+    GROUP BY tp.id
+    ORDER BY tp.job_id, tp.id
+    """
+    return [dict(row) for row in conn.execute(sql, params).fetchall()]
+
+
+def taxonomy_change_rates(conn, filters=None):
+    """Current correction rates among distinct solved positions in scope.
+
+    Feedback-type and thumb-rating filters intentionally do not narrow the
+    solved-position denominator. These controls apply to feedback records,
+    while taxonomy change rates always describe the matching position set.
+    """
+    positions = solved_taxonomy_rows(conn, filters)
+    total = len(positions)
+    result = {}
+    for field in TAXONOMY_FIELDS:
+        changed = sum(1 for row in positions if taxonomy_field_changed(row, field))
+        result[field] = {
+            'solved': total, 'total': total, 'changed': changed,
+            'unchanged': total - changed,
+            'change_pct': round(100 * changed / total, 1) if total else None,
+            'unchanged_pct': round(100 * (total - changed) / total, 1) if total else None,
+        }
+    return result
+
+
+
+# A consolidated, parameterized Coach comparison. Group membership and both
+# percentages are measured per DISTINCT solved position. Thumbs have their own
+# *rated-position* denominator; absence of a vote is never treated as a downvote.
+# Taxonomy change uses ALL solved positions, including untouched dropdowns.
+# The two 100%-stacked tracks share one scale but must NEVER be summed: a
+# position can have an approved explanation and a corrected primary motif.
+COACH_CHART_GROUPS = ('motif', 'opening', 'lesson', 'version', 'context',
+                      'move_type', 'learning_mode', 'game_list')
+COACH_CHART_APPROVAL = ('any', 'position', 'explanation', 'coaching')
+COACH_CHART_CHANGE = ('any',) + TAXONOMY_FIELDS
+
+
+def coaching_comparison(conn, filters=None, group_by='opening',
+                        approval_area='any', change_area='any', max_groups=30):
+    """Compare per-position approval and taxonomy change on parallel 0-100 axes.
+
+    An aggregate approval is true if ANY selected thumbs category has a positive
+    vote for that position, divided by positions with any selected thumbs vote.
+    An aggregate change is true if ANY taxonomy field's current selection differs
+    from the current prediction, divided by all solved positions in the group.
+
+    For coach-version grouping, the thumbs snapshot version and the CURRENT
+    position version are deliberately separate: historical change rates cannot
+    be reconstructed from current editable taxonomy choices.
+    """
+    filters = filters or {}
+    group_by = group_by if group_by in COACH_CHART_GROUPS else 'opening'
+    approval_area = approval_area if approval_area in COACH_CHART_APPROVAL else 'any'
+    change_area = change_area if change_area in COACH_CHART_CHANGE else 'any'
+
+    # Version is a historical feedback attribute. Use the current POSITION
+    # filters to select the population, but select rated history by its recorded
+    # version independently. This prevents a refreshed position from losing
+    # its older thumb votes in the version comparison.
+    scope_filters = {k: v for k, v in filters.items() if k != 'coaching_version'}
+    positions = solved_taxonomy_rows(conn, scope_filters)
+    position_by_id = {int(r['position_id']): r for r in positions}
+    selected_version = str(filters.get('coaching_version') or '').strip()
+
+    # A lesson is a position-to-concept relationship, not just its primary
+    # label. A single solved position may belong to multiple lessons, but it
+    # counts only once in each lesson's numerator and denominator.
+    lesson_membership = {}
+    if group_by == 'lesson' and positions:
+        ids = list(position_by_id)
+        for start in range(0, len(ids), 700):
+            batch = ids[start:start + 700]
+            slots = ','.join('?' for _ in batch)
+            for r in conn.execute(f"""SELECT pc.position_id, pc.concept_key, lc.name
+                FROM position_concepts pc
+                LEFT JOIN learning_concepts lc ON lc.key = pc.concept_key
+                WHERE pc.position_id IN ({slots})""", batch):
+                lesson_membership.setdefault(r['position_id'], set()).add(
+                    (str(r['concept_key'] or ''), str(r['name'] or r['concept_key'] or '')))
+
+    def current_memberships(row):
+        if group_by == 'motif':
+            return [(str(row['taxonomy_motif_key'] or row['primary_motif_key'] or '__none__'),
+                     str(row['taxonomy_motif_name'] or row['primary_motif_name'] or 'Unclassified'))]
+        if group_by == 'opening':
+            return [(str(row['opening_key'] or '__none__'),
+                     str(row['opening_name'] or row['opening_eco'] or 'No opening'))]
+        if group_by == 'lesson':
+            return sorted(lesson_membership.get(row['position_id']) or {
+                (str(row['primary_motif_key'] or '__none__'),
+                 str(row['primary_motif_name'] or 'No lesson'))})
+        if group_by == 'version':
+            return [(str(row['coaching_version'] or '__none__'),
+                     str(row['coaching_version'] or 'Unversioned'))]
+        if group_by == 'context':
+            return [(str(row['context_key'] or '__none__'),
+                     CONTEXTS.get(row['context_key'], 'No context'))]
+        if group_by == 'move_type':
+            return [(str(row['move_type_key'] or 'none'),
+                     MOVE_TYPES.get(row['move_type_key'], 'No move type'))]
+        if group_by == 'learning_mode':
+            mode = str(row['learning_mode'] or 'unknown')
+            return [(mode, mode.replace('_', ' ').title())]
+        return [(str(row['job_id']),
+                 f"{row['game_list_label'] or 'Game list'} (#{row['job_id']})")]
+
+    groups = {}
+    position_groups = {}
+    def ensure_group(key, name):
+        return groups.setdefault(key, {'key': key, 'name': name,
+                  'solved_ids': set(), 'changed_ids': set(),
+                  'rated_ids': set(), 'approved_ids': set()})
+
+    for position_id, row in position_by_id.items():
+        group_keys = current_memberships(row)
+        position_groups[position_id] = group_keys
+        changed = (any(taxonomy_field_changed(row, field) for field in TAXONOMY_FIELDS)
+                   if change_area == 'any' else taxonomy_field_changed(row, change_area))
+        for key, name in group_keys:
+            group = ensure_group(key, name)
+            if not selected_version or row['coaching_version'] == selected_version:
+                group['solved_ids'].add(position_id)
+                if changed:
+                    group['changed_ids'].add(position_id)
+
+    # Query only small feedback attributes, not the expensive board/PV JSON
+    # used by the full regression export. Enforce SQLite's parameter limit.
+    votes_by_position = {}
+    ids = list(position_by_id)
+    for start in range(0, len(ids), 700):
+        batch = ids[start:start + 700]
+        slots = ','.join('?' for _ in batch)
+        if approval_area in ('any', 'position', 'explanation'):
+            for r in conn.execute(f"""SELECT position_id, category AS area, rating, coaching_version
+                FROM position_feedback
+                WHERE category IN ('position','explanation')
+                  AND position_id IN ({slots})""", batch):
+                votes_by_position.setdefault(r['position_id'], []).append(
+                    (r['area'], r['rating'], r['coaching_version']))
+        if approval_area in ('any', 'coaching'):
+            for r in conn.execute(f"""SELECT cf.position_id, cf.rating,
+                   COALESCE(NULLIF(cf.coaching_version_at_vote,''), tp.coaching_version) AS version
+                FROM coach_message_feedback cf
+                JOIN training_positions tp ON tp.id=cf.position_id
+                WHERE cf.position_id IN ({slots})""", batch):
+                votes_by_position.setdefault(r['position_id'], []).append(
+                    ('coaching', r['rating'], r['version']))
+
+    for position_id, votes in votes_by_position.items():
+        included = [(area, rating, str(version or position_by_id[position_id]['coaching_version'] or ''))
+                    for area, rating, version in votes
+                    if approval_area == 'any' or area == approval_area]
+        if selected_version:
+            included = [v for v in included if v[2] == selected_version]
+        if not included:
+            continue
+        if group_by == 'version':
+            # Attribute approval to the VERSION AT FEEDBACK, not the mutable
+            # current version of the position. Any vote in the version forms a
+            # rated-position denominator, even after a later refresh.
+            versions = {version for _, _, version in included}
+            for version in versions:
+                current = [rating for _, rating, v in included if v == version]
+                group = ensure_group(version or '__none__', version or 'Unversioned')
+                group['rated_ids'].add(position_id)
+                if 1 in current:
+                    group['approved_ids'].add(position_id)
+        else:
+            for key, name in position_groups[position_id]:
+                group = ensure_group(key, name)
+                group['rated_ids'].add(position_id)
+                if any(rating == 1 for _, rating, _ in included):
+                    group['approved_ids'].add(position_id)
+
+    def percent(num, total):
+        return round(100 * num / total, 1) if total else None
+
+    output = []
+    for group in groups.values():
+        solved = len(group['solved_ids'])
+        changed = len(group['changed_ids'])
+        rated = len(group['rated_ids'])
+        approved = len(group['approved_ids'])
+        if not solved and not rated:
+            continue
+        output.append({'key': group['key'], 'name': group['name'],
+                       'solved': solved, 'changed': changed,
+                       'change_pct': percent(changed, solved),
+                       'rated': rated, 'approved': approved,
+                       'approval_pct': percent(approved, rated)})
+    output.sort(key=lambda r: (-max(r['solved'], r['rated']), r['name'].lower()))
+    return {'group_by': group_by, 'approval_area': approval_area,
+            'change_area': change_area, 'rows': output[:max_groups],
+            'groups_count': len(output),
+            'approval_denominator': 'distinct solved positions with thumbs feedback in selected approval area',
+            'change_denominator': 'all solved positions in each group',
+            'historical_version_note': group_by == 'version' or bool(selected_version)}
+
+# v75: independent dashboard measures. Each chart has a CATEGORY control only:
+# taxonomy changes use any corrected field; thumbs approval uses any approved
+# vote within the selected category. A vote's feedback area is a category, not
+# an additional metric. All rates count DISTINCT positions.
+COACH_METRIC_GROUPS = COACH_CHART_GROUPS + ('taxonomy_field', 'feedback_area')
+
+
+def coaching_metric_chart(conn, filters=None, metric='changes', group_by=None, max_groups=30):
+    """One rate per group with appropriate solved/rated denominators.
+
+    Changes: distinct corrected solved positions / all solved positions.
+    Approval: distinct thumbs-up solved positions / rated solved positions.
+    Historical coach-version approvals use feedback-time snapshots. Changes
+    refer only to the current taxonomy, never to a fabricated prior version.
+    """
+    filters = filters or {}
+    metric = metric if metric in ('changes', 'approval') else 'changes'
+    default = 'motif' if metric == 'changes' else 'feedback_area'
+    valid = COACH_CHART_GROUPS + (('taxonomy_field',) if metric == 'changes' else ('feedback_area',))
+    group_by = group_by if group_by in valid else default
+
+    def as_row(key, name, numerator, denominator):
+        return {'key': key, 'name': name, 'numerator': numerator,
+                'denominator': denominator,
+                'rate': round(100 * numerator / denominator, 1) if denominator else None}
+
+    selected_version = str(filters.get('coaching_version') or '').strip()
+    if group_by == 'taxonomy_field':
+        positions = solved_taxonomy_rows(conn, {k: v for k, v in filters.items() if k != 'coaching_version'})
+        if selected_version:
+            positions = [r for r in positions if str(r['coaching_version'] or '') == selected_version]
+        rows = []
+        for field, label in (('context','Position context'),('move_type','Move type'),('motif','Learning motif')):
+            rows.append(as_row(field, label,
+                sum(taxonomy_field_changed(r, field) for r in positions), len(positions)))
+        return {'metric': metric, 'group_by': group_by, 'rows': rows,
+                'groups_count': len(rows), 'historical_version_note': bool(selected_version)}
+
+    if group_by == 'feedback_area':
+        # Obtain the SAME scoped, solved-position population as the ordinary
+        # grouped approval query. A separate area can have multiple chat votes,
+        # but its denominator is still distinct positions with at least one vote.
+        positions = solved_taxonomy_rows(conn, {k: v for k, v in filters.items() if k != 'coaching_version'})
+        ids = [int(r['position_id']) for r in positions]
+        rated = {a: set() for a in ('position','explanation','coaching')}
+        approved = {a: set() for a in rated}
+        for start in range(0, len(ids), 700):
+            batch = ids[start:start + 700]
+            placeholders = ','.join('?' for _ in batch)
+            for r in conn.execute(f"""SELECT position_id, category AS area, rating,
+                        coaching_version AS version FROM position_feedback
+                        WHERE category IN ('position','explanation')
+                        AND position_id IN ({placeholders})""", batch):
+                if selected_version and str(r['version'] or '') != selected_version:
+                    continue
+                area, pid = r['area'], int(r['position_id'])
+                rated[area].add(pid)
+                if r['rating'] == 1: approved[area].add(pid)
+            for r in conn.execute(f"""SELECT cf.position_id, cf.rating,
+                        COALESCE(NULLIF(cf.coaching_version_at_vote,''),tp.coaching_version) AS version
+                        FROM coach_message_feedback cf
+                        JOIN training_positions tp ON tp.id=cf.position_id
+                        WHERE cf.position_id IN ({placeholders})""", batch):
+                if selected_version and str(r['version'] or '') != selected_version:
+                    continue
+                pid = int(r['position_id'])
+                rated['coaching'].add(pid)
+                if r['rating'] == 1: approved['coaching'].add(pid)
+        names = {'position':'Training positions','explanation':'Explanations','coaching':'Chat coaching'}
+        rows = [as_row(a, names[a], len(approved[a]), len(rated[a])) for a in names]
+        return {'metric': metric, 'group_by': group_by, 'rows': rows,
+                'groups_count': len(rows), 'historical_version_note': bool(selected_version)}
+
+    old = coaching_comparison(conn, filters, group_by=group_by,
+                              approval_area='any', change_area='any', max_groups=max_groups)
+    numerator = 'changed' if metric == 'changes' else 'approved'
+    denominator = 'solved' if metric == 'changes' else 'rated'
+    rows = [as_row(r['key'], r['name'], r[numerator], r[denominator]) for r in old['rows']]
+    return {'metric': metric, 'group_by': group_by, 'rows': rows,
+            'groups_count': old['groups_count'],
+            'historical_version_note': old['historical_version_note']}
+
+
+def taxonomy_field_changed(row, field):
+    """A current changed selection; a cleared or reverted edit is unchanged."""
+    selected = row.get('chosen_' + field)
+    predicted = row.get(field + '_key') or ('none' if field == 'move_type' else '')
+    return selected is not None and selected != predicted
+
+
+SOLVED_TAXONOMY_COLUMNS = (
+    'position_id', 'job_id', 'game_id', 'fen', 'opening_key',
+    'learning_mode', 'position_category', 'coaching_version', 'taxonomy_version',
+    'context_key', 'chosen_context', 'context_changed', 'original_context_at_selection',
+    'move_type_key', 'chosen_move_type', 'move_type_changed', 'original_move_type_at_selection',
+    'motif_key', 'chosen_motif', 'motif_changed', 'original_motif_at_selection',
+)
+
+
+def solved_taxonomy_csv(rows):
+    """Auditable change-rate denominator: every solved position, even no edit."""
+    output = io.StringIO(newline='')
+    writer = csv.DictWriter(output, fieldnames=SOLVED_TAXONOMY_COLUMNS, extrasaction='ignore')
+    writer.writeheader()
+    for row in rows:
+        record = {**row, **{f + '_changed': int(taxonomy_field_changed(row, f)) for f in TAXONOMY_FIELDS}}
+        # Prevent spreadsheet formula execution in user-sourced text fields.
+        for key, value in record.items():
+            if isinstance(value, str) and value.lstrip().startswith(('=', '+', '-', '@', '\t', '\r')):
+                record[key] = "'" + value
+        writer.writerow(record)
+    return output.getvalue().encode('utf-8-sig')
+
+
+def current_taxonomy_status(row):
+    """Current selection compared with current model, not historical vote."""
+    kind = str(row.get('feedback_type') or '')
+    field = kind.removeprefix('taxonomy_')
+    if kind not in ('taxonomy_context', 'taxonomy_move_type', 'taxonomy_motif'):
+        return ''
+    current = {'context': 'current_context_key',
+               'move_type': 'current_move_type_key',
+               'motif': 'current_taxonomy_motif_key'}[field]
+    model = row.get(current) or ('none' if field == 'move_type' else '')
+    return 'changed' if row.get('selected_taxonomy_key') != model else 'unchanged'
 
 
 def _stats(rows):
@@ -259,6 +771,9 @@ def report_summary(rows):
         names = {}
         groups = {}
         for row in rows:
+            # Grouped thumbs-up rates must not mix in dropdown change judgments.
+            if row.get('feedback_type') not in ('position', 'explanation', 'coaching', 'motif'):
+                continue
             key = row.get(field) or ''
             if not key:
                 continue
@@ -266,11 +781,14 @@ def report_summary(rows):
             groups.setdefault(key, []).append(row)
         return sorted(({'key': key, 'name': names[key], **_stats(items)} for key, items in groups.items()),
                       key=lambda x: (-x['total'], x['name'].lower()))[:30]
-    return {'overall': _stats(rows), 'categories': by_kind,
+    return {'overall': _stats(rows),
+            'thumbs': _stats([r for r in rows if r['feedback_type'] in ('position','explanation','motif','coaching')]),
+            'taxonomy': _stats([r for r in rows if r['feedback_type'].startswith('taxonomy_')]),
+            'categories': by_kind,
             'by_motif': breakdown('primary_motif_key'),
             'by_opening': breakdown('opening_key'),
             'by_lesson': breakdown('lesson_key'),
-            'by_coaching_version': breakdown('coaching_version')}
+            'by_coaching_version': breakdown('report_coaching_version')}
 
 
 # Stable machine-readable schema for coaching development. One row per latest
@@ -278,6 +796,12 @@ def report_summary(rows):
 # snapshots remain separate from the CURRENT regenerated coach and motifs.
 EXPORT_COLUMNS = [
     'feedback_type', 'feedback_question', 'rating', 'rating_label',
+    'current_context_key', 'current_context_name', 'current_move_type_key',
+    'current_move_type_name', 'current_taxonomy_motif_key', 'current_taxonomy_version',
+    'context_at_feedback', 'move_type_at_feedback', 'taxonomy_motif_at_feedback',
+    'selected_taxonomy_key', 'selected_taxonomy_name', 'taxonomy_model_at_feedback_name',
+    'current_taxonomy_model_key', 'current_taxonomy_change_status',
+    'legacy_suggested_motif_canonical_key', 'legacy_motif_at_vote_canonical_key',
     'regression_case_id', 'regression_candidate', 'review_status',
     'created_at', 'updated_at', 'position_id', 'message_id',
     'position_url', 'job_id', 'username', 'provider', 'date_range',
@@ -294,9 +818,10 @@ EXPORT_COLUMNS = [
     'played_move_uci', 'played_move_san', 'best_move_uci', 'best_move_san',
     'eval_before_cp', 'eval_after_cp', 'centipawn_loss',
     'mate_before', 'mate_after', 'best_pv_uci', 'played_pv_uci',
-    'alternative_pvs_json', 'critical_events_json', 'explanatory_lines_json',
+    'alternative_pvs_json', 'critical_events_json', 'explanatory_lines_json', 'proactive_coach_json',
     'analysis_pass', 'analysis_screen_depth', 'analysis_deep_depth',
-    'coaching_version', 'current_coaching_version', 'coach_prompt',
+    'coaching_version', 'report_coaching_version', 'coaching_version_source',
+    'current_coaching_version', 'coach_prompt',
     'content_snapshot', 'suggested_text', 'suggested_motif_key', 'suggested_motif_name',
     'current_explanation', 'chat_user_message',
     'chat_structured_json',
@@ -307,10 +832,15 @@ FEEDBACK_QUESTIONS = {
     'explanation': 'Is this explanation helpful?',
     'motif': 'Does the primary learning motif fit this position?',
     'coaching': 'Is this chat coaching response helpful?',
+    'taxonomy_context': 'Which coaching context best fits this position?',
+    'taxonomy_move_type': 'Which tactical or strategic move type applies?',
+    'taxonomy_motif': 'Which canonical primary learning motif best fits?',
 }
 
 
 def is_regression_candidate(row):
+    if str(row.get('feedback_type') or '').startswith('taxonomy_'):
+        return row.get('rating') == -1 and bool(row.get('selected_taxonomy_key'))
     return row.get('rating') == -1 and bool(
         str(row.get('suggested_text') or '').strip() or
         str(row.get('suggested_motif_key') or '').strip())
@@ -330,8 +860,35 @@ def csv_bytes(rows):
         for col in EXPORT_COLUMNS:
             if col == 'feedback_question':
                 val = FEEDBACK_QUESTIONS.get(row.get('feedback_type'), '')
+            elif col == 'legacy_suggested_motif_canonical_key':
+                val = canonical_motif_key(row.get('suggested_motif_key')) or ''
+            elif col == 'legacy_motif_at_vote_canonical_key':
+                val = canonical_motif_key(row.get('motif_at_vote_key')) or ''
+            elif col == 'taxonomy_model_at_feedback_name':
+                key = str(row.get('content_snapshot') or '')
+                field = str(row.get('feedback_type') or '')
+                if field == 'taxonomy_context':
+                    val = CONTEXTS.get(key, key)
+                elif field == 'taxonomy_move_type':
+                    val = MOVE_TYPES.get(key, 'No move type' if key == 'none' else key)
+                elif field == 'taxonomy_motif':
+                    # This key belongs to the snapshot, not the current model.
+                    val = row.get('model_taxonomy_name_at_feedback') or key
+                else:
+                    val = ''
+            elif col == 'current_taxonomy_change_status':
+                val = current_taxonomy_status(row)
+            elif col == 'current_taxonomy_model_key':
+                kind = str(row.get('feedback_type') or '')
+                key = {'taxonomy_context': 'current_context_key',
+                       'taxonomy_move_type': 'current_move_type_key',
+                       'taxonomy_motif': 'current_taxonomy_motif_key'}.get(kind)
+                val = (row.get(key) or ('none' if kind == 'taxonomy_move_type' else '')) if key else ''
             elif col == 'rating_label':
-                val = 'thumbs_up' if row.get('rating') == 1 else 'thumbs_down'
+                if str(row.get('feedback_type') or '').startswith('taxonomy_'):
+                    val = 'agrees_with_prediction' if row.get('rating') == 1 else 'corrected_prediction'
+                else:
+                    val = 'thumbs_up' if row.get('rating') == 1 else 'thumbs_down'
             elif col == 'regression_case_id':
                 # FEN + played move + feedback kind persist across engine revisions.
                 # Chat examples additionally distinguish their question/response.

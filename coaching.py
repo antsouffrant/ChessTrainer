@@ -15,7 +15,7 @@ from pv_reasoning import comparative_insight, fork_evidence, legal_pv
 from narrative_editor import mate_explanation, polish_comparison, concise
 from semantic_coaching import causal_coaching
 
-COACHING_VERSION = 'rules-v28-evidence-and-purpose'
+COACHING_VERSION = 'rules-v30-clean-taxonomy-outcomes'
 
 PIECE_NAMES = {
     chess.PAWN: 'pawn',
@@ -297,7 +297,12 @@ def _specific_solution_sentence(board: chess.Board, best: chess.Move, features: 
     if primary == 'skewer':
         return f'{best_san} creates a skewer: the front target must move and expose the piece behind it.'
     if primary == 'discovered_attack':
-        return f'{best_san} uncovers an attack from another piece; the moved piece is not the source of the discovered threat.'
+        return f'{best_san} moves one piece out of the way, uncovering an attack by another piece. That revealed attack is the discovery.'
+    if primary == 'blocking':
+        from check_response import blocking_response
+        evidence = blocking_response(board, best)
+        if evidence:
+            return evidence['evidence']
 
     if features['queen_exchange']:
         attacked = [(sq, pc) for sq, pc in (last.get('newly_attacked') or last.get('attacked_now') or []) if _piece_value(pc) >= 3]
@@ -439,6 +444,7 @@ def generate_coaching_text(
     best_move_san: Optional[str],
     category: str,
     labels: Optional[Iterable] = None,
+    taxonomy_path=None,
     mate_before: Optional[int] = None,
     best_pv_uci=None,
     played_pv_uci=None,
@@ -447,6 +453,7 @@ def generate_coaching_text(
     eval_after_cp=None,
     critical_events_json=None,
     explanatory_lines_json=None,
+    proactive_coach_json=None,
 ) -> tuple[str, str]:
     """Generate a concrete pre-solve coaching prompt and post-solve explanation."""
     board = chess.Board(fen)
@@ -512,7 +519,14 @@ def generate_coaching_text(
             else:
                 prompt = _concept_prompt(concept_keys)
         if prompt is None:
-            prompt = 'Identify the most urgent tactical fact on the board: what is attacked, what is loose, and what forcing move changes the position immediately?'
+            if taxonomy_path is not None and taxonomy_path.context_key == 'defend':
+                prompt = ('Before deciding, identify the opponent’s most urgent threat '
+                          'and calculate which candidate move answers it.')
+            elif taxonomy_path is not None and taxonomy_path.context_key == 'attack':
+                prompt = ('Identify the concrete attacking opportunity; test the '
+                          'opponent’s most natural reply before committing.')
+            else:
+                prompt = 'Identify the most urgent tactical fact on the board: what is attacked, what is loose, and what forcing move changes the position immediately?'
 
     # ---------- post-solve explanation ----------
     # Select ONE reason rooted at the decision, then (only if informative)
@@ -522,6 +536,12 @@ def generate_coaching_text(
     played_label = played_move_san or played_move_uci
     if best is None:
         return prompt, 'The saved best move is no longer legal in this position; refresh the game metadata.'
+
+    from proactive_coaching import trusted_probe_explanation
+
+    def prefer_tested_cause(sentence):
+        return (trusted_probe_explanation(board, best, played,
+                                          proactive_coach_json, sentence) or sentence)
 
     # Primary explanation is a comparison of *two* actual saved variations,
     # including piece identity, recaptures, direct mate threats, and whether
@@ -542,7 +562,7 @@ def generate_coaching_text(
         alternative_pvs_json, eval_before_cp, eval_after_cp,
         category, mate_before, facts=factual)
     if semantic and (not board.is_check() or semantic['evidence_level'] >= 2):
-        return prompt, semantic['text']
+        return prompt, prefer_tested_cause(semantic['text'])
     features = _best_move_features(board, best)
     comparison = comparative_insight(board, best, played, best_pv_uci, played_pv_uci)
     diagnostic = decisive_contrast(board, best, played, best_pv_uci, played_pv_uci,
@@ -657,7 +677,7 @@ def generate_coaching_text(
     if rooted:
         if diagnostic and diagnostic['kind'] in {'fork', 'material'}:
             return prompt, concise([rooted['explanation'], diagnostic['text']])
-        return prompt, rooted['explanation']
+        return prompt, prefer_tested_cause(rooted['explanation'])
     if diagnostic and diagnostic['kind'] == 'fork' and not (
             root_effect and root_effect['kind'] in {'capture', 'exchange', 'contested_capture'}):
         return prompt, diagnostic['text']
@@ -670,7 +690,7 @@ def generate_coaching_text(
             'material', 'fork'} else ''
         if additional and additional != root_effect['text']:
             return prompt, concise([root_effect['text'], additional])
-        return prompt, root_effect['text']
+        return prompt, prefer_tested_cause(root_effect['text'])
 
     # A concrete missed defense is more instructive than a long line about
     # pressure elsewhere on the board.  It identifies both candidate moves.
@@ -716,11 +736,19 @@ def generate_coaching_text(
         # Avoid the old tautological fallback such as 'e6 places a pawn on
         # e6'.  If the saved evidence is too short, say exactly what must be
         # compared instead of inventing tactical pressure.
+        # Do not turn the curriculum context into an unproved tactical claim.
+        # When the PV is inconclusive, ask the relevant attack/defense question
+        # instead of assigning a fictional material gain or forced sequence.
+        if taxonomy_path is not None and taxonomy_path.context_key == 'defend':
+            comparison_question = 'Compare which threats the two candidate moves actually prevent.'
+        elif taxonomy_path is not None and taxonomy_path.context_key == 'attack':
+            comparison_question = 'Compare the concrete threats and opponent replies after each candidate.'
+        else:
+            comparison_question = 'A deeper comparison is needed to establish the specific benefit.'
         lead = (f'{best_san} is preferred to {played_label}, but the saved '
-                'continuations do not yet establish a concrete reason.'
+                f'continuations do not yet establish a concrete reason. {comparison_question}'
                 if played_label and played_label != best_san else
-                f'{best_san} is the recommended move; a deeper comparison is '
-                'needed to establish the specific benefit.')
+                f'{best_san} is the recommended move. {comparison_question}')
 
     parts = [lead]
     # Add a *different* point only if the first point didn't already explain
@@ -754,5 +782,5 @@ def generate_coaching_text(
         # No generic 'missed this idea' sentence: the game-move contrast must
         # be evidenced, not filler added solely to fill a second sentence.
 
-    return prompt, concise(parts)
+    return prompt, prefer_tested_cause(concise(parts))
 

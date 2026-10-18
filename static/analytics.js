@@ -8,9 +8,10 @@
   const error = document.getElementById('analytics-error');
   const download = document.getElementById('analytics-export');
   const regressionDownload = document.getElementById('coach-regression-export');
+  const taxonomyDownload = document.getElementById('coach-taxonomy-export');
   const fmt = n => Number(n || 0).toLocaleString();
   const escape = text => String(text ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
-  const title = {position:'Position',explanation:'Explanation',motif:'Motif',coaching:'Chat coaching'};
+  const title = {position:'Position',explanation:'Explanation',coaching:'Chat coaching',taxonomy_context:'Position context',taxonomy_move_type:'Move type',taxonomy_motif:'Learning motif'};
   let loadedFacets = false;
   let requestToken = 0;
   function params() {
@@ -27,28 +28,63 @@
     for (const item of items || []) select.add(new Option(item.label, String(item.value)));
     if ([...select.options].some(o => o.value === prior)) select.value = prior;
   }
-  function breakdownTable(rows) {
-    if (!rows?.length) return '<p class="analytics-empty">No rated items match these filters.</p>';
-    return `<div class="analytics-table-scroll"><table class="analytics-table"><thead><tr><th>Group</th><th>Ratings</th><th>👍 %</th></tr></thead><tbody>${rows.map(r =>
-      `<tr><td>${escape(r.name)}</td><td>${fmt(r.total)}</td><td><div class="analytics-percent-row"><b>${r.up_pct?.toFixed(1) ?? '—'}${r.up_pct == null ? '' : '%'}</b><span class="analytics-mini-track"><span style="width:${r.up_pct ?? 0}%"></span></span></div></td></tr>`
-    ).join('')}</tbody></table></div>`;
+  const chartGroupNames = {opening:'opening',motif:'primary learning motif',lesson:'lesson',version:'coach version',
+    context:'position context',move_type:'move type',learning_mode:'learning mode',game_list:'game list',
+    taxonomy_field:'taxonomy field',feedback_area:'feedback area'};
+  function percent(n) { return n == null ? '—' : `${Number(n).toFixed(1)}%`; }
+  function drawRateChart(data, metric) {
+    const chart = data.charts?.[metric] || {};
+    const isChange = metric === 'changes';
+    const label = isChange ? 'Change rate' : 'Approval rate';
+    const target = document.getElementById(isChange ? 'coach-changes-chart' : 'coach-approval-chart');
+    const help = document.getElementById(isChange ? 'coach-changes-help' : 'coach-approval-help');
+    const groupName = chartGroupNames[chart.group_by] || 'category';
+    const caveat = chart.historical_version_note
+      ? (isChange ? ' Changes use current classifications only; historic rates cannot be reconstructed.'
+        : ' Historical approvals use versions saved at feedback time.') : '';
+    help.textContent = isChange
+      ? `Change rate by ${groupName}: positions with any corrected taxonomy label / all solved positions in each category. A position counts once.${caveat}`
+      : `Approval rate by ${groupName}: positions with any thumbs-up / positions with thumbs feedback in each category. Unrated positions are excluded.${caveat}`;
+    if (!chart.rows?.length) {
+      target.innerHTML = '<p class="analytics-empty">No solved positions or rated feedback match these filters.</p>';
+      return;
+    }
+    target.innerHTML = chart.rows.map(row => {
+      const value = row.rate == null ? null : Math.max(0, Math.min(100, Number(row.rate)));
+      const count = `${fmt(row.numerator)} / ${fmt(row.denominator)}`;
+      const segments = value == null
+        ? '<span class="comparison-unrated"></span>'
+        : `<span class="comparison-segment comparison-${isChange ? 'change' : 'approval'}" style="width:${value}%"></span><span class="comparison-remaining" style="width:${100 - value}%"></span>`;
+      return `<div class="coach-metric-row">
+        <div class="coach-metric-category">${escape(row.name)}</div>
+        <div class="comparison-bar" role="img" aria-label="${label} for ${escape(row.name)}: ${percent(value)}, ${count}">${segments}</div>
+        <strong class="coach-metric-value">${percent(value)}</strong>
+        <small class="coach-metric-count">${count}</small>
+      </div>`;
+    }).join('') + (chart.groups_count > chart.rows.length
+      ? `<p class="analytics-empty">Showing ${chart.rows.length} of ${fmt(chart.groups_count)} groups. Narrow the filters to see others.</p>` : '');
   }
   function draw(data) {
     document.getElementById('analytics-total').textContent = fmt(data.overall.total);
     document.getElementById('analytics-total-detail').textContent =
-      data.overall.total ? `${data.overall.up_pct.toFixed(1)}% thumbs up · ${fmt(data.overall.down)} thumbs down` : 'No feedback yet';
-    for (const type of ['position','explanation','motif','coaching']) {
+      data.overall.total ? `${fmt(data.thumbs?.total)} thumb ratings · ${fmt(data.taxonomy?.total)} taxonomy selections` : 'No feedback yet';
+    for (const type of ['position','explanation','taxonomy_context','taxonomy_move_type','taxonomy_motif']) {
       const card = document.querySelector(`[data-score="${type}"]`);
       const stat = data.categories[type] || {total:0,up_pct:null,up:0,down:0};
-      card.querySelector('strong').textContent = stat.up_pct == null ? '—' : `${stat.up_pct.toFixed(1)}%`;
-      card.querySelector('small').textContent = `${fmt(stat.total)} ratings · ${fmt(stat.up)} up · ${fmt(stat.down)} down`;
-      card.querySelector('.analytics-score-track > span').style.width = `${stat.up_pct ?? 0}%`;
+      if (type.startsWith('taxonomy_')) {
+        const changes = data.taxonomy_change_rates?.[type.slice('taxonomy_'.length)] || {};
+        card.querySelector('strong').textContent = changes.change_pct == null ? '—' : `${changes.change_pct.toFixed(1)}%`;
+        card.querySelector('small').textContent = `${fmt(changes.changed)} changed · ${fmt(changes.unchanged)} unchanged / ${fmt(changes.solved)} solved`;
+        card.querySelector('.analytics-score-track > span').style.width = `${changes.change_pct ?? 0}%`;
+      } else {
+        card.querySelector('strong').textContent = stat.up_pct == null ? '—' : `${stat.up_pct.toFixed(1)}%`;
+        card.querySelector('small').textContent = `${fmt(stat.total)} ratings · ${fmt(stat.up)} up · ${fmt(stat.down)} down`;
+        card.querySelector('.analytics-score-track > span').style.width = `${stat.up_pct ?? 0}%`;
+      }
     }
-    document.getElementById('analytics-motif-breakdown').innerHTML = breakdownTable(data.by_motif);
-    document.getElementById('analytics-opening-breakdown').innerHTML = breakdownTable(data.by_opening);
-    document.getElementById('analytics-lesson-breakdown').innerHTML = breakdownTable(data.by_lesson);
-    document.getElementById('analytics-version-breakdown').innerHTML = breakdownTable(data.by_coaching_version);
-    document.getElementById('analytics-record-count').textContent = `${fmt(data.overall.total)} matching ratings`;
+    drawRateChart(data, 'changes');
+    drawRateChart(data, 'approval');
+    document.getElementById('analytics-record-count').textContent = `${fmt(data.overall.total)} matching feedback records`;
     const body = document.querySelector('#analytics-records tbody');
     if (!data.recent.length) {
       body.innerHTML = '<tr><td colspan="8" class="analytics-empty">No feedback yet for these filters. Rate a solved position or chat response in Training to begin.</td></tr>';
@@ -60,9 +96,12 @@
       const lesson = r.lesson_name || '—';
       const motif = r.primary_motif_name && r.primary_motif_name !== lesson ? `<small>Motif: ${escape(r.primary_motif_name)}</small>` : '';
       const when = r.updated_at ? escape(String(r.updated_at).slice(0, 16)) : '—';
+      const taxonomy = r.feedback_type.startsWith('taxonomy_');
+      const correction = taxonomy ? r.selected_taxonomy_name || r.selected_taxonomy_key : r.suggested_motif_name || r.suggested_text;
       return `<tr><td>${escape(title[r.feedback_type] || r.feedback_type)}</td>
-        <td><span class="analytics-vote ${r.rating === 1 ? 'positive':'negative'}">${r.rating === 1 ? '👍 Yes' : '👎 No'}</span></td>
-        <td class="coach-correction-preview" title="${escape(r.suggested_motif_name || r.suggested_text || '')}">${escape(String(r.suggested_motif_name || r.suggested_text || '—').slice(0, 130))}</td>
+        <td><span class="analytics-vote ${r.rating === 1 ? 'positive':'negative'}">${taxonomy
+          ? (r.current_taxonomy_change_status === 'changed' ? 'Changed' : 'Unchanged') : (r.rating === 1 ? '👍 Yes' : '👎 No')}</span></td>
+        <td class="coach-correction-preview" title="${escape(correction || '')}">${escape(String(correction || '—').slice(0, 130))}</td>
         <td>${escape(label)}</td><td>${escape(lesson)}${motif}</td><td>${escape(opening)}</td>
         <td><a href="/trainer/${encodeURIComponent(r.job_id)}?position=${encodeURIComponent(r.position_id)}">#${fmt(r.position_id)}</a>
         <small>${escape(r.learning_mode || '')}${r.move_number ? ` · move ${fmt(r.move_number)}` : ''}</small></td>
@@ -72,13 +111,17 @@
   async function update() {
     const token = ++requestToken;
     const query = params().toString();
+    const chartQuery = new URLSearchParams(params());
+    chartQuery.set('chart_changes_group', document.getElementById('coach-changes-group').value);
+    chartQuery.set('chart_approval_group', document.getElementById('coach-approval-group').value);
     download.href = '/api/analytics/feedback.csv' + (query ? `?${query}` : '');
     if (regressionDownload) regressionDownload.href = '/api/coach/regression.csv' + (query ? `?${query}` : '');
+    if (taxonomyDownload) taxonomyDownload.href = '/api/coach/taxonomy.csv' + (query ? `?${query}` : '');
     error.classList.add('hidden');
     loading.textContent = 'Loading feedback…';
     loading.classList.remove('hidden');
     try {
-      const response = await fetch('/api/analytics/feedback' + (query ? `?${query}` : ''), {cache:'no-store'});
+      const response = await fetch('/api/analytics/feedback?' + chartQuery.toString(), {cache:'no-store'});
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || 'Unable to load feedback');
       if (token !== requestToken) return;
@@ -88,6 +131,8 @@
         fillFacet('opening_key', data.facets.openings);
         fillFacet('primary_motif_key', data.facets.motifs);
         fillFacet('learning_mode', data.facets.learning_modes);
+        fillFacet('current_context_key', data.facets.contexts);
+        fillFacet('current_move_type_key', data.facets.move_types);
         fillFacet('coaching_version', data.facets.coaching_versions);
         fillFacet('position_category', data.facets.position_categories);
         loadedFacets = true;
@@ -106,8 +151,8 @@
   if (resetFeedback) resetFeedback.addEventListener('click', async () => {
     const selectedJob = form.elements.job_id.value;
     const scope = selectedJob
-      ? `all position, explanation, motif, and chat votes for game list #${selectedJob}`
-      : 'ALL position, explanation, motif, and chat votes across EVERY game list';
+      ? `all saved ratings and taxonomy selections for game list #${selectedJob}`
+      : 'ALL saved ratings and taxonomy selections across EVERY game list';
     if (!window.confirm(`Permanently delete ${scope}? Training positions and analysis are kept. Export CSV first if you want a backup.`)) return;
     const typed = window.prompt('Type RESET FEEDBACK to confirm this irreversible rating reset:');
     if (typed !== 'RESET FEEDBACK') return;
@@ -123,12 +168,14 @@
       loadedFacets = false;
       await update();
       document.getElementById('coach-reset-note').textContent =
-        `Ratings reset: ${fmt(body.deleted.position_explanation_motif + body.deleted.chat_coaching)} feedback records deleted. Analysis and positions were kept.`;
+        `Feedback reset: ${fmt(body.deleted.position_explanation_motif + body.deleted.chat_coaching + (body.deleted.taxonomy_selections || 0))} records deleted. Analysis and positions were kept.`;
     } catch (err) {
       error.textContent = err.message;
       error.classList.remove('hidden');
     } finally { resetFeedback.disabled = false; }
   });
+  document.getElementById('coach-changes-group').addEventListener('change', update);
+  document.getElementById('coach-approval-group').addEventListener('change', update);
   form.addEventListener('change', update);
   form.addEventListener('reset', () => window.setTimeout(update, 0));
   update();

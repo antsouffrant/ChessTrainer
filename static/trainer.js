@@ -12,6 +12,8 @@ const trainingStateKey = `pct-training-${jobId}`;
 const trainingPlaylistKey = `${trainingStateKey}-playlist`;
 const initialQuery = new URLSearchParams(location.search);
 const forceNewPlaylist = initialQuery.get('new_playlist') === '1';
+const trainerContextFilter = initialQuery.get('context') || '';
+const trainerMoveTypeFilter = initialQuery.get('move_type') || '';
 // Remove the one-shot launch flag so refreshes and Resume lesson restore
 // this playlist instead of accidentally creating another one.
 const sessionQuery = new URLSearchParams(location.search);
@@ -45,7 +47,7 @@ function reconcilePlaylistLearnedState(positionId, learned, affectedPositionIds 
 }
 
 // An explicit lesson or position link wins over the saved session.
-const hasExplicitTrainingTarget = Boolean(conceptKey || openingKey || openingVariation || requestedPositionId || trainerLearningMode || trainerListingScope || trainerRatingMin || trainerRatingMax || new URLSearchParams(location.search).has('sort'));
+const hasExplicitTrainingTarget = Boolean(conceptKey || openingKey || openingVariation || requestedPositionId || trainerLearningMode || trainerListingScope || trainerRatingMin || trainerRatingMax || trainerContextFilter || trainerMoveTypeFilter || new URLSearchParams(location.search).has('sort'));
 let savedTraining = null;
 try { savedTraining = JSON.parse(localStorage.getItem(`${trainingStateKey}-state`) || 'null'); } catch (_) {}
 if (!hasExplicitTrainingTarget && savedTraining?.url?.startsWith(`/trainer/${jobId}`) && savedTraining.url !== `${location.pathname}${location.search}`) {
@@ -289,21 +291,27 @@ function learningModeMeta(value, category='') {
 }
 function learningModeLabel(value, category='') { return learningModeMeta(value, category).label; }
 
-function renderConcepts(concepts = []) {
+function renderConcepts(concepts = [], taxonomy = null) {
+  if (taxonomy && currentPosition()) currentPosition().taxonomy = taxonomy;
   const el = document.getElementById('lesson-concepts');
   if (!el) return;
-  el.innerHTML = '';
-  if (!concepts.length) {
+  el.replaceChildren();
+  if (!concepts.length && !taxonomy?.levels?.length) {
     el.classList.add('hidden');
     updatePositionRatingUI();
     return;
   }
-  for (const concept of concepts) {
-    const chip = document.createElement('span');
-    chip.className = `lesson-concept-chip${concept.is_primary ? ' primary' : ''}`;
-    chip.textContent = concept.name;
-    chip.title = concept.evidence || concept.description || '';
-    el.appendChild(chip);
+  if (taxonomy?.motif_key) {
+    // The taxonomy itself is also the feedback interface after solving.
+    // All selections are stored separately; the source analysis stays intact.
+    renderTaxonomyPills();
+  } else {
+    for (const concept of concepts.filter(concept => concept.is_primary)) {
+      const chip = document.createElement('span');
+      chip.className = 'lesson-concept-chip primary';
+      chip.textContent = concept.name;
+      el.appendChild(chip);
+    }
   }
   el.classList.remove('hidden');
   updatePositionRatingUI();
@@ -312,6 +320,9 @@ function renderConcepts(concepts = []) {
 // Feedback belongs to the position, not a transient playlist or render cycle.
 const positionRatings = new Map();
 const positionCorrections = new Map();
+const taxonomyFeedbackRecords = new Map();
+const taxonomyFeedbackEl = document.getElementById('taxonomy-feedback');
+const taxonomyFeedbackStatusEl = document.getElementById('taxonomy-feedback-status');
 let suggestedMotifOptions = [];
 const correctionDialog = document.getElementById('coaching-correction-dialog');
 const correctionForm = document.getElementById('coaching-correction-form');
@@ -323,6 +334,7 @@ function nextFeedbackRating(currentRating, clickedRating) {
 
 function alphabeticalMotifs(options = []) {
   return [...options].sort((a, b) =>
+    Number(String(a.key || '').startsWith('evaluation_')) - Number(String(b.key || '').startsWith('evaluation_')) ||
     String(a.name || '').localeCompare(String(b.name || ''), undefined, {sensitivity:'base'}) ||
     String(a.key || '').localeCompare(String(b.key || '')));
 }
@@ -332,45 +344,21 @@ function closeCorrectionDialog() {
   correctionTarget = null;
 }
 function openCorrectionDialog(category, targetId, existing = {}, snapshot = '') {
-  if (!correctionDialog) return;
+  if (!correctionDialog || !['position', 'explanation', 'coaching'].includes(category)) return;
   correctionTarget = {category, targetId, snapshot};
-  const motif = category === 'motif';
   const position = category === 'position';
-  const names = {motif: 'Choose a better learning motif', position: 'Improve this training position',
-                 explanation: 'Suggest a better explanation', coaching: 'Suggest a better coach response'};
-  document.getElementById('coaching-correction-title').textContent = names[category] || 'Improve coaching';
-  document.getElementById('coaching-correction-help').textContent = motif
-    ? 'Which specific primary motif best explains this position? Your selection will be saved as a proposed gold-standard label.'
-    : position ? 'What is wrong with this training position, or how could it be more useful?'
+  const names = {position:'Improve this training position',
+                 explanation:'Suggest a better explanation', coaching:'Suggest a better coach response'};
+  document.getElementById('coaching-correction-title').textContent = names[category];
+  document.getElementById('coaching-correction-help').textContent = position
+    ? 'What is wrong with this training position, or how could it be more useful?'
     : 'What should the coach have said instead? Your wording will be saved alongside the original response.';
-  const textField = document.getElementById('coaching-correction-text-field');
-  const selectField = document.getElementById('coaching-correction-motif-field');
   const textInput = document.getElementById('coaching-correction-text');
-  const select = document.getElementById('coaching-correction-motif');
-  textField.hidden = motif; selectField.hidden = !motif;
-  textInput.required = !motif; select.required = motif;
+  textInput.required = true;
   textInput.value = existing.suggested_text || '';
-  select.replaceChildren(new Option('Choose a learning motif…', ''));
-  const currentKey = currentPosition()?.concepts?.find(c => c.is_primary)?.key || '';
-  for (const option of alphabeticalMotifs(suggestedMotifOptions)) {
-    if (option.key === currentKey) continue;
-    select.add(new Option(`${option.name} · ${option.family}`, option.key));
-  }
-  select.value = existing.suggested_motif_key || '';
-  if (motif && !suggestedMotifOptions.length) {
-    fetch(`/api/positions/${targetId}/feedback`).then(r => r.ok ? r.json() : null).then(data => {
-      if (!data || correctionTarget?.targetId !== targetId || correctionTarget?.category !== 'motif') return;
-      suggestedMotifOptions = data.motif_options || [];
-      select.replaceChildren(new Option('Choose a learning motif…', ''));
-      for (const option of alphabeticalMotifs(suggestedMotifOptions)) {
-        if (option.key !== currentKey) select.add(new Option(`${option.name} · ${option.family}`, option.key));
-      }
-      select.value = existing.suggested_motif_key || '';
-    }).catch(() => {});
-  }
   document.getElementById('coaching-correction-error').hidden = true;
   if (!correctionDialog.open) correctionDialog.showModal();
-  requestAnimationFrame(() => (motif ? select : textInput).focus());
+  requestAnimationFrame(() => textInput.focus());
 }
 correctionDialog?.addEventListener('close', () => { correctionTarget = null; });
 document.getElementById('coaching-correction-close')?.addEventListener('click', closeCorrectionDialog);
@@ -379,9 +367,7 @@ correctionForm?.addEventListener('submit', async event => {
   event.preventDefault();
   if (!correctionTarget) return;
   const {category, targetId, snapshot} = correctionTarget;
-  const motif = category === 'motif';
-  const value = motif ? document.getElementById('coaching-correction-motif').value
-                      : document.getElementById('coaching-correction-text').value.trim();
+  const value = document.getElementById('coaching-correction-text').value.trim();
   if (!value) return;
   const btn = document.getElementById('coaching-correction-save');
   const err = document.getElementById('coaching-correction-error');
@@ -391,8 +377,7 @@ correctionForm?.addEventListener('submit', async event => {
     const url = chat ? `/api/coach/messages/${targetId}/feedback` : `/api/positions/${targetId}/feedback`;
     const payload = {rating: -1, lesson_key: new URLSearchParams(location.search).get('concept') || ''};
     if (!chat) { payload.category = category; payload.content_snapshot = snapshot; }
-    if (motif) payload.suggested_motif_key = value;
-    else payload.suggested_text = value;
+    payload.suggested_text = value;
     const response = await fetch(url, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || 'Could not save correction');
@@ -414,14 +399,143 @@ function positionSolvedForRating() {
   const p = currentPosition();
   return Boolean(p && (solved || Number(p.learned) === 1));
 }
+// A taxonomy pill is a native select with a visible pill label.  A native menu
+// provides keyboard/touch support, while the pill always displays the coach's
+// current label or the user's proposed replacement without adding a second row.
+const taxonomyFieldNames = {context:'Position context', move_type:'Move type', motif:'Learning motif'};
+let taxonomyWriteQueue = Promise.resolve();
+function taxonomyPillOptions(field, p, record) {
+  const choices = record.options || {};
+  const defaults = field === 'context'
+    ? [{key:'attack',name:'Attacking Plans'}, {key:'defend',name:'Defensive Resources'}]
+    : field === 'move_type'
+      ? [{key:'none',name:'No tactical/strategic qualifier'}, {key:'tactical',name:'Tactical Calculation'},
+         {key:'strategic',name:'Strategic Comprehension'}]
+      : suggestedMotifOptions.length ? suggestedMotifOptions
+      : (p.concepts || []).map(c => ({key:c.key,name:c.name}));
+  const options = choices[field] || defaults;
+  const predicted = record.predicted || {};
+  const model = predicted[field] || (field === 'move_type' ? p.taxonomy?.move_type_key || 'none'
+    : field === 'context' ? p.taxonomy?.context_key : p.taxonomy?.motif_key) || '';
+  const chosen = record.selected?.[field] || '';
+  const modelName = p.taxonomy?.[field === 'motif' ? 'motif_name' : field === 'context' ? 'context_name' : 'move_type_name'];
+  const byKey = new Map(options.map(option => [option.key, option.name]));
+  if (model && !byKey.has(model)) byKey.set(model, modelName || model);
+  if (chosen && !byKey.has(chosen)) byKey.set(chosen, chosen);
+  return {choices:byKey,model,chosen,display:byKey.get(chosen || model) || modelName || 'Select motif'};
+}
+function createTaxonomyPill(field, position, record, optional=false) {
+  const {choices,model,chosen,display} = taxonomyPillOptions(field,position,record);
+  const pill = document.createElement('span');
+  const corrected = Boolean(chosen && chosen !== model);
+  pill.className = `lesson-concept-chip taxonomy-${field} taxonomy-pill${field === 'motif' ? ' primary' : ''}`
+    + (corrected ? ' taxonomy-pill-edited' : chosen ? ' taxonomy-pill-confirmed' : '')
+    + (optional ? ' taxonomy-pill-optional' : '');
+  const label = document.createElement('span');
+  label.className = 'taxonomy-pill-label';
+  label.textContent = optional ? (chosen === 'none' ? 'No qualifier' : '+ Move type') : display;
+  const chevron = document.createElement('span');
+  chevron.className = 'taxonomy-pill-chevron';
+  chevron.textContent = '⌄';
+  chevron.setAttribute('aria-hidden','true');
+  const select = document.createElement('select');
+  select.className = 'taxonomy-feedback-select taxonomy-pill-native-select';
+  select.dataset.taxonomyField = field;
+  select.setAttribute('aria-label',`Review ${taxonomyFieldNames[field]}; ${chosen ? 'feedback: '+display : 'coach: '+display}`);
+  select.title = `${taxonomyFieldNames[field]}: ${display}. Coach: ${choices.get(model) || model}. Select to provide feedback.`;
+  select.add(new Option(`Use coach's label: ${choices.get(model) || model} (clear feedback)`,''));
+  for (const [key,name] of [...choices].sort((a,b) =>
+    Number(a[0].startsWith('evaluation_')) - Number(b[0].startsWith('evaluation_')) ||
+    a[1].localeCompare(b[1], undefined, {sensitivity:'base'}))) {
+    select.add(new Option(key === model ? `Confirm coach: ${name}` : name,key));
+  }
+  select.value = chosen;
+  select.addEventListener('change', () => updateTaxonomyFeedbackChoice(select));
+  pill.append(label,chevron,select);
+  return pill;
+}
+function renderTaxonomyPills() {
+  const p = currentPosition();
+  const el = document.getElementById('lesson-concepts');
+  if (!el || !p?.taxonomy?.motif_key) return;
+  const record = taxonomyFeedbackRecords.get(Number(p.id)) || {};
+  const move = taxonomyPillOptions('move_type',p,record);
+  const hasQualifier = Boolean((move.chosen || move.model) && (move.chosen || move.model) !== 'none');
+  el.replaceChildren();
+  const path = ['context',...(hasQualifier ? ['move_type'] : []),'motif'];
+  for (const [i,field] of path.entries()) {
+    if (i) {
+      const arrow = document.createElement('span');
+      arrow.className = 'taxonomy-separator';
+      arrow.textContent = '›';
+      arrow.setAttribute('aria-hidden','true');
+      el.appendChild(arrow);
+    }
+    el.appendChild(createTaxonomyPill(field,p,record));
+  }
+  if (!hasQualifier) el.appendChild(createTaxonomyPill('move_type',p,record,true));
+  el.classList.remove('hidden');
+}
+function updateTaxonomyFeedbackUI(force=false) {
+  if (!force && document.activeElement?.matches?.('.taxonomy-pill-native-select')) return;
+  const p = currentPosition();
+  const ready = positionSolvedForRating() && Boolean(p?.taxonomy?.motif_key);
+  taxonomyFeedbackEl?.classList.toggle('hidden', !ready);
+  if (!ready) return;
+  if (taxonomyFeedbackStatusEl && taxonomyFeedbackStatusEl.dataset.positionId !== String(p.id)) {
+    taxonomyFeedbackStatusEl.dataset.positionId = String(p.id);
+    taxonomyFeedbackStatusEl.textContent = 'Select a learning pill to suggest a label. Changes affect feedback only, not the coach\'s analysis.';
+  }
+  renderTaxonomyPills();
+}
+
+async function updateTaxonomyFeedbackChoice(select) {
+  const id = Number(currentPosition()?.id || 0);
+  if (!id || !positionSolvedForRating()) return;
+  const field = select.dataset.taxonomyField;
+  const selectedKey = select.value;
+  const previous = taxonomyFeedbackRecords.get(id)?.selected?.[field] || '';
+  ++ratingRequestSerial; // An older feedback GET must not overwrite this selection.
+  select.disabled = true;
+  if (taxonomyFeedbackStatusEl) taxonomyFeedbackStatusEl.textContent = 'Saving taxonomy feedback…';
+  const save = async () => {
+    const response = await fetch(`/api/positions/${id}/taxonomy-feedback`, {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({field,selected_key:selectedKey})
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || 'Could not save taxonomy feedback');
+    taxonomyFeedbackRecords.set(id, data.taxonomy_feedback);
+    return data;
+  };
+  try {
+    // Serialize rapid changes to different pills on one position, preserving
+    // the server's authoritative selection snapshot across the three fields.
+    const task = taxonomyWriteQueue.then(save,save);
+    taxonomyWriteQueue = task.catch(() => {});
+    await task;
+    if (Number(currentPosition()?.id) !== id) return;
+    if (taxonomyFeedbackStatusEl) taxonomyFeedbackStatusEl.textContent = selectedKey
+      ? "Feedback saved. Select any pill again to change or clear your answer. The coach's analysis is unchanged."
+      : "Feedback cleared for this field. The coach's original label is shown again.";
+  } catch (error) {
+    select.value = previous;
+    if (Number(currentPosition()?.id) === id && taxonomyFeedbackStatusEl)
+      taxonomyFeedbackStatusEl.textContent = error.message || 'Could not save taxonomy feedback';
+  } finally {
+    select.disabled = false;
+    if (Number(currentPosition()?.id) === id) updateTaxonomyFeedbackUI(true);
+  }
+}
+
 function updatePositionRatingUI() {
   const p = currentPosition();
   const ratings = positionRatings.get(Number(p?.id)) || {};
   const ready = positionSolvedForRating();
+  updateTaxonomyFeedbackUI();
   document.querySelectorAll('.inline-feedback-votes[data-feedback-category]').forEach(group => {
     const category = group.dataset.feedbackCategory;
     const eligible = ready &&
-      (category !== 'motif' || Boolean(document.querySelector('#lesson-concepts .lesson-concept-chip.primary'))) &&
       (category !== 'explanation' || explainedPositionId === Number(p?.id));
     group.classList.toggle('hidden', !eligible);
     group.querySelectorAll('[data-rating]').forEach(button => {
@@ -445,6 +559,7 @@ async function loadPositionRatings(positionId) {
     if (serial !== ratingRequestSerial) return; // An earlier read must not erase a newly saved vote.
     positionRatings.set(id, data.ratings || {});
     positionCorrections.set(id, data.corrections || {});
+    if (data.taxonomy_feedback) taxonomyFeedbackRecords.set(id, data.taxonomy_feedback);
     if (Array.isArray(data.motif_options)) suggestedMotifOptions = data.motif_options;
     if (Number(currentPosition()?.id) === id) updatePositionRatingUI();
   } catch (_) { /* Unavailable votes must not block training. */ }
@@ -456,7 +571,7 @@ async function ratePositionFeedback(button) {
   const group = button.closest('[data-feedback-category]');
   const category = group?.dataset.feedbackCategory;
   const chosenRating = Number(button.dataset.rating);
-  if (!['position', 'explanation', 'motif'].includes(category) || ![-1, 1].includes(chosenRating)) return;
+  if (!['position', 'explanation'].includes(category) || ![-1, 1].includes(chosenRating)) return;
   // Clicking the selected thumb withdraws the vote (and its correction).
   const priorRating = Number(positionRatings.get(id)?.[category] || 0);
   const rating = nextFeedbackRating(priorRating, chosenRating);
@@ -1676,7 +1791,7 @@ function renderSolvedDetails(result) {
     moveListEl.append(line);
   }
   document.getElementById('puzzle-rating').textContent = result.estimated_rating ? `≈ ${result.estimated_rating}` : '—';
-  renderConcepts(result.concepts || currentPosition()?.concepts || []);
+  renderConcepts(result.concepts || currentPosition()?.concepts || [], result.taxonomy || currentPosition()?.taxonomy);
   updatePositionRatingUI();
   solutionEl.classList.remove('hidden');
   maybeOfferProactiveCoach(currentPosition());
@@ -2108,12 +2223,17 @@ async function showPosition(index) {
     feedbackMessageEl.textContent = '✓ Solved position — review the correct move or continue.';
     solutionEl.classList.remove('hidden');
     if (p.estimated_rating) document.getElementById('puzzle-rating').textContent = `≈ ${p.estimated_rating}`;
-    renderConcepts(p.concepts || []);
+    renderConcepts(p.concepts || [], p.taxonomy);
     updatePositionRatingUI();
     engineToggleEl.disabled = false;
     engineToggleWrapEl?.classList.remove('hidden');
     solvedPositionControlsEl?.classList.remove('hidden');
     learnedToggleWrapEl?.classList.remove('hidden');
+    // Hydrated playlist cards already contain the persisted explanation. Show
+    // it immediately on Last/Next navigation, before the solution endpoint
+    // returns, so a slow or failed request cannot strand a learned card with
+    // the unsolved prompt and disabled explanation feedback.
+    renderSolvedDetails(p);
     loadSolvedDetails(p);
   }
   loadCoachThread(p);
@@ -2164,6 +2284,8 @@ async function loadPositions(preservePosition = true) {
     if (!fresh) {
       const params = new URLSearchParams();
       if (conceptKey) params.set('concept', conceptKey);
+      if (trainerContextFilter) params.set('context', trainerContextFilter);
+      if (trainerMoveTypeFilter) params.set('move_type', trainerMoveTypeFilter);
       if (openingKey) params.set('opening', openingKey);
       if (openingVariation) params.set('variation', openingVariation);
       if (trainerLearningMode) params.set('learning_mode', trainerLearningMode);
@@ -2320,6 +2442,7 @@ if (hintToggleEl) {
 engineToggleEl.addEventListener('change', () => {
   selectedSquare = null;
   clearHighlights();
+  trainerKeyboardArmed = true; // User-enabled Stockfish must not disable board arrows.
   if (engineToggleEl.checked) {
     clearBoardMark();
     updateHistoryUI();
@@ -2342,8 +2465,16 @@ window.addEventListener('resize', () => {
 });
 
 function isEditableKeyboardTarget(target) {
-  return Boolean(target?.isContentEditable || target?.closest?.(
-    'input, textarea, select, [role="textbox"], [contenteditable]:not([contenteditable="false"])'));
+  if (target?.isContentEditable) return true;
+  const editor = target?.closest?.('input, textarea, select, [role="textbox"], [contenteditable]:not([contenteditable="false"])');
+  if (!editor) return false;
+  if (String(editor.tagName || '').toLowerCase() === 'input') {
+    const kind = String(editor.type || 'text').toLowerCase();
+    // The user may keep the Stockfish analysis toggle focused. It is not a
+    // text editor and must not claim board review arrow-key shortcuts.
+    return !['checkbox', 'radio', 'button', 'submit', 'reset', 'range'].includes(kind);
+  }
+  return true;
 }
 
 function isCoachInteraction(target) {

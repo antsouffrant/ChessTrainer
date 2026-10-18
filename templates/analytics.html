@@ -5,11 +5,12 @@
 <section id="feedback-analytics" class="analytics-hub" aria-label="Coaching feedback analytics">
   <header class="analytics-hero glass">
     <div><span class="eyebrow">COACH · LEARNING QUALITY</span><h1>Coaching feedback</h1>
-      <p class="muted">Understand how useful your training positions, explanations, learning motifs, and chat coaching are. Ratings and suggested corrections are saved and can be revised at any time. Thumbs-down suggestions become candidates for gold-standard regression examples.</p>
+      <p class="muted">Review position and explanation approval, taxonomy changes, and retained chat ratings, together with editable context, move-type and learning-motif selections. All three taxonomy selections are saved independently; corrections become regression candidates; unchanged solved positions are counted in change-rate denominators even without dropdown feedback.</p>
     </div>
     <div class="coach-actions">
       <button type="button" id="coach-reset-feedback" class="secondary-button coach-reset-feedback"><i class="fa-solid fa-trash-can" aria-hidden="true"></i> Reset feedback</button>
       <a class="secondary-button analytics-download" id="coach-regression-export" href="/api/coach/regression.csv" download="chess_regression_candidates.csv"><i class="fa-solid fa-flask" aria-hidden="true"></i> Regression candidates</a>
+      <a class="secondary-button analytics-download" id="coach-taxonomy-export" href="/api/coach/taxonomy.csv" download="chess_coaching_taxonomy.csv"><i class="fa-solid fa-table" aria-hidden="true"></i> Taxonomy CSV</a>
       <a class="primary-button analytics-download" id="analytics-export" href="/api/analytics/feedback.csv" download="chess_coaching_feedback.csv"><i class="fa-solid fa-download" aria-hidden="true"></i> Download CSV</a>
     </div>
   </header>
@@ -20,42 +21,83 @@
       <label>Lesson<select name="lesson_key"><option value="">All lessons</option></select></label>
       <label>Opening<select name="opening_key"><option value="">All openings</option></select></label>
       <label>Primary learning motif<select name="primary_motif_key"><option value="">All motifs</option></select></label>
+      <label>Position context<select name="current_context_key"><option value="">All contexts</option></select></label>
+      <label>Move type<select name="current_move_type_key"><option value="">All move types</option></select></label>
       <label>Learning mode<select name="learning_mode"><option value="">All modes</option></select></label>
-      <label>Rating type<select name="feedback_type">
-        <option value="">All rating types</option>
+      <label>Feedback record type<select name="feedback_type">
+        <option value="">All feedback areas</option>
         <option value="position">Training positions</option>
         <option value="explanation">Explanations</option>
-        <option value="motif">Learning motifs</option>
+        <option value="taxonomy_context">Position context selections</option>
+        <option value="taxonomy_move_type">Move type selections</option>
+        <option value="taxonomy_motif">Learning motif selections</option>
         <option value="coaching">Chat coaching</option>
       </select></label>
-      <label>Feedback<select name="rating"><option value="">Positive and negative</option><option value="1">👍 Thumbs up</option><option value="-1">👎 Thumbs down</option></select></label>
-      <label>Coach version<select name="coaching_version"><option value="">All versions</option></select></label>
+      <label>Feedback records<select name="rating"><option value="">All records</option><option value="1">Thumbs up / selected original</option><option value="-1">Thumbs down / selected alternative</option></select></label>
+      <label>Coach version (rated or current)<select name="coaching_version"><option value="">All versions</option></select></label>
       <label>Position category<select name="position_category"><option value="">All categories</option></select></label>
     </div>
   </form>
-  <p id="coach-reset-note" class="muted" role="status">Reset feedback clears ratings and proposed corrections. Restart Analysis also deletes feedback for that game list. Export your regression candidates before either reset.</p>
+  <p id="coach-reset-note" class="muted" role="status">Reset feedback clears thumbs and taxonomy selections. Restart Analysis also deletes feedback for that game list. Export your regression candidates before either reset.</p>
   <p id="analytics-error" class="analytics-error hidden" role="alert"></p>
   <div id="analytics-loading" class="muted" role="status">Loading saved feedback…</div>
   <div id="analytics-results" class="hidden">
     <section class="analytics-overview" aria-label="Feedback scores">
-      <article class="analytics-score analytics-total glass"><span class="eyebrow">ALL RATINGS</span><strong id="analytics-total">0</strong><span id="analytics-total-detail">No feedback yet</span></article>
-      <article class="analytics-score glass" data-score="position"><span>Training positions</span><strong>—</strong><small>0 ratings</small><div class="analytics-score-track"><span></span></div></article>
-      <article class="analytics-score glass" data-score="explanation"><span>Explanations</span><strong>—</strong><small>0 ratings</small><div class="analytics-score-track"><span></span></div></article>
-      <article class="analytics-score glass" data-score="motif"><span>Learning motifs</span><strong>—</strong><small>0 ratings</small><div class="analytics-score-track"><span></span></div></article>
-      <article class="analytics-score glass" data-score="coaching"><span>Chat coaching</span><strong>—</strong><small>0 ratings</small><div class="analytics-score-track"><span></span></div></article>
+      <article class="analytics-score analytics-total glass"><span class="eyebrow">ALL FEEDBACK</span><strong id="analytics-total">0</strong><span id="analytics-total-detail">No feedback yet</span></article>
+      <article class="analytics-score glass" data-score="position"><span>Training positions · Approval rate</span><strong>—</strong><small>0 ratings</small><div class="analytics-score-track"><span></span></div></article>
+      <article class="analytics-score glass" data-score="explanation"><span>Explanations · Approval rate</span><strong>—</strong><small>0 ratings</small><div class="analytics-score-track"><span></span></div></article>
+      <article class="analytics-score glass" data-score="taxonomy_context"><span>Position context · change rate</span><strong>—</strong><small>0 of 0 solved positions changed</small><div class="analytics-score-track"><span></span></div></article>
+      <article class="analytics-score glass" data-score="taxonomy_move_type"><span>Move type · change rate</span><strong>—</strong><small>0 of 0 solved positions changed</small><div class="analytics-score-track"><span></span></div></article>
+      <article class="analytics-score glass" data-score="taxonomy_motif"><span>Learning motif · change rate</span><strong>—</strong><small>0 of 0 solved positions changed</small><div class="analytics-score-track"><span></span></div></article>
     </section>
-    <p class="analytics-summary-note muted">Each item is counted once per feedback category; changing your vote updates it. The percentage is the share of thumbs-up ratings among responses received, not among all analyzed positions.</p>
-    <section class="analytics-breakdowns" aria-label="Detailed coaching feedback breakdowns">
-      <article class="glass analytics-table-panel"><h2>By primary learning motif</h2><p class="muted">Which concepts have the strongest and weakest feedback?</p><div id="analytics-motif-breakdown"></div></article>
-      <article class="glass analytics-table-panel"><h2>By opening</h2><p class="muted">Compare feedback across your opening families.</p><div id="analytics-opening-breakdown"></div></article>
-      <article class="glass analytics-table-panel"><h2>By lesson</h2><p class="muted">The lesson in use when rated, or the primary motif when no lesson was selected.</p><div id="analytics-lesson-breakdown"></div></article>
-      <article class="glass analytics-table-panel"><h2>By coach version</h2><p class="muted">Track thumbs-up rates for coaching iterations using the version recorded at vote time.</p><div id="analytics-version-breakdown"></div></article>
+    <p class="analytics-summary-note muted">Headline approval rates are rating-based; category approval charts count distinct rated positions. Historical-version filters apply to feedback recorded under that version; the three taxonomy change-rate cards always describe the current solved-position classifications, not historical reconstructed predictions. Taxonomy change rate = solved positions whose current selected label differs from the current coach label ÷ all solved positions in the selected game-list/position filters. Untouched positions and selections changed back to the coach label count as unchanged. Approval rate = thumbs-up ratings ÷ all thumbs ratings in that area. Taxonomy change is a separate current-position metric; neither rate implies the other. Feedback-type and rating filters do not change the solved-position denominator.</p>
+    <section class="glass analytics-table-panel coach-metric-panel" aria-label="Taxonomy change rates by category">
+      <div class="coach-metric-heading">
+        <div><h2>Changes · Change rate</h2><p class="muted">Percentage of solved positions with any context, move-type, or learning-motif correction. Each position counts once.</p></div>
+        <label class="coach-chart-category">Group by
+          <select id="coach-changes-group" aria-label="Group taxonomy changes by">
+            <option value="motif">Primary learning motif</option>
+              <option value="opening">Opening</option>
+              <option value="context">Position context</option>
+              <option value="move_type">Move type</option>
+              <option value="learning_mode">Learning mode</option>
+              <option value="lesson">Lesson</option>
+              <option value="game_list">Game list</option>
+              <option value="version">Coach version</option>
+            <option value="taxonomy_field">Changed field</option>
+          </select>
+        </label>
+      </div>
+      <p class="muted coach-metric-help" id="coach-changes-help">Each bar is changed solved positions / all solved positions in the category.</p>
+      <div class="coach-chart-axis" aria-hidden="true"><span>0%</span><span>25%</span><span>50%</span><span>75%</span><span>100%</span></div>
+      <div id="coach-changes-chart" aria-live="polite"></div>
+    </section>
+    <section class="glass analytics-table-panel coach-metric-panel" aria-label="Feedback approval rates by category">
+      <div class="coach-metric-heading">
+        <div><h2>Approvals · Approval rate</h2><p class="muted">Percentage of rated solved positions with thumbs-up feedback. Unrated positions are excluded from this denominator.</p></div>
+        <label class="coach-chart-category">Group by
+          <select id="coach-approval-group" aria-label="Group feedback approvals by">
+            <option value="feedback_area">Feedback area</option>
+            <option value="motif">Primary learning motif</option>
+              <option value="opening">Opening</option>
+              <option value="context">Position context</option>
+              <option value="move_type">Move type</option>
+              <option value="learning_mode">Learning mode</option>
+              <option value="lesson">Lesson</option>
+              <option value="game_list">Game list</option>
+              <option value="version">Coach version</option>
+          </select>
+        </label>
+      </div>
+      <p class="muted coach-metric-help" id="coach-approval-help">Default: Training positions, Explanations, and Chat coaching. Chat is shown here, but its separate headline card is hidden.</p>
+      <div class="coach-chart-axis" aria-hidden="true"><span>0%</span><span>25%</span><span>50%</span><span>75%</span><span>100%</span></div>
+      <div id="coach-approval-chart" aria-live="polite"></div>
     </section>
     <section class="glass analytics-export-guide" aria-label="Coaching development dataset">
-      <div><h2>Coaching development dataset</h2><p>Export filtered thumbs-up and thumbs-down examples for training-position quality, explanation accuracy, motif relevance and chat-response usefulness. Each CSV row has a stable position ID and the evidence needed to revisit the decision.</p></div>
-      <p class="muted">Ratings are the latest vote per item. The <strong>content_snapshot</strong> is what was rated; <strong>current_explanation</strong> and current motif fields may have changed after model revisions. The export includes suggested_text, suggested_motif_key, and suggested_motif_name for downvotes, alongside FENs and engine variations (but not complete PGNs). Switching a rating to thumbs-up clears its correction. Regression candidates include only downvotes with saved corrections; they are user-proposed examples, not independently verified chess truth.</p>
+      <div><h2>Coaching development dataset</h2><p>Export thumbs for position relevance, explanations and chat, plus taxonomy selections with both the at-selection coach prediction and the latest current comparison. Earlier retired-category ratings are retained in CSV for backward compatibility. Each CSV row has a stable position ID and the evidence needed to revisit the decision.</p></div>
+      <p class="muted">Coach versions are recorded at feedback time for new ratings and taxonomy selections. Older chat/taxonomy records without a saved version use the current position version. Refreshing metadata does not remove historical feedback snapshots. Ratings are the latest vote per item. The <strong>content_snapshot</strong> is what was rated; <strong>current_explanation</strong> and current motif fields may have changed after model revisions. The export includes suggested_text, suggested_motif_key, and suggested_motif_name for downvotes, alongside FENs and engine variations (but not complete PGNs). Switching a rating to thumbs-up clears its correction. Regression candidates include corrected taxonomy choices and downvotes with saved corrections; they are user-proposed examples, not independently verified chess truth.</p>
     </section>
-    <section class="glass analytics-table-panel analytics-records-panel"><div class="analytics-records-heading"><div><h2>Recent feedback</h2><p class="muted">Up to 80 recent ratings. CSV exports every matching rating, its original feedback snapshot, current coaching text, FEN, Stockfish lines, evaluation, motifs, and version metadata for reproducible review.</p></div><span id="analytics-record-count" class="eyebrow"></span></div><div class="analytics-table-scroll"><table class="analytics-table" id="analytics-records"><thead><tr><th>Type</th><th>Vote</th><th>Suggested correction</th><th>Game list</th><th>Lesson / motif</th><th>Opening</th><th>Position</th><th>Updated</th></tr></thead><tbody></tbody></table></div></section>
+    <section class="glass analytics-table-panel analytics-records-panel"><div class="analytics-records-heading"><div><h2>Recent feedback</h2><p class="muted">Up to 80 recent ratings. CSV exports every matching rating, its original feedback snapshot, current coaching text, FEN, Stockfish lines, evaluation, motifs, and version metadata for reproducible review.</p></div><span id="analytics-record-count" class="eyebrow"></span></div><div class="analytics-table-scroll"><table class="analytics-table" id="analytics-records"><thead><tr><th>Type</th><th>Feedback</th><th>Selected label / correction</th><th>Game list</th><th>Lesson / motif</th><th>Opening</th><th>Position</th><th>Updated</th></tr></thead><tbody></tbody></table></div></section>
   </div>
 </section>
 <script src="{{ url_for('static', filename='analytics.js') }}"></script>

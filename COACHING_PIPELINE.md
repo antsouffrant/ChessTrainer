@@ -2,7 +2,7 @@
 
 ## Source of truth
 
-`analysis.py` owns Stockfish scores, candidate move selection, PVs and the persisted training-position record. It does **not** infer that a PV proves every possible reply. The list's retrieved PGN is the immutable input to a new analysis run. `decision_context.py`, `critical_moments.py` and `pv_reasoning.py` calculate legal tactical facts and the short-root consequences of the game move and alternative. `semantic_coaching.py` ranks these findings and selects **one demonstrated chess idea**. `coaching_language.py` standardizes game-specific, evidence-aware sentences. `coaching.py` produces the pre-solve hint and post-solve explanation, using the causal finding first and conservative fallbacks where no single idea is established. `learning.py` classifies motifs using this evidence; `motif_relevance.py` discounts remote, tangential motifs. `metadata_refresh.py` regenerates labels and wording from already-saved analysis rather than rerunning Stockfish.
+`analysis.py` owns Stockfish scores, candidate move selection, PVs and the persisted training-position record. It does **not** infer that a PV proves every possible reply. The list's retrieved PGN is the immutable input to a new analysis run. `decision_context.py`, `critical_moments.py` and `pv_reasoning.py` calculate legal tactical facts and the short-root consequences of the game move and alternative. `semantic_coaching.py` ranks these findings and selects **one demonstrated chess idea**. `coaching_language.py` standardizes game-specific, evidence-aware sentences. `coaching.py` produces the pre-solve hint and post-solve explanation, using the causal finding first and conservative fallbacks where no single idea is established. `learning.py` classifies motifs using this evidence; `motif_relevance.py` discounts remote, tangential motifs. `metadata_refresh.py` regenerates labels and wording from saved root evaluations plus new bounded Stockfish reply probes (v65); it does not re-screen games.
 
 ## Evidence strength and language
 
@@ -34,7 +34,7 @@ The classifier now distinguishes **the source of the vulnerability**, not merely
 | --- | --- | --- | --- | --- |
 | Pause / resume | Continues last checkpoint | Preserved | Preserved | Preserved |
 | Analyze again | Adds a deeper pass | Preserved and enriched | Preserved | Preserved |
-| Refresh Metadata | Not rerun | Same IDs and evaluations; regenerated labels/text | Preserved | Preserved |
+| Refresh Metadata | New Stockfish coaching probes; **deep root scores preserved** | Same IDs and evaluations; regenerated labels/text | Preserved | Preserved |
 | **Restart Analysis** | Recomputed from game one with current settings | **Deleted and regenerated** | **Deleted for that list** | **Preserved** |
 | **Coach → Reset feedback** | Not rerun | Preserved | **Thumbs ratings removed** (selected list or all) | Preserved |
 
@@ -77,3 +77,18 @@ in many positions: complexity is not a target metric. Position selection has
 not been broadened in this iteration because relevance feedback remains
 strong (86/87 rated positions approved). The single negative position is a
 review case, not evidence for a broad exclusion rule.
+
+## v65: proactive Stockfish coaching
+
+`proactive_coaching.py` builds contextual hypotheses around each retained
+training position and asks Stockfish to calculate replies to the recommended
+and actual/contrast moves. During Analyze the probes run only on retained
+positions; during Refresh Metadata they run as a separate engine-backed process
+without repeating screening or deep confirmation. Scored legal lines, root
+board context, and close-range demonstrated mechanisms are kept in
+`training_positions.proactive_coach_json` and exported with Coach feedback.
+The common `prefer_evidenced_primary` rule is also used in the offline
+regression evaluator; `trusted_probe_explanation` will refine generic prose
+only when a short demonstrated refutation is better supported. The original
+saved root evaluations and puzzle selection remain authoritative.
+See `PROACTIVE_COACHING.md` for budgets, error handling and limitations.

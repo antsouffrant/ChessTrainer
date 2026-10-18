@@ -5,8 +5,8 @@
   <header class="lesson-detail-hero glass">
     <div class="lesson-detail-copy">
       <a class="lesson-detail-back" href="{{ url_for('lessons', job_id=job_id) }}">← All lessons</a>
-      <div class="lesson-family {% if lesson.source != 'built_in' %}personal{% endif %}">{{ lesson.family }}{% if lesson.source != 'built_in' %} · PERSONAL{% endif %}</div>
-      <h1>{{ lesson.name }}</h1>
+      <div class="lesson-family {% if lesson.source != 'built_in' %}personal{% endif %}">{{ (lesson_taxonomy_contexts + lesson_taxonomy_move_types)|join(' · ') or lesson.family }}{% if lesson.source != 'built_in' %} · PERSONAL{% endif %}</div>
+      <h1 id="lesson-detail-title">{{ lesson.name }}</h1>
       <p class="lede">{{ lesson.description }}</p>
     </div>
     <div class="lesson-detail-actions">
@@ -43,7 +43,7 @@
       <div>
         <div class="eyebrow">LESSON POSITIONS</div>
         <h2>Review this lesson</h2>
-        <p class="muted">Filter, select, and update learning status across all matching positions, then save your changes.</p>
+        <p class="muted">Filter by context, move type, and specific primary motif; select positions and save your learning progress.</p>
       </div>
       <div class="lesson-list-actions">
         <button id="position-select-all" class="secondary-button" type="button">Select all filtered</button>
@@ -52,9 +52,25 @@
     </div>
 
     <div class="lesson-detail-toolbar">
-      <label>Learning motif
+      <label>Primary learning motif
         <select id="position-concept-filter">
+          <option value="all">All primary motifs</option>
           {% for option in lesson_options %}<option value="{{ option.key }}" {% if option.key == lesson.key %}selected{% endif %}>{{ option.name }}</option>{% endfor %}
+        </select>
+      </label>
+      <label>Coaching context
+        <select id="position-context-filter">
+          <option value="all">Attack or defend</option>
+          <option value="attack">Attacking Plans</option>
+          <option value="defend">Defensive Resources</option>
+        </select>
+      </label>
+      <label>Move type
+        <select id="position-move-type-filter">
+          <option value="all">All move types</option>
+          <option value="general">General learning motifs</option>
+          <option value="tactical">Tactical Calculation</option>
+          <option value="strategic">Strategic Comprehension</option>
         </select>
       </label>
       <label>Status

@@ -11,11 +11,13 @@ from decision_context import decision_facts
 from semantic_coaching import evidence_findings
 from causal_selection import primary_causal_finding, finding_score
 from loose_piece_provenance import differential_loss_motif, confirmed_differential_loss
+from check_response import blocking_response
 from motif_relevance import select_relevant_primary
 from motif_hierarchy import choose_specific, validate_ontology
+from coaching_taxonomy import validate_taxonomy
 from pv_reasoning import fork_evidence, legal_pv, comparative_insight
 
-CLASSIFIER_VERSION = '2.9-evidence-and-purpose'
+CLASSIFIER_VERSION = '3.1-blocking-distinct-motifs'
 
 # A deliberately compact curriculum: these are common, teachable amateur
 # failure modes that we can identify with reasonably explainable board rules.
@@ -27,6 +29,7 @@ CONCEPT_CATALOG = [
     {'key': 'tactical_combination', 'name': 'Tactical Combination', 'family': 'Tactics', 'description': 'Calculate a sequence whose tactical payoff emerges only after the opponent replies.', 'priority': 91},
     {'key': 'fork', 'name': 'Double Attack', 'family': 'Tactics', 'description': 'Create two important threats with one move.', 'priority': 92},
     {'key': 'pin', 'name': 'Pin', 'family': 'Tactics', 'description': 'Exploit a piece that cannot move without exposing something more valuable.', 'priority': 91},
+    {'key': 'blocking', 'name': 'Blocking', 'family': 'Defense', 'description': 'Interpose a piece to stop a check or interrupt a rook, bishop, or queen attack on valuable material.', 'priority': 93},
     {'key': 'skewer', 'name': 'Skewer', 'family': 'Tactics', 'description': 'Force a valuable piece away to expose the target behind it.', 'priority': 90},
     {'key': 'discovered_attack', 'name': 'Discovered Attack', 'family': 'Tactics', 'description': 'Move one piece to uncover an attack from another.', 'priority': 89},
     {'key': 'deflection', 'name': 'Distraction / Deflection', 'family': 'Tactics', 'description': 'Draw a defender away so its former target becomes vulnerable in the continuation.', 'priority': 89},
@@ -37,34 +40,65 @@ CONCEPT_CATALOG = [
     {'key': 'exchange_sacrifice', 'name': 'Exchange Sacrifice', 'family': 'Tactics', 'description': 'Give a rook for a bishop or knight to gain compensation.', 'priority': 94},
     {'key': 'exchange', 'name': 'Piece Exchange', 'family': 'Tactics', 'description': 'Recognize captures and recaptures, and distinguish favorable trades from winning a free piece.', 'priority': 82},
     {'key': 'hanging_piece', 'name': 'Attack Loose Pieces', 'family': 'Tactics', 'description': 'Create a new threat against enemy material and realize it in a near-term continuation.', 'priority': 84},
-    {'key': 'capture_loose_piece', 'name': 'Capture Loose Pieces', 'family': 'Tactics', 'description': 'Notice and capture an already-undefended enemy piece in the training position.', 'priority': 88},
+    {'key': 'capture_loose_piece', 'name': 'Capture Hanging Pieces', 'family': 'Tactics', 'description': 'Notice and capture an already-undefended enemy piece in the training position.', 'priority': 88},
     {'key': 'dont_hang_pieces', 'name': "Don't Hang Pieces", 'family': 'Defense', 'description': 'Avoid moving a piece onto an undefended square where the opponent can win it.', 'priority': 96},
-    {'key': 'lost_material', 'name': 'Lost Material', 'family': 'Defense', 'description': 'Recognize the direct material cost of the game move without mislabeling it as a pre-existing loose piece.', 'priority': 86},
+    {'key': 'lost_material', 'name': 'Material Loss', 'family': 'Defense', 'description': 'Recognize a demonstrated loss due to a moved defender, exchange, or other continuation; not a newly hung mover or a pre-existing loose piece.', 'priority': 86},
     {'key': 'missed_capture', 'name': 'Win Material', 'family': 'Tactics', 'description': 'Take a favorable capture before choosing a quieter move.', 'priority': 78},
     {'key': 'promotion_tactic', 'name': 'Promotion', 'family': 'Tactics', 'description': 'Use forcing pawn advances and promotion threats to decide the position.', 'priority': 85},
     {'key': 'attack_building', 'name': 'Build the Attack', 'family': 'Tactics', 'description': 'Create forcing threats that keep the opponent reacting.', 'priority': 74},
     {'key': 'counterattack', 'name': 'Counterattack', 'family': 'Tactics', 'description': 'Answer an opponent threat by creating an equal or stronger threat of your own.', 'priority': 75},
     {'key': 'simplification', 'name': 'Simplify', 'family': 'Strategy', 'description': 'Trade pieces when exchanges reduce danger or make an advantage easier to convert.', 'priority': 73},
     {'key': 'king_safety', 'name': 'King Safety', 'family': 'Defense', 'description': 'Address direct king danger before pursuing slower plans.', 'priority': 72},
-    {'key': 'mate_defense', 'name': 'Stop the Mate', 'family': 'Defense', 'description': 'Recognize and neutralize a mating threat immediately.', 'priority': 99},
+    {'key': 'mate_defense', 'name': 'Stop Checkmate', 'family': 'Defense', 'description': 'Recognize and neutralize a mating threat immediately.', 'priority': 99},
     {'key': 'threat_awareness', 'name': 'See the Threat', 'family': 'Defense', 'description': 'Identify what the opponent is threatening before you choose a move.', 'priority': 94},
-    {'key': 'loose_piece_awareness', 'name': 'Protect Loose Pieces', 'family': 'Defense', 'description': 'Save a piece that was already loose in the training position and whose loss the better move prevents.', 'priority': 93},
+    {'key': 'loose_piece_awareness', 'name': 'Defend Loose Pieces', 'family': 'Defense', 'description': 'Protect an already attacked and undefended piece at the root, when the improved continuation avoids its demonstrated loss.', 'priority': 93},
     {'key': 'defensive_resource', 'name': 'Defensive Resource', 'family': 'Defense', 'description': 'Find active or simplifying moves that keep a difficult position playable.', 'priority': 80},
     {'key': 'piece_development', 'name': 'Develop Pieces', 'family': 'Strategy', 'description': 'Bring minor pieces into the game efficiently instead of losing opening tempi.', 'priority': 58},
     {'key': 'pawn_structure', 'name': 'Pawn Structure', 'family': 'Strategy', 'description': 'Create an identifiable weakness such as doubled or isolated pawns, or avoid one yourself.', 'priority': 66},
     {'key': 'space_advantage', 'name': 'Space Advantage', 'family': 'Strategy', 'description': 'Gain sustainable control of squares in the opponent’s territory.', 'priority': 54},
-    {'key': 'pawn_break', 'name': 'Pawn Break', 'family': 'Strategy', 'description': 'Challenge the pawn structure at the right moment to open useful lines.', 'priority': 64},
-    {'key': 'piece_activity', 'name': 'Improve Activity', 'family': 'Strategy', 'description': 'Place pieces on squares where they influence more of the position.', 'priority': 55},
-    {'key': 'piece_coordination', 'name': 'Coordinate Pieces', 'family': 'Strategy', 'description': 'Improve how your pieces defend one another and combine on key squares.', 'priority': 57},
+    {'key': 'pawn_break', 'name': 'Pawn Breaks', 'family': 'Strategy', 'description': 'Challenge the pawn structure at the right moment to open useful lines.', 'priority': 64},
+    {'key': 'piece_activity', 'name': 'Piece Activity', 'family': 'Strategy', 'description': 'Place pieces on squares where they influence more of the position.', 'priority': 55},
+    {'key': 'piece_coordination', 'name': 'Piece Coordination', 'family': 'Strategy', 'description': 'Improve how your pieces defend one another and combine on key squares.', 'priority': 57},
     {'key': 'passed_pawn', 'name': 'Passed Pawn', 'family': 'Endgames', 'description': 'Create, support, or advance a passed pawn when it becomes the main plan.', 'priority': 70},
     {'key': 'king_activity', 'name': 'Activate the King', 'family': 'Endgames', 'description': 'Use the king as an active fighting piece once the position simplifies.', 'priority': 68},
     {'key': 'endgame_precision', 'name': 'Endgame Conversion', 'family': 'Endgames', 'description': 'Find a move that preserves a tablebase-verified win or draw, rather than allowing the result to slip.', 'priority': 98},
     {'key': 'opposition_zugzwang', 'name': 'Opposition & Zugzwang', 'family': 'Endgames', 'description': 'Use king opposition and spare tempi to force the opponent backward.', 'priority': 76},
-    {'key': 'calculation', 'name': 'Forcing-Move Scan', 'family': 'Calculation', 'description': 'Check forcing moves and calculate one move deeper before committing.', 'priority': 20},
+    {'key': 'initiative', 'name': 'Initiative', 'family': 'Tactics', 'description': 'Keep an opponent responding to credible threats; requires verified initiative evidence.', 'priority': 71},
+    {'key': 'vacating_squares', 'name': 'Vacating Squares', 'family': 'Strategy', 'description': 'Move a piece to free a critical square for another piece or pawn; requires a verified follow-up.', 'priority': 61},
+    {'key': 'calculation', 'name': 'Forcing Moves', 'family': 'Calculation', 'description': 'Check forcing moves and calculate one move deeper before committing.', 'priority': 20},
 ]
+
+# Public curriculum is canonical; historical detector keys remain as retired
+# catalog rows so user ratings, personal coaching claims and saved exports survive.
+from coaching_taxonomy import EVALUATION_OUTCOMES, RETIRED_KEYS, TACTICAL, STRATEGIC
+for item in CONCEPT_CATALOG:
+    item['status'] = 'retired' if item['key'] in RETIRED_KEYS else 'seeded'
+    if item['key'] == 'king_activity':
+        item['name'] = 'King Activity'
+    if item['key'] == 'discovered_attack':
+        item['name'] = 'Discovery'
+    if item['key'] == 'lost_material':
+        item['name'] = 'Material Loss'
+    if item['key'] == 'passed_pawn':
+        item['name'] = 'Passed Pawn'
+    if item['key'] == 'deflection':
+        item['name'] = 'Distraction / Deflection'
+    if item['key'] in TACTICAL:
+        item['family'] = 'Tactical Calculation'
+    elif item['key'] in STRATEGIC:
+        item['family'] = 'Strategic Comprehension'
+    else:
+        item['family'] = 'General' if item['status'] != 'retired' else item['family']
+for key, title in EVALUATION_OUTCOMES.items():
+    CONCEPT_CATALOG.append({
+        'key': key, 'name': title, 'family': 'Evaluation',
+        'description': 'The saved engine evaluation identifies the outcome of the game decision; no more specific supported learning mechanism was established.',
+        'priority': 10, 'status': 'seeded',
+    })
 
 CONCEPTS = {item['key']: item for item in CONCEPT_CATALOG}
 validate_ontology(CONCEPTS)
+validate_taxonomy(CONCEPTS)
 
 PIECE_VALUES = {
     chess.PAWN: 1,
@@ -419,6 +453,13 @@ def classify_learning_concepts(
                 add('trapped_piece', 0.82, f'{best_san} attacks a valuable piece with almost no legal escape squares.')
                 break
 
+    # Blocking is a concrete defensive action: a legal interposition between
+    # a sliding attacker and a king or valuable threatened piece. Do not label
+    # routine captures, king escapes or hypothetical attacks as Blocking.
+    blocking = blocking_response(board, best_move)
+    if blocking:
+        add('blocking', 0.98 if blocking['kind'] == 'check' else 0.90, blocking['evidence'])
+
     # King safety and development.
     if best_is_castling:
         add('king_safety', 0.98, f'{best_san} castles and improves king safety.')
@@ -568,7 +609,16 @@ def classify_learning_concepts(
     # A genuine checking fork is forcing in one move; a quieter double attack
     # needs a safe attacker AND supporting actions in the stored PV.
     concrete_primary = None
-    if fork and fork['strong'] and not exchanged_at_root:
+    discovered_verified = bool(discoveries and (
+        discoveries[0]['kind'] == 'discovered_check'
+        or any(d['kind'] == 'legal_capture_allows_followup'
+               for d in context['discovered_reply_checks'])))
+    if discovered_verified and not exchanged_at_root:
+        # The threat originates with a stationary slider newly uncovered by
+        # the mover. A simultaneous moved-piece attack is not automatically
+        # the decisive mechanism, even when both shapes occur on the board.
+        concrete_primary = 'discovered_attack'
+    elif fork and fork['strong'] and not exchanged_at_root:
         names = ' and '.join(f'{chess.piece_name(pc.piece_type)} on {chess.square_name(sq)}'
                              for sq, pc in fork['targets'][:2])
         add('fork', 0.98 if fork['line_supported'] else 0.94,
@@ -606,6 +656,15 @@ def classify_learning_concepts(
         concrete_primary = 'missed_capture'
     if check_evasion and not any(d['kind'] == 'discovered_check' for d in discoveries):
         concrete_primary = check_evasion['motif']
+    elif blocking and not forced_primary:
+        # Interrupting a real attack on material outranks an incidental
+        # geometric fork or a generic improve-activity observation.
+        concrete_primary = 'blocking'
+    if (blocking and blocking['kind'] == 'check'
+            and forced_primary == 'mate_defense' and check_evasion):
+        # Still preserve the Stop Checkmate label as secondary evidence, but
+        # teach the concrete blocking maneuver as the primary lesson.
+        forced_primary = 'blocking'
 
     contextual_primary = context['primary_key']
     if contextual_primary and contextual_primary not in labels and contextual_primary in CONCEPTS:
@@ -751,6 +810,19 @@ def classify_learning_concepts(
         labels.pop('loose_piece_awareness', None)
     if not verified_attack:
         labels.pop('hanging_piece', None)
+    # A discovered attack is generated by a *different stationary piece*,
+    # whereas a double attack comes from the moved attacker. When both
+    # shapes are present, prefer the verified unique revelation over a
+    # generic two-target observation; do not override a distinct free capture.
+    if (discovered_verified and 'discovered_attack' in labels and chosen == 'fork'
+            and not forced_primary):
+        chosen = 'discovered_attack'
+    # A verified blocking maneuver is more instructive than a generic
+    # defensive context or an inconclusive forcing-move scan.
+    if blocking and chosen in {'defensive_resource', 'king_safety',
+                               'threat_awareness', 'calculation'}:
+        chosen = 'blocking'
+
     # A free root capture is *not* an attack that the answer creates. The
     # loose enemy piece was available before either candidate move.
     if root_evidence and root_evidence.get('kind') == 'free_capture':

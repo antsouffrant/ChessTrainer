@@ -45,6 +45,7 @@ def normalize(row):
         'played_move_san': row.get('played_move_san') or '',
         'critical_events_json': row.get('critical_events_json') or '',
         'explanatory_lines_json': row.get('explanatory_lines_json') or '',
+        'proactive_coach_json': row.get('proactive_coach_json') or '',
         'played_move_uci': row.get('played_move_uci') or '',
         'best_move_uci': row.get('best_move_uci') or '',
         'best_pv_uci': row.get('best_pv_uci') or '',
@@ -69,6 +70,7 @@ def analyze(rows):
         import chess
         from learning import classify_learning_concepts
         from coaching import generate_coaching_text
+        from proactive_coaching import prefer_evidenced_primary
     except ImportError as exc:
         raise RuntimeError('Install dependencies from requirements.txt before evaluating chess positions') from exc
     outcomes = []
@@ -101,6 +103,7 @@ def analyze(rows):
                 best_pv_uci=pv(rec['best_pv_uci']), played_pv_uci=pv(rec['played_pv_uci']),
                 previous_fen=rec['previous_fen'] or None,
                 opponent_move_uci=rec['opponent_move_uci'] or None)
+            labels = prefer_evidenced_primary(board, labels, rec['proactive_coach_json'])
             result['predicted_motif'] = next((x.key for x in labels if x.is_primary), '')
             if rec['feedback_type'] == 'motif':
                 if rec['rating'] < 0 and rec['suggested_motif']:
@@ -117,12 +120,20 @@ def analyze(rows):
                     played_pv_uci=pv(rec['played_pv_uci']),
                     best_pv_uci=pv(rec['best_pv_uci']),
                     labels=labels, category=rec['category'],
+                    taxonomy_path=(__import__('coaching_taxonomy').assign_taxonomy(
+                        next((x.key for x in labels if x.is_primary), labels[0].key),
+                        category=rec['category'],
+                        learning_mode=rec.get('learning_mode') or '',
+                        is_in_check=board.is_check(),
+                        root_best_is_check=(best in board.legal_moves and board.gives_check(best)))
+                        if labels else None),
                     mate_before=int(rec['mate_before']) if rec['mate_before'] else None,
                     eval_before_cp=int(float(rec['eval_before_cp'])) if rec['eval_before_cp'] else None,
                     eval_after_cp=int(float(rec['eval_after_cp'])) if rec['eval_after_cp'] else None,
                     alternative_pvs_json=pv(rec['alternative_pvs_json']),
                     critical_events_json=rec['critical_events_json'] or None,
-                    explanatory_lines_json=rec['explanatory_lines_json'] or None)
+                    explanatory_lines_json=rec['explanatory_lines_json'] or None,
+                    proactive_coach_json=rec['proactive_coach_json'] or None)
                 result['predicted_explanation'] = explanation
                 result['explanation_has_boilerplate'] = str(bool(re.search(
                     r'analyzed continuation|Why .+ falls short|Stockfish evaluates', explanation, re.I))).lower()

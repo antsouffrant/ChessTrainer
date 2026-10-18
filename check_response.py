@@ -83,6 +83,53 @@ def check_response(board: chess.Board, move: chess.Move) -> dict | None:
     return {'kind': kind, 'checker_square': checker_sq,
             'checker_type': checker.piece_type if checker else None,
             'trade': trade, 'evidence': sentence,
-            'motif': ('simplification' if trade and trade['equal_value']
-                      else 'defensive_resource' if kind in {'interpose', 'capture_checker'}
-                      else 'king_safety')}
+            'motif': ('blocking' if kind == 'interpose' else
+                      'defensive_resource' if kind == 'capture_checker' else 'king_safety')}
+
+
+def blocking_response(board: chess.Board, move: chess.Move) -> dict | None:
+    """Evidence of a *legal interposition*, not mere defensive geometry.
+
+    A blocking piece must occupy a square between an opposing sliding attacker
+    and the same valuable friendly target that the attacker threatened at root.
+    After the move the target must survive and that specific line must be cut.
+    This also handles blocking check through ``check_response``.
+    """
+    if move not in board.legal_moves:
+        return None
+    evasion = check_response(board, move)
+    if evasion and evasion['kind'] == 'interpose':
+        return {'motif': 'blocking', 'evidence': evasion['evidence'], 'kind': 'check'}
+    if board.is_check() or board.is_capture(move):
+        return None
+    moving = board.piece_at(move.from_square)
+    if not moving or moving.piece_type == chess.KING:
+        return None
+    after = board.copy(stack=False)
+    after.push(move)
+    # A freshly sacrificed interposing piece does not by itself establish a
+    # successful defense: require either a defender or no immediate attack.
+    if after.is_attacked_by(not board.turn, move.to_square) and not after.is_attacked_by(board.turn, move.to_square):
+        return None
+    for target_sq, target_piece in board.piece_map().items():
+        if target_piece.color != board.turn or target_piece.piece_type in {chess.PAWN, chess.KING}:
+            continue
+        if target_sq == move.from_square:
+            continue
+        for attacker_sq in board.attackers(not board.turn, target_sq):
+            attacker = board.piece_at(attacker_sq)
+            if not attacker or attacker.piece_type not in SLIDERS:
+                continue
+            if not chess.between(attacker_sq, target_sq) & chess.BB_SQUARES[move.to_square]:
+                continue
+            if after.piece_at(target_sq) != target_piece:
+                continue
+            if after.is_attacked_by(not board.turn, target_sq) and attacker_sq in after.attackers(not board.turn, target_sq):
+                continue
+            return {'motif': 'blocking', 'kind': 'material',
+                    'evidence': (f'{board.san(move)} blocks the '
+                                 f'{chess.piece_name(attacker.piece_type)} on '
+                                 f'{chess.square_name(attacker_sq)} from attacking '
+                                 f'your {chess.piece_name(target_piece.piece_type)} '
+                                 f'on {chess.square_name(target_sq)}.')}
+    return None

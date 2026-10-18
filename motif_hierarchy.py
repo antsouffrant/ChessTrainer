@@ -23,6 +23,7 @@ MOTIF_PARENTS = {
     'fork': ('tactical_combination', 'threat_awareness', 'attack_building'),
     'skewer': ('tactical_combination', 'threat_awareness'),
     'pin': ('tactical_combination', 'piece_coordination'),
+    'blocking': ('threat_awareness', 'defensive_resource'),
     'discovered_attack': ('tactical_combination', 'attack_building'),
     'deflection': ('tactical_combination',),
     'removal_of_defender': ('tactical_combination', 'threat_awareness'),

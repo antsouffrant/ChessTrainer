@@ -215,3 +215,18 @@ A suggested correction is only a candidate until a chess-legal and semantic
 review confirms it. New changes should pass checks for factual correctness,
 novel corrected cases, **preservation of approved cases**, and independent
 unseen-game review before claims of measured improvement.
+
+## v65: comparing Stockfish-tested coaching evidence
+
+Fresh Coach exports include `proactive_coach_json` alongside the originally
+saved root PVs and evaluation scores. The offline evaluator replays the saved
+coaching probes without starting Stockfish, making both approved and rejected
+feedback reproducible. Old benchmark cases without probe evidence remain
+usable, and their historical explanations and labels stay unchanged. A new
+engine line does not automatically establish forced play or prove an accuracy
+improvement; evaluate changed positive cases and user-proposed corrections
+independently.
+
+## v73: Historical coaching versions in feedback
+
+The Coach version facet and version-filtered CSV now include historic `position_feedback.coaching_version` snapshots, even after `training_positions.coaching_version` is overwritten by a refresh. New chat ratings and taxonomy selections also store `coaching_version_at_vote`. All four feedback sources share `report_coaching_version`; `coaching_version_source` explains whether it was an actual snapshot or the mutable current-position fallback for pre-v73 legacy rows. The filter never recreates votes superseded by a later rating or taxonomy selection. Taxonomy change rates remain calculated against *current* solved-position classifications and do not imply historical per-version results.

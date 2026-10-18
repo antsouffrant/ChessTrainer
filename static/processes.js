@@ -29,6 +29,43 @@
     return {kind:null,status:'idle'};
   }
 
+  const parsePerf = raw => {
+    try { return typeof raw === 'string' ? (JSON.parse(raw) || {}) : (raw || {}); }
+    catch { return {}; }
+  };
+  const secondsText = n => n < 60 ? `${n.toFixed(1)}s` : `${(n/60).toFixed(1)}m`;
+  const duration = (start, end) => {
+    if (!start || !end) return null;
+    // SQLite timestamps lack timezone; UTC is used consistently for durations.
+    const ms = Date.parse(String(end).replace(' ', 'T') + 'Z') - Date.parse(String(start).replace(' ', 'T') + 'Z');
+    return Number.isFinite(ms) && ms >= 0 ? ms / 1000 : null;
+  };
+  function diagnostics(j, kind) {
+    if (kind === 'retrieve') {
+      const perf = parsePerf(j.retrieval_perf);
+      const parts = [['Lichess transfer', perf.transfer_seconds], ['PGN indexing', perf.pgn_count_seconds]]
+        .filter(([,val]) => Number(val) > 0).map(([name,val]) => `${name} ${secondsText(Number(val))}`);
+      if (parts.length) return parts.join(' · ');
+      const elapsed = duration(j.retrieval_started_at, j.retrieval_finished_at);
+      return elapsed == null ? '' : `Completed in ${secondsText(elapsed)}`;
+    }
+    const perf = parsePerf(kind === 'analyze' ? j.analysis_perf : j.refresh_perf);
+    if (kind === 'analyze') {
+      const parts = [['Screening', perf.screen_seconds], ['Deep evaluation', perf.deep_seconds],
+                     ['Reply checks', perf.reply_seconds], ['Coaching probes', perf.coaching_seconds],
+                     ['Metadata', perf.metadata_seconds]]
+        .filter(([,val]) => Number(val) > 0).map(([name,val]) => `${name} ${secondsText(Number(val))}`);
+      if (Number(perf.cached_games) > 0) parts.push(`${fmt(perf.cached_games)} cached games`);
+      return parts.join(' · ');
+    }
+    const parts = [['Stockfish probes', perf.engine_seconds], ['Metadata', perf.metadata_seconds]]
+      .filter(([,val]) => Number(val) > 0).map(([name,val]) => `${name} ${secondsText(Number(val))}`);
+    if (Number(perf.cached_probes) > 0) parts.push(`${fmt(perf.cached_probes)} reused`);
+    if (Number(perf.new_probes) > 0) parts.push(`${fmt(perf.new_probes)} new probes`);
+    if (Number(perf.probe_errors) > 0) parts.push(`${fmt(perf.probe_errors)} probe errors`);
+    return parts.join(' · ');
+  }
+
   function stage(j, kind) {
     const retrieval = kind === 'retrieve';
     const analysis = kind === 'analyze';
@@ -45,12 +82,16 @@
     const error = analysis ? j.analysis_error : j.refresh_error;
     const databaseBusy = /database (is )?(locked|busy)/i.test(String(error||''));
     const errorMessage = status === 'error' && error ? `<p class="process-error-history">The previous attempt failed: ${databaseBusy ? 'temporary database contention' : esc(error)}. Select ${analysis ? 'Start analysis' : 'Start refresh'} to retry.</p>` : '';
+    const diagnostic = diagnostics(j, kind);
+    const stageTitle = retrieval ? 'Games' : analysis ? 'Positions' : 'Coaching';
+    const stageSubtitle = retrieval ? 'Game Retrieval · Lichess' : analysis ? 'Position Evaluation · Stockfish' : 'Coaching Analysis · Stockfish + Coach';
     return `<section class="process-task ${active(status)?'process-task-live':''}" aria-label="${kind} stage">
-      <div class="process-task-heading"><h3>${retrieval?'Retrieval':analysis?'Analysis':'Metadata refresh'}</h3>
+      <div class="process-task-heading"><h3>${stageTitle}</h3>
         <span class="process-state ${esc(status)}">${!j.retrieval_status && retrieval ? 'Saved' : label(status)}</span></div>
       <div class="process-progress ${retrieval && active(status) && !total ? 'indeterminate':''}" role="progressbar"
         aria-label="${kind} progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${percentage}"><span style="width:${percentage}%"></span></div>
-      <p class="process-detail">${description}</p>${errorMessage}</section>`;
+      <p class="process-detail">${stageSubtitle} · ${description}</p>
+      ${diagnostic ? `<p class="process-detail process-timing">${esc(diagnostic)}</p>` : ''}${errorMessage}</section>`;
   }
 
   function renderControls(j) {
@@ -76,7 +117,7 @@
       j.analysis_status === 'paused' || j.analysis_status === 'stopped' || j.analysis_status === 'error' ? 'Resume analysis' : 'Start analysis';
     const refreshText = j.refresh_status === 'complete' ? 'Refresh again' : 'Start refresh';
     const detail = isRetrieving(j) ? 'Retrieving games' : j.analysis_status === 'restarting' ? 'Restarting analysis' : isAnalyzing(j) ? 'Analyzing games' :
-      isRefreshing(j) ? 'Refreshing metadata' : kind && paused ? `${title[0].toUpperCase()+title.slice(1)} paused` :
+      isRefreshing(j) ? 'Coaching analysis in progress' : kind && paused ? `${title[0].toUpperCase()+title.slice(1)} paused` :
       hasSavedBatch(j) ? 'Ready for processing' : 'Retrieval interrupted';
     const action = (actionName,txt,enabled) => `<button type="button" class="secondary-button process-operation"
       data-process-action="${actionName}" data-command="start" data-job-id="${j.id}" ${enabled?'':'disabled'}>${txt}</button>`;

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import time
 import requests
 
 from analysis import batch_path_for_job, count_games_in_batch, date_range_to_ms
@@ -45,6 +46,7 @@ def retrieve_game_list(job_id: int, *, on_complete=None, request_get=None) -> No
         url = f'https://lichess.org/api/games/user/{username}'
         headers = {'Accept':'application/x-chess-pgn', 'User-Agent':'personal-chess-trainer/1.1'}
         downloaded = 0
+        transfer_started = time.perf_counter()
         with request_get(url, params=params, headers=headers, stream=True, timeout=(15, 300)) as response:
             if response.status_code == 429:
                 raise RuntimeError('Lichess rate limit reached. Try again after at least one minute.')
@@ -74,7 +76,10 @@ def retrieve_game_list(job_id: int, *, on_complete=None, request_get=None) -> No
 
         if not temporary.is_file() or not temporary.stat().st_size:
             raise RuntimeError('No games were returned for the selected account, date range, and game types.')
+        transfer_seconds = time.perf_counter() - transfer_started
+        count_started = time.perf_counter()
         count = count_games_in_batch(temporary)
+        counting_seconds = time.perf_counter() - count_started
         if not count:
             raise RuntimeError('Lichess returned no PGN games for this game list.')
         with connect() as conn:
@@ -84,9 +89,19 @@ def retrieve_game_list(job_id: int, *, on_complete=None, request_get=None) -> No
             if not state or state['status'] != 'running' or state['job_status'] != 'waiting_for_games':
                 raise RetrievalCancelled()
             # Only completed batches are visible to the analysis process.
+            # Instrumentation cannot prevent an otherwise successful download
+            # on an unmigrated or minimal test database.
+            has_timings = any(col[1] == 'perf_json' for col in
+                              conn.execute('PRAGMA table_info(retrieval_processes)'))
             temporary.replace(destination)
-            conn.execute('''UPDATE retrieval_processes SET status='complete',error=NULL,
-                finished_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE job_id=?''', (job_id,))
+            if has_timings:
+                conn.execute("""UPDATE retrieval_processes SET status='complete',error=NULL,
+                    perf_json=?,finished_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE job_id=?""",
+                    (json.dumps({'transfer_seconds': transfer_seconds,
+                                 'pgn_count_seconds': counting_seconds}), job_id))
+            else:
+                conn.execute("""UPDATE retrieval_processes SET status='complete',error=NULL,
+                    finished_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE job_id=?""", (job_id,))
             conn.execute("""UPDATE analysis_jobs SET status='queued',games_retrieved=?,error=NULL
                 WHERE id=? AND status='waiting_for_games'""", (count, job_id))
             conn.commit()

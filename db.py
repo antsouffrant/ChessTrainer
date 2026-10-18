@@ -50,6 +50,7 @@ CREATE TABLE IF NOT EXISTS analysis_jobs (
     checkpoint_game_index INTEGER NOT NULL DEFAULT 0,
     checkpoint_file_offset INTEGER NOT NULL DEFAULT 0,
     positions_found INTEGER NOT NULL DEFAULT 0,
+    perf_json TEXT,
     error TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     finished_at TEXT,
@@ -65,6 +66,7 @@ CREATE TABLE IF NOT EXISTS retrieval_processes (
     status TEXT NOT NULL DEFAULT 'queued',
     bytes_downloaded INTEGER NOT NULL DEFAULT 0,
     bytes_total INTEGER NOT NULL DEFAULT 0,
+    perf_json TEXT,
     error TEXT,
     started_at TEXT,
     finished_at TEXT,
@@ -81,6 +83,7 @@ CREATE TABLE IF NOT EXISTS metadata_processes (
     updated INTEGER NOT NULL DEFAULT 0,
     failed INTEGER NOT NULL DEFAULT 0,
     without_pgn INTEGER NOT NULL DEFAULT 0,
+    perf_json TEXT,
     error TEXT,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY(job_id) REFERENCES analysis_jobs(id) ON DELETE CASCADE
@@ -165,6 +168,7 @@ CREATE TABLE IF NOT EXISTS training_positions (
     alternative_pvs_json TEXT,
     critical_events_json TEXT,
     explanatory_lines_json TEXT,
+    proactive_coach_json TEXT,
     coach_prompt TEXT,
     coach_explanation TEXT,
     coaching_version TEXT,
@@ -214,6 +218,21 @@ CREATE TABLE IF NOT EXISTS position_concepts (
 
 CREATE INDEX IF NOT EXISTS idx_position_concepts_concept
 ON position_concepts(concept_key, position_id);
+
+CREATE TABLE IF NOT EXISTS position_motif_taxonomy (
+    position_id INTEGER PRIMARY KEY,
+    context_key TEXT NOT NULL CHECK(context_key IN ('attack','defend')),
+    move_type_key TEXT CHECK(move_type_key IN ('tactical','strategic') OR move_type_key IS NULL),
+    motif_key TEXT NOT NULL,
+    confidence REAL NOT NULL DEFAULT 0.5,
+    evidence TEXT NOT NULL DEFAULT '',
+    taxonomy_version TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(position_id) REFERENCES training_positions(id) ON DELETE CASCADE,
+    FOREIGN KEY(motif_key) REFERENCES learning_concepts(key)
+);
+CREATE INDEX IF NOT EXISTS idx_position_motif_taxonomy_filters
+ON position_motif_taxonomy(context_key, move_type_key, motif_key, position_id);
 
 CREATE INDEX IF NOT EXISTS idx_training_positions_job_game
 ON training_positions(job_id, game_id);
@@ -310,6 +329,23 @@ CREATE INDEX IF NOT EXISTS idx_coach_messages_thread ON coach_messages(thread_id
 CREATE INDEX IF NOT EXISTS idx_coach_claims_position ON coach_claims(position_id, id);
 CREATE INDEX IF NOT EXISTS idx_concept_evidence_concept ON concept_evidence(concept_key, account_id);
 
+CREATE TABLE IF NOT EXISTS position_taxonomy_feedback (
+    position_id INTEGER NOT NULL,
+    account_id INTEGER NOT NULL,
+    field_key TEXT NOT NULL CHECK(field_key IN ('context','move_type','motif')),
+    selected_key TEXT NOT NULL,
+    model_key_at_vote TEXT NOT NULL,
+    taxonomy_version_at_vote TEXT,
+    coaching_version_at_vote TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY(position_id, field_key),
+    FOREIGN KEY(position_id) REFERENCES training_positions(id) ON DELETE CASCADE,
+    FOREIGN KEY(account_id) REFERENCES accounts(id)
+);
+CREATE INDEX IF NOT EXISTS idx_position_taxonomy_feedback_account
+ON position_taxonomy_feedback(account_id, field_key, selected_key);
+
 CREATE TABLE IF NOT EXISTS position_feedback (
     position_id INTEGER NOT NULL,
     account_id INTEGER NOT NULL,
@@ -337,6 +373,7 @@ CREATE TABLE IF NOT EXISTS coach_message_feedback (
     rating INTEGER NOT NULL CHECK(rating IN (-1, 1)),
     lesson_key TEXT,
     suggested_text TEXT,
+    coaching_version_at_vote TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY(message_id) REFERENCES coach_messages(id) ON DELETE CASCADE,
@@ -439,18 +476,17 @@ def _seed_learning_concepts(conn):
     for concept in CONCEPT_CATALOG:
         conn.execute('''
             INSERT INTO learning_concepts(key, name, family, description, priority, source, status)
-            VALUES (?, ?, ?, ?, ?, 'built_in', 'seeded')
+            VALUES (?, ?, ?, ?, ?, 'built_in', ?)
             ON CONFLICT(key) DO UPDATE SET
                 name = excluded.name,
                 family = excluded.family,
                 description = excluded.description,
-                priority = excluded.priority
+                priority = excluded.priority,
+                status = CASE WHEN learning_concepts.source = 'built_in'
+                              THEN excluded.status ELSE learning_concepts.status END
         ''', (
-            concept['key'],
-            concept['name'],
-            concept['family'],
-            concept['description'],
-            concept['priority'],
+            concept['key'], concept['name'], concept['family'],
+            concept['description'], concept['priority'], concept.get('status','seeded'),
         ))
 
 
@@ -463,9 +499,19 @@ def init_db():
             conn.execute('ALTER TABLE coach_message_feedback ADD COLUMN lesson_key TEXT')
         if 'suggested_text' not in _columns(conn, 'coach_message_feedback'):
             conn.execute('ALTER TABLE coach_message_feedback ADD COLUMN suggested_text TEXT')
+        if 'coaching_version_at_vote' not in _columns(conn, 'coach_message_feedback'):
+            conn.execute('ALTER TABLE coach_message_feedback ADD COLUMN coaching_version_at_vote TEXT')
+        if 'coaching_version_at_vote' not in _columns(conn, 'position_taxonomy_feedback'):
+            conn.execute('ALTER TABLE position_taxonomy_feedback ADD COLUMN coaching_version_at_vote TEXT')
+
+        if 'perf_json' not in _columns(conn, 'retrieval_processes'):
+            conn.execute('ALTER TABLE retrieval_processes ADD COLUMN perf_json TEXT')
+        if 'perf_json' not in _columns(conn, 'metadata_processes'):
+            conn.execute('ALTER TABLE metadata_processes ADD COLUMN perf_json TEXT')
 
         job_columns = _columns(conn, 'analysis_jobs')
         job_migrations = {
+            'perf_json': 'ALTER TABLE analysis_jobs ADD COLUMN perf_json TEXT',
             'screen_seconds': 'ALTER TABLE analysis_jobs ADD COLUMN screen_seconds REAL NOT NULL DEFAULT 3.0',
             'deep_seconds': 'ALTER TABLE analysis_jobs ADD COLUMN deep_seconds REAL NOT NULL DEFAULT 10.0',
             'current_pass': 'ALTER TABLE analysis_jobs ADD COLUMN current_pass INTEGER NOT NULL DEFAULT 1',
@@ -549,6 +595,7 @@ def init_db():
             'alternative_pvs_json': 'ALTER TABLE training_positions ADD COLUMN alternative_pvs_json TEXT',
             'critical_events_json': 'ALTER TABLE training_positions ADD COLUMN critical_events_json TEXT',
             'explanatory_lines_json': 'ALTER TABLE training_positions ADD COLUMN explanatory_lines_json TEXT',
+            'proactive_coach_json': 'ALTER TABLE training_positions ADD COLUMN proactive_coach_json TEXT',
             'coach_prompt': 'ALTER TABLE training_positions ADD COLUMN coach_prompt TEXT',
             'coach_explanation': 'ALTER TABLE training_positions ADD COLUMN coach_explanation TEXT',
             'coaching_version': 'ALTER TABLE training_positions ADD COLUMN coaching_version TEXT',

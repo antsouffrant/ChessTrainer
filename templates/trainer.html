@@ -114,15 +114,13 @@
         <div class="game-moves-result"><span>Your game moves</span><div id="played-moves-list" class="played-moves-list"></div></div>
         <div><span title="Provisional heuristic, not a calibrated Elo rating">Estimated puzzle rating · provisional</span><strong id="puzzle-rating">—</strong></div>
         <div class="concept-result-row rate-hover-zone" id="motif-feedback-area">
-          <div class="concept-motif-heading"><span>Learning motifs</span>
-            <div class="inline-feedback-votes hidden" data-feedback-category="motif" role="group" aria-label="Does the primary learning motif fit this position?">
-              <span class="rating-prompt">Primary motif fits?</span>
-              <button type="button" class="inline-rating-button" data-rating="1" aria-label="Primary learning motif fits" title="Primary learning motif fits">👍</button>
-              <button type="button" class="inline-rating-button" data-rating="-1" aria-label="Primary learning motif does not fit" title="Primary learning motif does not fit">👎</button>
-            <button type="button" class="feedback-edit-correction hidden" aria-label="Edit suggested correction" title="Edit suggested correction">Edit suggestion</button>
-            </div>
+          <div class="concept-motif-heading"><span>Coaching focus</span>
+
           </div>
           <span id="lesson-concepts" class="lesson-concepts hidden"></span>
+          <div id="taxonomy-feedback" class="taxonomy-feedback-note hidden" aria-label="Taxonomy feedback information">
+            <small id="taxonomy-feedback-status" role="status" aria-live="polite">Select a learning pill to suggest a label. Changes are saved as feedback only; the coach's analysis stays unchanged.</small>
+          </div>
         </div>
       </div>
 
@@ -195,9 +193,6 @@
     <p id="coaching-correction-help" class="muted"></p>
     <label id="coaching-correction-text-field">Your suggested improvement
       <textarea id="coaching-correction-text" rows="4" maxlength="6000" placeholder="Explain what the coach should have said…"></textarea>
-    </label>
-    <label id="coaching-correction-motif-field" hidden>Better primary learning motif
-      <select id="coaching-correction-motif"><option value="">Choose a learning motif…</option></select>
     </label>
     <p id="coaching-correction-error" class="correction-error" role="alert" hidden></p>
     <div class="correction-form-actions"><button type="button" id="coaching-correction-skip" class="secondary-button">Not now</button>

@@ -760,9 +760,9 @@ def copy_cached_positions(conn, account_id, game_id, source_job_id, target_job_i
                 played_move_uci, played_move_san, best_move_uci, best_move_san,
                 eval_before_cp, eval_after_cp, mate_before, mate_after,
                 centipawn_loss, difficulty_score, estimated_rating, difficulty_version,
-                best_pv_uci, played_pv_uci, alternative_pvs_json, critical_events_json, explanatory_lines_json, analysis_pass, analysis_screen_depth, analysis_deep_depth,
+                best_pv_uci, played_pv_uci, alternative_pvs_json, critical_events_json, explanatory_lines_json, proactive_coach_json, analysis_pass, analysis_screen_depth, analysis_deep_depth,
                 learned, attempts, correct_attempts
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             target_job_id, row['game_id'], row['site'], row['game_date'], row['opponent'],
             row['category'], row_mode, row['fen'], row['previous_fen'], row['opponent_move_uci'],
@@ -771,7 +771,7 @@ def copy_cached_positions(conn, account_id, game_id, source_job_id, target_job_i
             row['best_move_uci'], row['best_move_san'], row['eval_before_cp'],
             row['eval_after_cp'], row['mate_before'], row['mate_after'], row['centipawn_loss'],
             row['difficulty_score'], row['estimated_rating'], row['difficulty_version'],
-            row['best_pv_uci'], row['played_pv_uci'], row['alternative_pvs_json'], row['critical_events_json'], row['explanatory_lines_json'], row['analysis_pass'], row['analysis_screen_depth'], row['analysis_deep_depth'],
+            row['best_pv_uci'], row['played_pv_uci'], row['alternative_pvs_json'], row['critical_events_json'], row['explanatory_lines_json'], row['proactive_coach_json'], row['analysis_pass'], row['analysis_screen_depth'], row['analysis_deep_depth'],
             row['learned'], row['attempts'], row['correct_attempts'],
         ))
         if cur.rowcount <= 0:
@@ -853,6 +853,19 @@ def _refresh_position_labels(conn, position_id, row_or_values):
     except (ValueError, TypeError, KeyError, AttributeError):
         pass
 
+    # The same evidence-selection policy is applied by the offline benchmark
+    # and the live proactive coaching pass.
+    try:
+        from proactive_coaching import prefer_evidenced_primary
+        probe_json = (row_or_values['proactive_coach_json']
+                      if 'proactive_coach_json' in row_or_values.keys() else None)
+        labels = prefer_evidenced_primary(board, labels, probe_json)
+    except (TypeError, ValueError, KeyError, AttributeError):
+        pass
+
+    from coaching_taxonomy import normalize_learning_labels
+    labels = normalize_learning_labels(labels, row_or_values)
+
     conn.execute('DELETE FROM position_concepts WHERE position_id = ?', (position_id,))
     for label in labels:
         conn.execute("""
@@ -863,6 +876,33 @@ def _refresh_position_labels(conn, position_id, row_or_values):
             position_id, label.key, label.confidence,
             1 if label.is_primary else 0, label.evidence, CLASSIFIER_VERSION,
         ))
+
+    teaching_path = None
+    # Store the teaching hierarchy separately from the flat detector labels.
+    # The primary lesson key stays stable for Coach votes, progress and tiles.
+    try:
+        from coaching_taxonomy import save_taxonomy
+        from decision_context import decision_facts
+        from loose_piece_provenance import confirmed_differential_loss
+        # The context can be defensive even when the *move itself* attacks:
+        # a fork may be the correct counterattack to avert a material loss.
+        differential = decision_facts(
+            board, best, played,
+            row_or_values['best_pv_uci'], row_or_values['played_pv_uci'],
+            row_or_values['alternative_pvs_json'],
+            row_or_values['eval_before_cp'], row_or_values['eval_after_cp'])
+        verified_save = confirmed_differential_loss(board, differential) is not None
+        teaching_path = save_taxonomy(conn, position_id, row_or_values,
+                      next((x.key for x in labels if x.is_primary), labels[0].key),
+                      confidence=next((x.confidence for x in labels if x.is_primary), .65),
+                      is_in_check=board.is_check(),
+                      root_best_is_check=board.gives_check(best) if best in board.legal_moves else False,
+                      best_move_saves_material=verified_save,
+                      strategic_sacrifice=(
+                          verified_save and not board.gives_check(best)
+                          and next((x.key for x in labels if x.is_primary), '') == 'material_sacrifice'))
+    except (ValueError, KeyError, TypeError, IndexError, AttributeError):
+        pass
 
     # Personal concepts learned through coach conversations are declarative
     # detectors. Apply them every time a position is inserted/refreshed so the
@@ -884,6 +924,7 @@ def _refresh_position_labels(conn, position_id, row_or_values):
             best_move_san=row_or_values['best_move_san'],
             category=category,
             labels=labels,
+            taxonomy_path=teaching_path,
             mate_before=row_or_values['mate_before'],
             best_pv_uci=row_or_values['best_pv_uci'],
             played_pv_uci=row_or_values['played_pv_uci'],
@@ -892,6 +933,8 @@ def _refresh_position_labels(conn, position_id, row_or_values):
             eval_after_cp=row_or_values['eval_after_cp'],
             critical_events_json=row_or_values['critical_events_json'],
             explanatory_lines_json=row_or_values['explanatory_lines_json'],
+            proactive_coach_json=(row_or_values['proactive_coach_json']
+                                  if 'proactive_coach_json' in row_or_values.keys() else None),
         )
         conn.execute(
             'UPDATE training_positions SET coach_prompt = ?, coach_explanation = ?, coaching_version = ? WHERE id = ?',
@@ -1024,6 +1067,9 @@ def upsert_position(conn, job_id, game, game_pgn, candidate, analysis_pass, scre
         'analysis_deep_depth': int(deep_depth),
     }
 
+    analytical_values['proactive_coach_json'] = (json.dumps(candidate['proactive_probe'])
+        if candidate.get('proactive_probe') else None)
+
     # Structured chess-context observations from the best, game and verified
     # contrast lines. Only the optional third reply requires another engine
     # query; refresh reconstructs all existing lines without Stockfish.
@@ -1031,7 +1077,8 @@ def upsert_position(conn, job_id, game, game_pgn, candidate, analysis_pass, scre
         board, best, played_move, before.pv_uci, after.pv_uci,
         best_cp=before.cp, played_cp=after.cp, best_mate=before.mate,
         played_mate=after.mate, alternatives=list(before.alternatives),
-        probe=candidate.get('explanation_probe'))
+        probe=candidate.get('explanation_probe'),
+        coaching_probes=candidate.get('proactive_probe'))
     analytical_values['explanatory_lines_json'] = json.dumps(explanation_lines)
     # The root evaluation gap belongs to the decision; an observed event
     # illustrates how a sampled continuation realizes that disadvantage.
@@ -1051,7 +1098,7 @@ def upsert_position(conn, job_id, game, game_pgn, candidate, analysis_pass, scre
                 played_move_san = ?, best_move_uci = ?, best_move_san = ?,
                 eval_before_cp = ?, eval_after_cp = ?, mate_before = ?, mate_after = ?,
                 centipawn_loss = ?, difficulty_score = ?, estimated_rating = ?,
-                difficulty_version = ?, best_pv_uci = ?, played_pv_uci = ?, alternative_pvs_json = ?, critical_events_json = ?, explanatory_lines_json = ?,
+                difficulty_version = ?, best_pv_uci = ?, played_pv_uci = ?, alternative_pvs_json = ?, critical_events_json = ?, explanatory_lines_json = ?, proactive_coach_json = ?,
                 analysis_pass = ?, analysis_screen_depth = ?,
                 analysis_deep_depth = ?
             WHERE id = ?
@@ -1067,7 +1114,7 @@ def upsert_position(conn, job_id, game, game_pgn, candidate, analysis_pass, scre
             analytical_values['mate_after'], analytical_values['centipawn_loss'],
             analytical_values['difficulty_score'], analytical_values['estimated_rating'],
                 analytical_values['difficulty_version'], analytical_values['best_pv_uci'],
-                analytical_values['played_pv_uci'], analytical_values['alternative_pvs_json'], analytical_values['critical_events_json'], analytical_values['explanatory_lines_json'], analytical_values['analysis_pass'],
+                analytical_values['played_pv_uci'], analytical_values['alternative_pvs_json'], analytical_values['critical_events_json'], analytical_values['explanatory_lines_json'], analytical_values['proactive_coach_json'], analytical_values['analysis_pass'],
             analytical_values['analysis_screen_depth'], analytical_values['analysis_deep_depth'],
             position_id,
         ))
@@ -1082,8 +1129,8 @@ def upsert_position(conn, job_id, game, game_pgn, candidate, analysis_pass, scre
             played_move_uci, played_move_san, best_move_uci, best_move_san,
             eval_before_cp, eval_after_cp, mate_before, mate_after,
             centipawn_loss, difficulty_score, estimated_rating, difficulty_version,
-            best_pv_uci, played_pv_uci, alternative_pvs_json, critical_events_json, explanatory_lines_json, analysis_pass, analysis_screen_depth, analysis_deep_depth
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            best_pv_uci, played_pv_uci, alternative_pvs_json, critical_events_json, explanatory_lines_json, proactive_coach_json, analysis_pass, analysis_screen_depth, analysis_deep_depth
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         job_id, game_id, analytical_values['site'], analytical_values['game_date'],
         analytical_values['opponent'], analytical_values['category'], analytical_values['learning_mode'], analytical_values['fen'],
@@ -1097,7 +1144,7 @@ def upsert_position(conn, job_id, game, game_pgn, candidate, analysis_pass, scre
         analytical_values['centipawn_loss'], analytical_values['difficulty_score'],
         analytical_values['estimated_rating'], analytical_values['difficulty_version'],
         analytical_values['best_pv_uci'], analytical_values['played_pv_uci'],
-        analytical_values['alternative_pvs_json'], analytical_values['critical_events_json'], analytical_values['explanatory_lines_json'], analytical_values['analysis_pass'], analytical_values['analysis_screen_depth'],
+        analytical_values['alternative_pvs_json'], analytical_values['critical_events_json'], analytical_values['explanatory_lines_json'], analytical_values['proactive_coach_json'], analytical_values['analysis_pass'], analytical_values['analysis_screen_depth'],
         analytical_values['analysis_deep_depth'],
     ))
     position_id = cur.lastrowid
@@ -1162,6 +1209,18 @@ def _run_analysis_job(job_id: int):
             return
         if row['status'] not in ('queued', 'retrieving', 'running'):
             return
+
+        # Instrument real per-stage work rather than estimating from engine settings.
+        perf = {'screen_seconds': 0.0, 'deep_seconds': 0.0,
+                'reply_seconds': 0.0, 'coaching_seconds': 0.0,
+                'metadata_seconds': 0.0, 'cached_games': 0}
+        if row['perf_json']:
+            try:
+                previous = json.loads(row['perf_json'])
+                perf.update({k: float(v) if k.endswith('_seconds') else int(v)
+                             for k, v in previous.items() if k in perf})
+            except (ValueError, TypeError):
+                pass
 
         account_id = row['account_id']
         owner_username = row['username']
@@ -1378,6 +1437,9 @@ def _run_analysis_job(job_id: int):
                         and int(cached['max_deep_depth'] or 0) >= deep_depth
                     )
                     if cache_is_deep_enough:
+                        perf['cached_games'] += 1
+                        conn.execute('UPDATE analysis_jobs SET perf_json=? WHERE id=?',
+                                     (json.dumps(perf), job_id))
                         repoint_cache_to_job(conn, account_id, game_id, job_id)
                         # The per-game checkpoint and cache changes commit together.
                         game_index += 1
@@ -1390,12 +1452,14 @@ def _run_analysis_job(job_id: int):
                         conn.commit()
                         continue
 
+                    screen_started = time.perf_counter()
                     candidates = engine_retry(
                         lambda sf: screen_game(
                             sf, game, source_username, screen_seconds, screen_depth, settings
                         ),
                         f'screening game {game_id} at depth {screen_depth}',
                     )
+                    perf['screen_seconds'] += time.perf_counter() - screen_started
                     # Do not advance the resume cursor after screening alone:
                     # this game's deep confirmation must finish first.
                     after_screen_status = conn.execute('SELECT status FROM analysis_jobs WHERE id = ?', (job_id,)).fetchone()
@@ -1417,17 +1481,20 @@ def _run_analysis_job(job_id: int):
                               'opposition' if candidate.get('candidate_kind') == 'opposition' else
                               ('excellent' if candidate.get('candidate_kind') == 'reinforcement' else 'mistakes')))
                         conn.commit()
+                        deep_started = time.perf_counter()
                         result = engine_retry(
                             lambda sf, candidate=candidate: confirm_candidate(
                                 sf, candidate, deep_seconds, deep_depth, settings
                             ),
                             f'deep-confirming game {game_id} at depth {deep_depth}',
                         )
+                        perf['deep_seconds'] += time.perf_counter() - deep_started
                         if result is not None:
                             # Preserve deep-confirmed work even when a bounded
                             # explanation probe encounters an engine limitation.
                             fraction = max(0.0, min(.5, float(settings.get('explanation_probe_fraction', .18))))
                             if fraction and settings.get('explanation_probe_enabled', True):
+                                reply_started = time.perf_counter()
                                 try:
                                     result['explanation_probe'] = engine_retry(
                                         lambda sf, result=result: probe_explanatory_replies(
@@ -1439,6 +1506,8 @@ def _run_analysis_job(job_id: int):
                                     # The explanatory probe is strictly optional.
                                     # It must never discard a confirmed puzzle.
                                     result['explanation_probe'] = None
+                                finally:
+                                    perf['reply_seconds'] += time.perf_counter() - reply_started
                             confirmed.append(result)
                         mid_status = conn.execute('SELECT status FROM analysis_jobs WHERE id = ?', (job_id,)).fetchone()
                         if mid_status is None or mid_status['status'] != 'running':
@@ -1451,11 +1520,35 @@ def _run_analysis_job(job_id: int):
                     inserted = 0
                     if confirmed:
                         for candidate in choose_distinct_positions(confirmed, settings):
+                            if settings.get('coaching_probe_enabled', True):
+                                from proactive_coaching import probe_training_position
+                                root = candidate['board']
+                                before = candidate['before']
+                                comparison = candidate['played_move']
+                                args = {'fen': root.fen(),
+                                        'best_move_uci': before.best_move.uci(),
+                                        'played_move_uci': comparison.uci(),
+                                        'eval_before_cp': before.cp,
+                                        'eval_after_cp': candidate['after'].cp,
+                                        'alternative_pvs_json': json.dumps(list(before.alternatives))}
+                                coaching_started = time.perf_counter()
+                                try:
+                                    candidate['proactive_probe'] = engine_retry(
+                                        lambda sf, args=args: probe_training_position(sf, args, settings),
+                                        f'coaching training position in {game_id}')
+                                except Exception:
+                                    # Coaching probes are additional diagnostics;
+                                    # never discard an otherwise confirmed puzzle.
+                                    candidate['proactive_probe'] = None
+                                finally:
+                                    perf['coaching_seconds'] += time.perf_counter() - coaching_started
+                            metadata_started = time.perf_counter()
                             if upsert_position(
                                 conn, job_id, game, game_pgn, candidate,
                                 pass_number, screen_depth, deep_depth,
                             ):
                                 inserted += 1
+                            perf['metadata_seconds'] += time.perf_counter() - metadata_started
 
                     # Clean games are also cached at this depth. If a deeper pass
                     # later discovers a hidden tactic, it will be added then.
@@ -1469,6 +1562,8 @@ def _run_analysis_job(job_id: int):
                             'UPDATE analysis_jobs SET positions_found = positions_found + ? WHERE id = ?',
                             (inserted, job_id),
                         )
+                    conn.execute('UPDATE analysis_jobs SET perf_json=? WHERE id=?',
+                                 (json.dumps(perf, sort_keys=True), job_id))
                     # Finish the game atomically with its cached results and positions.
                     # Pausing mid-game leaves this checkpoint untouched; only that
                     # unfinished game is evaluated again on resume.

@@ -3,7 +3,19 @@ const detailConcept = window.LESSON_DETAIL_CONCEPT;
 const detailName = window.LESSON_DETAIL_NAME;
 const detailIsOpening = Boolean(window.LESSON_DETAIL_IS_OPENING);
 const detailScopeParameter = detailIsOpening ? 'opening' : 'concept';
-const detailScopeQuery = () => ({[detailScopeParameter]:detailConcept, ...(detailIsOpening && document.getElementById('position-concept-filter')?.value ? {variation:document.getElementById('position-concept-filter').value} : {})});
+const detailScopeQuery = () => {
+  const motif = detailIsOpening
+    ? (document.getElementById('position-concept-filter')?.value || '')
+    : (document.getElementById('position-concept-filter')?.value || detailConcept);
+  const context = document.getElementById('position-context-filter')?.value || 'all';
+  const type = document.getElementById('position-move-type-filter')?.value || 'all';
+  return {
+    ...(detailIsOpening ? {opening:detailConcept, ...(motif ? {variation:motif} : {})}
+      : (motif === 'all' ? {} : {concept:motif})),
+    ...(context !== 'all' ? {context} : {}),
+    ...(type !== 'all' ? {move_type:type} : {}),
+  };
+};
 const detailDescriptor = detailIsOpening ? 'opening' : 'lesson';
 const ratingFloor = Number(window.LESSON_DETAIL_RATING_MIN || 600);
 const ratingCeiling = Number(window.LESSON_DETAIL_RATING_MAX || 2400);
@@ -24,7 +36,7 @@ try { restoredDetailState = JSON.parse(localStorage.getItem(lessonFilterStateKey
 function rememberLesson() {
   localStorage.setItem(detailStateKey, location.pathname);
   const get = id => document.getElementById(id)?.value;
-  localStorage.setItem(lessonFilterStateKey, JSON.stringify({status:get('position-status-filter'), mode:get('position-mode-filter'), sort:get('position-sort'), min:get('position-rating-min'), max:get('position-rating-max'), page:pageState.page, variation:detailIsOpening?get('position-concept-filter'):''}));
+  localStorage.setItem(lessonFilterStateKey, JSON.stringify({status:get('position-status-filter'), mode:get('position-mode-filter'), sort:get('position-sort'), min:get('position-rating-min'), max:get('position-rating-max'), page:pageState.page, variation:detailIsOpening?get('position-concept-filter'):'', motif:!detailIsOpening?get('position-concept-filter'):'', context:get('position-context-filter'), moveType:get('position-move-type-filter')}));
 }
 const draftLearned = new Map(); // id -> {value, original, learning_mode, estimated_rating}
 const selectedPositionIds = new Set();
@@ -161,7 +173,7 @@ function renderPositions(partial = false) {
       <button class="position-open-button" type="button" aria-label="Open training position">${miniBoardHtml(position)}<div class="position-tile-body">
         <div class="position-tile-title"><strong>${escapeHtml(position.opponent?`vs. ${position.opponent}`:'Training position')}</strong><span>Move ${escapeHtml(position.move_number||'—')}</span></div>
         <div class="position-tile-meta"><span>${escapeHtml(categoryLabel(position.category))}</span><span>${position.estimated_rating?`≈ ${fmtCount(position.estimated_rating)}`:'Rating —'}</span><span>${fmtCount(attempts)} attempt${attempts===1?'':'s'}</span>${detailIsOpening?`<span>${escapeHtml(position.opening_variation||'Main line')}</span>`:''}</div>
-        <div class="position-concepts">${position.historical_match ? `<div class="historic-position-badge">♜ Historic-game position match</div>` : ''}${concepts.map(c=>`<span class="position-concept-chip ${c.key===detailConcept?'primary':''}">${escapeHtml(c.name)}</span>`).join('')||'<span class="position-concept-chip">General calculation</span>'}</div>
+        <div class="position-concepts">${position.historical_match ? `<div class="historic-position-badge">♜ Historic-game position match</div>` : ''}${(position.taxonomy?.levels||concepts.filter(c=>c.is_primary)).map(c=>`<span class="position-concept-chip ${c.level==='motif'||c.is_primary?'primary':''}">${escapeHtml(c.name)}</span>`).join('<span class="taxonomy-separator">›</span>')||'<span class="position-concept-chip">General calculation</span>'}</div>
       </div></button>
       <label class="position-status-toggle"><input type="checkbox" class="position-learned-toggle" ${learned?'checked':''}><span>Learned</span></label>
     </article>`;
@@ -309,7 +321,7 @@ function scheduleRatingQuery(changed){
 function changeQuery(){pageState.page=1;refreshLessonDetail().catch(showLoadError);}
 function showLoadError(error){document.getElementById('position-grid').innerHTML=`<div class="lesson-empty"><p class="muted">${escapeHtml(error.message||'Could not load lesson.')}</p></div>`;}
 if (restoredDetailState) {
-  for (const [id, value] of [['position-status-filter',restoredDetailState.status],['position-mode-filter',restoredDetailState.mode],['position-sort',restoredDetailState.sort],['position-concept-filter',restoredDetailState.variation],['position-rating-min',restoredDetailState.min],['position-rating-max',restoredDetailState.max]]) {
+  for (const [id, value] of [['position-status-filter',restoredDetailState.status],['position-mode-filter',restoredDetailState.mode],['position-sort',restoredDetailState.sort],['position-concept-filter',detailIsOpening?restoredDetailState.variation:restoredDetailState.motif],['position-context-filter',restoredDetailState.context],['position-move-type-filter',restoredDetailState.moveType],['position-rating-min',restoredDetailState.min],['position-rating-max',restoredDetailState.max]]) {
     const element=document.getElementById(id);
     if (element && value !== undefined && value !== null && (element.tagName !== 'SELECT' || [...element.options].some(option=>option.value===String(value)))) element.value=String(value);
   }
@@ -317,13 +329,44 @@ if (restoredDetailState) {
 }
 localStorage.setItem(detailStateKey, location.pathname);
 syncRatingFilter();
+// Respect restored cross-lesson scope before the first API request.
+if (!detailIsOpening) {
+  const currentMotif = document.getElementById('position-concept-filter')?.value;
+  if (currentMotif === 'all') {
+    const heading = document.getElementById('lesson-detail-title');
+    if (heading) heading.textContent = 'All learning motifs';
+    const reset = document.getElementById('detail-reset-lesson');
+    if (reset) reset.disabled = true;
+  }
+}
 document.getElementById('position-rating-min')?.addEventListener('input',()=>scheduleRatingQuery('min'));
 document.getElementById('position-rating-max')?.addEventListener('input',()=>scheduleRatingQuery('max'));
+function syncLessonMotifScope() {
+  if (detailIsOpening) return;
+  const motif = document.getElementById('position-concept-filter')?.value || detailConcept;
+  const heading = document.getElementById('lesson-detail-title');
+  if (heading) heading.textContent = motif === 'all' ? 'All learning motifs' : detailName;
+  const reset = document.getElementById('detail-reset-lesson');
+  if (reset) {
+    reset.disabled = motif === 'all';
+    reset.title = motif === 'all'
+      ? 'Choose an individual primary motif before resetting its lesson.'
+      : 'Reset the current lesson’s learned positions.';
+  }
+}
 document.getElementById('position-concept-filter')?.addEventListener('change',event=>{
-  const next=String(event.target.value||'').trim();
-  if(detailIsOpening){changeQuery();return;}
-  if(next && next!==detailConcept) window.location.href=`/lessons/${detailJobId}/${encodeURIComponent(next)}`;
+  if (!detailIsOpening) {
+    const next = String(event.target.value || '').trim();
+    if (next && next !== 'all' && next !== detailConcept) {
+      window.location.href = `/lessons/${detailJobId}/${encodeURIComponent(next)}`;
+      return;
+    }
+  }
+  syncLessonMotifScope();
+  changeQuery();
 });
+document.getElementById('position-context-filter')?.addEventListener('change',changeQuery);
+document.getElementById('position-move-type-filter')?.addEventListener('change',changeQuery);
 document.getElementById('position-status-filter')?.addEventListener('change',changeQuery);
 document.getElementById('position-mode-filter')?.addEventListener('change',changeQuery);
 document.getElementById('position-sort')?.addEventListener('change',changeQuery);

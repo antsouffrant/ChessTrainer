@@ -1,12 +1,13 @@
-"""Rebuild derived position metadata from locally saved analysis and PGNs.
+"""Rebuild position labels from saved analysis plus targeted Stockfish coaching probes.
 
-This deliberately does not call Lichess or Stockfish. Evaluation scores,
-selected positions, PVs, modes, and learning history remain untouched.
+The worker performs probes before the SQLite write transaction. Root engine
+scores/PVs, training positions and user history are never modified here.
 """
 from __future__ import annotations
 
 import io
 import json
+from collections import OrderedDict
 
 from critical_moments import critical_decision_evidence
 from explanatory_evidence import explanation_variations, decode_variations
@@ -49,7 +50,7 @@ def _game_context(pgn):
     return game, result
 
 
-def refresh_metadata_batch(conn, job_id, after_id=0, batch_size=25):
+def refresh_metadata_batch(conn, job_id, after_id=0, batch_size=25, probes=None, game_cache=None):
     """Refresh a bounded portion of one game list. Caller owns the transaction.
 
     Returns deterministic cursor progress; running the same batch twice is safe.
@@ -70,7 +71,10 @@ def refresh_metadata_batch(conn, job_id, after_id=0, batch_size=25):
         ORDER BY tp.id LIMIT ?
     ''', (job_id, after_id, batch_size)).fetchall()
 
-    cache = {}
+    probes = probes or {}
+    # Retain PGN classification and game history across refresh batches while
+    # bounding resident memory. A game with multiple puzzles is parsed once.
+    cache = game_cache if game_cache is not None else OrderedDict()
     refreshed = 0
     failed = 0
     no_pgn = 0
@@ -87,12 +91,16 @@ def refresh_metadata_batch(conn, job_id, after_id=0, batch_size=25):
             if pgn:
                 game_key = (row['game_id'], pgn)
                 if game_key not in cache:
-                    opening = classify_pgn(pgn)
                     try:
                         game, history = _game_context(pgn)
                     except (ValueError, TypeError, UnicodeError):
                         game, history = None, {}
+                    opening = classify_pgn(pgn, game=game)
                     cache[game_key] = opening, game, history
+                    if len(cache) > 64:
+                        cache.popitem(last=False)
+                else:
+                    cache.move_to_end(game_key)
                 opening, game, history = cache[game_key]
                 historical = historical_for_position(row['fen'])
                 conn.execute('''
@@ -136,8 +144,14 @@ def refresh_metadata_batch(conn, job_id, after_id=0, batch_size=25):
                 SET difficulty_score = ?, estimated_rating = ?, difficulty_version = ?
                 WHERE id = ?''', (score, rating, DIFFICULTY_VERSION, position_id))
 
-            # Metadata-only reconstruction: uses existing root evaluations and
-            # saved PVs, never downloads PGNs or invokes Stockfish.
+            # Engine-based causal probing is performed by the refresh worker
+            # outside this transaction. A JSON record is kept separately from
+            # deep Analyze scores and PVs so later feedback can be audited.
+            if position_id in probes:
+                conn.execute('''UPDATE training_positions SET proactive_coach_json = ?
+                    WHERE id = ?''', (json.dumps(probes[position_id]), position_id))
+
+            # Reconstruct root analysis evidence and attach the tested replies.
             try:
                 played = chess.Move.from_uci(row['played_move_uci'])
                 existing_lines = decode_variations(row['explanatory_lines_json'])
@@ -146,7 +160,8 @@ def refresh_metadata_batch(conn, job_id, after_id=0, batch_size=25):
                 lines = explanation_variations(
                     board, best_move, played, row['best_pv_uci'], row['played_pv_uci'],
                     row['eval_before_cp'], row['eval_after_cp'], row['mate_before'],
-                    row['mate_after'], row['alternative_pvs_json'], probe=probe)
+                    row['mate_after'], row['alternative_pvs_json'], probe=probe,
+                    coaching_probes=probes.get(position_id))
                 evidence = critical_decision_evidence(
                     board, best_move, played, row['best_pv_uci'], row['played_pv_uci'],
                     row['eval_before_cp'], row['eval_after_cp'],

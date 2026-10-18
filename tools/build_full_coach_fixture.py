@@ -32,6 +32,10 @@ def transform(rows):
         if raw.get('feedback_type') not in {'position', 'explanation', 'motif'}:
             continue
         item = {key: raw.get(key, '') for key in ALLOW}
+        # Preserve independent Stockfish coaching evidence on newer exports,
+        # while keeping older versioned fixtures byte-for-byte compatible.
+        if raw.get('proactive_coach_json'):
+            item['proactive_coach_json'] = raw['proactive_coach_json']
         # All ratings for a position share a group so cross-field coherence
         # can be analyzed without preserving game URLs or account identifiers.
         position = '|'.join((raw.get('fen', ''), raw.get('best_move_uci', ''),

@@ -119,11 +119,14 @@ def historical_for_position(position_fen):
                                'matched_ply': ply, 'match_type': 'exact_position'})
     return None
 
-def classify_pgn(pgn, position_fen=None):
-    try:
-        game = chess.pgn.read_game(io.StringIO(pgn or '')) if pgn else None
-    except (ValueError, TypeError, UnicodeError):
-        game = None
+def classify_pgn(pgn, position_fen=None, game=None):
+    # Refresh Metadata already parsed this PGN to reconstruct game context.
+    # Accept that game to avoid parsing the identical text a second time.
+    if game is None:
+        try:
+            game = chess.pgn.read_game(io.StringIO(pgn or '')) if pgn else None
+        except (ValueError, TypeError, UnicodeError):
+            game = None
     if game is None:
         return {'key': 'unclassified', 'name': 'Unclassified Opening', 'variation': '', 'eco': '', 'source': 'unknown', 'history': '[]', 'historical': None}
     board = game.board()

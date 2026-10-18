@@ -8,6 +8,7 @@ import threading
 from pathlib import Path
 
 import chess
+import chess.engine
 import chess.pgn
 import requests
 from flask import Flask, jsonify, redirect, render_template, request, session, url_for, send_file
@@ -25,6 +26,7 @@ from app_settings import (
 from coaching import COACHING_VERSION, generate_coaching_text
 from engine_service import evaluate_fen, evaluate_move_quality, reset_review_engine
 from learning import CLASSIFIER_VERSION, classify_learning_concepts
+from coaching_taxonomy import CONTEXTS as COACHING_CONTEXTS, MOVE_TYPES as COACHING_MOVE_TYPES, MotifPath
 from openings import ensure_opening_metadata, famous_for_opening, CLASSICS
 from metadata_refresh import refresh_metadata_batch
 from process_runtime import PROCESS_LOCK
@@ -32,11 +34,13 @@ from retrieval import retrieve_game_list
 from list_readiness import list_state
 from feedback_analytics import (
     record_position_vote, position_votes, position_feedback_details, motif_feedback_options,
-    report_rows, report_facets, report_summary, csv_bytes, regression_candidate_rows,
+    save_taxonomy_feedback, taxonomy_feedback_choices,
+    report_rows, report_facets, report_summary, taxonomy_change_rates, solved_taxonomy_rows, solved_taxonomy_csv, coaching_comparison, coaching_metric_chart, current_taxonomy_status, csv_bytes, regression_candidate_rows,
 )
 from process_policy import queue_analysis, restart_analysis
 from player_learning import record_attempt as record_player_attempt, abandon_session as abandon_player_session, summary as player_summary, facets as player_facets, export_rows as player_export_rows, csv_data as player_csv_data, reset_player_records
 from opening_playlist import enrich_opening_playlist, board_identity
+from balanced_playlist import balanced_playlist_order
 from adaptive_coach import (
     apply_adaptive_concepts_to_position, coach_history, handle_coach_message, get_or_create_thread,
 )
@@ -193,47 +197,136 @@ _refresh_threads_lock = threading.Lock()
 
 
 def _run_refresh_worker(job_id):
-    """Short, serialized write transactions; retry transient SQLite busy states."""
+    """Stockfish coaching probes outside SQLite writes; atomic batch commits.
+
+    The game list's saved deep evaluations/positions remain unchanged. Pause
+    and stop requests are respected between small batches of bounded probes.
+    """
+    from engine_service import find_stockfish
+    from proactive_coaching import probe_training_position, reusable_coaching_probe
+    from app_settings import get_settings
+
     with PROCESS_LOCK:
-        busy_retries = 0
-        while True:
-            try:
+        engine = None
+        try:
+            # Fail fast and visibly if Stockfish is unavailable. Never silently
+            # claim to have refreshed the causal coaching layer without it.
+            with connect() as conn:
+                settings = get_settings(conn)
+                count = conn.execute('SELECT COUNT(*) FROM training_positions WHERE job_id=?',
+                                     (job_id,)).fetchone()[0]
+            if not count:
                 with connect() as conn:
-                    task = conn.execute('SELECT * FROM metadata_processes WHERE job_id=?', (job_id,)).fetchone()
-                    if task is None or task['status'] not in ('queued', 'running'):
-                        return
-                    analysis = conn.execute('SELECT status FROM analysis_jobs WHERE id=?', (job_id,)).fetchone()
-                    if analysis is None:
-                        return
-                    if analysis['status'] in ('queued', 'running', 'retrieving'):
-                        conn.execute("UPDATE metadata_processes SET status='paused', error='Pause evaluation before refreshing this list.' WHERE job_id=?", (job_id,))
+                    conn.execute("UPDATE metadata_processes SET status='complete',total=0,processed=0,updated_at=CURRENT_TIMESTAMP WHERE job_id=? AND status IN ('queued','running')", (job_id,))
+                    conn.commit()
+                return
+            executable = find_stockfish(settings)
+            engine = chess.engine.SimpleEngine.popen_uci(
+                str(executable), setpgrp=True,
+                timeout=float(settings['engine_start_timeout_seconds']))
+            options = {}
+            if 'Threads' in engine.options:
+                options['Threads'] = int(settings['analysis_engine_threads'])
+            if 'Hash' in engine.options:
+                options['Hash'] = int(settings['analysis_engine_hash_mb'])
+            if options:
+                engine.configure(options)
+            engine.ping()
+            busy_retries = 0
+            from collections import OrderedDict
+            game_cache = OrderedDict()  # Reuse classified game history across batches.
+            # Cumulative timings are persisted each batch for Process diagnostics.
+            totals = {'engine_seconds': 0.0, 'metadata_seconds': 0.0,
+                      'cached_probes': 0, 'new_probes': 0, 'probe_errors': 0}
+            with connect() as conn:
+                task_perf = conn.execute('SELECT perf_json FROM metadata_processes WHERE job_id=?',
+                                         (job_id,)).fetchone()
+                if task_perf and task_perf['perf_json']:
+                    try:
+                        totals.update({k: float(v) if k.endswith('_seconds') else int(v)
+                                       for k, v in json.loads(task_perf['perf_json']).items()
+                                       if k in totals})
+                    except (ValueError, TypeError):
+                        pass
+            engine_name = (engine.id or {}).get('name', '')
+            while True:
+                try:
+                    # Release the connection before engine analysis.
+                    with connect() as conn:
+                        task = conn.execute('SELECT * FROM metadata_processes WHERE job_id=?',
+                                            (job_id,)).fetchone()
+                        if task is None or task['status'] not in ('queued', 'running'):
+                            return
+                        analysis = conn.execute('SELECT status FROM analysis_jobs WHERE id=?',
+                                                (job_id,)).fetchone()
+                        if analysis is None:
+                            return
+                        if analysis['status'] in ('queued', 'running', 'retrieving', 'restarting'):
+                            conn.execute("UPDATE metadata_processes SET status='paused',error='Pause analysis before coaching refresh.',updated_at=CURRENT_TIMESTAMP WHERE job_id=?", (job_id,))
+                            conn.commit()
+                            return
+                        batch = conn.execute('''SELECT * FROM training_positions
+                            WHERE job_id=? AND id>? ORDER BY id LIMIT 3''',
+                            (job_id, task['cursor'])).fetchall()
+                    evidence = {}
+                    for row in batch:
+                        cached = reusable_coaching_probe(row, settings, engine_name)
+                        if cached is not None:
+                            evidence[row['id']] = cached
+                            totals['cached_probes'] += 1
+                            continue
+                        probe_started = time.perf_counter()
+                        try:
+                            evidence[row['id']] = probe_training_position(engine, row, settings)
+                            totals['new_probes'] += 1
+                        except (ValueError, TypeError, KeyError):
+                            # Older malformed FEN/moves do not stop other puzzles.
+                            totals['probe_errors'] += 1
+                        finally:
+                            totals['engine_seconds'] += time.perf_counter() - probe_started
+                    with connect() as conn:
+                        current = conn.execute('SELECT status,cursor FROM metadata_processes WHERE job_id=?',
+                                               (job_id,)).fetchone()
+                        if current is None or current['status'] not in ('queued', 'running'):
+                            return
+                        if current['cursor'] != task['cursor']:
+                            continue
+                        conn.execute("UPDATE metadata_processes SET status='running',updated_at=CURRENT_TIMESTAMP WHERE job_id=?", (job_id,))
+                        metadata_started = time.perf_counter()
+                        result = refresh_metadata_batch(conn, job_id, task['cursor'], 3,
+                                                        probes=evidence, game_cache=game_cache)
+                        totals['metadata_seconds'] += time.perf_counter() - metadata_started
+                        conn.execute("UPDATE metadata_processes SET perf_json=? WHERE job_id=?",
+                                     (json.dumps(totals, sort_keys=True), job_id))
+                        conn.execute('''UPDATE metadata_processes SET
+                            cursor=?, processed=?, total=?, updated=updated+?,
+                            failed=failed+?, without_pgn=without_pgn+?, status=?,error=NULL,
+                            updated_at=CURRENT_TIMESTAMP WHERE job_id=?''',
+                            (result['next_cursor'] or result['processed'],
+                             result['processed'], result['total'], result['updated'],
+                             result['failed'], result['without_pgn'],
+                             'complete' if result['done'] else 'running', job_id))
                         conn.commit()
+                    busy_retries = 0
+                    if result['done']:
                         return
-                    conn.execute("UPDATE metadata_processes SET status='running', updated_at=CURRENT_TIMESTAMP WHERE job_id=?", (job_id,))
-                    conn.commit()
-                    # A batch is atomic: never commit a partial set of label updates.
-                    result = refresh_metadata_batch(conn, job_id, task['cursor'], 5)
-                    conn.execute("""UPDATE metadata_processes SET
-                        cursor=?, processed=?, total=?, updated=updated+?, failed=failed+?,
-                        without_pgn=without_pgn+?, status=?, error=NULL,
-                        updated_at=CURRENT_TIMESTAMP WHERE job_id=?""",
-                        (result['next_cursor'] or result['processed'], result['processed'],
-                         result['total'], result['updated'], result['failed'],
-                         result['without_pgn'], 'complete' if result['done'] else 'running', job_id))
-                    conn.commit()
-                busy_retries = 0
-                if result['done']:
-                    return
-            except sqlite3.OperationalError as exc:
-                if ('locked' in str(exc).lower() or 'busy' in str(exc).lower()) and busy_retries < 6:
-                    busy_retries += 1
-                    time.sleep(min(1.5, 0.2 * busy_retries))
-                    continue
-                _mark_refresh_failure(job_id, exc)
-                return
-            except Exception as exc:
-                _mark_refresh_failure(job_id, exc)
-                return
+                except sqlite3.OperationalError as exc:
+                    if ('locked' in str(exc).lower() or 'busy' in str(exc).lower()) and busy_retries < 6:
+                        busy_retries += 1
+                        time.sleep(min(1.5, 0.2 * busy_retries))
+                        continue
+                    raise
+        except Exception as exc:
+            _mark_refresh_failure(job_id, exc)
+        finally:
+            if engine is not None:
+                try:
+                    engine.quit()
+                except Exception:
+                    try:
+                        engine.close()
+                    except Exception:
+                        pass
 
 
 def _mark_refresh_failure(job_id, exc):
@@ -279,11 +372,13 @@ def process_listing():
                 jobs = conn.execute('''SELECT j.id, j.date_range, j.status AS analysis_status,
             j.games_retrieved, j.games_screened, j.games_processed, j.positions_found, j.current_pass,
             j.max_passes, j.error AS analysis_error, j.metadata_refreshed_at,
-            j.created_at, j.source_type, j.source_username, a.username,
+            j.created_at, j.perf_json AS analysis_perf, j.source_type, j.source_username, a.username,
             EXISTS(SELECT 1 FROM training_positions t WHERE t.job_id=j.id LIMIT 1) AS has_training_positions,
             r.status AS retrieval_status, r.bytes_downloaded, r.bytes_total, r.error AS retrieval_error,
+            r.started_at AS retrieval_started_at, r.finished_at AS retrieval_finished_at,
+            r.perf_json AS retrieval_perf,
             p.status AS refresh_status, p.processed, p.total, p.updated,
-            p.failed, p.without_pgn, p.error AS refresh_error
+            p.failed, p.without_pgn, p.error AS refresh_error, p.perf_json AS refresh_perf
             FROM analysis_jobs j JOIN accounts a ON a.id=j.account_id
             LEFT JOIN metadata_processes p ON p.job_id=j.id
             LEFT JOIN retrieval_processes r ON r.job_id=j.id
@@ -307,7 +402,7 @@ def process_retrieve(job_id):
         if task['status'] not in ('error', 'stopped', 'paused'):
             return jsonify({'error':'Retrieval is already active or complete.'}), 409
         conn.execute('''UPDATE retrieval_processes SET status='queued', error=NULL,
-            bytes_downloaded=0, bytes_total=0, finished_at=NULL,updated_at=CURRENT_TIMESTAMP
+            bytes_downloaded=0, bytes_total=0,perf_json=NULL, finished_at=NULL,updated_at=CURRENT_TIMESTAMP
             WHERE job_id=?''', (job_id,))
         conn.execute("UPDATE analysis_jobs SET status='waiting_for_games',error=NULL,finished_at=NULL WHERE id=?", (job_id,))
         conn.commit()
@@ -353,7 +448,7 @@ def process_refresh(job_id):
             conn.execute('''INSERT INTO metadata_processes(job_id,status,cursor,processed,total,updated,failed,without_pgn,error)
                 VALUES (?,'queued',0,0,0,0,0,0,NULL)
                 ON CONFLICT(job_id) DO UPDATE SET status='queued',cursor=0,processed=0,total=0,
-                updated=0,failed=0,without_pgn=0,error=NULL,updated_at=CURRENT_TIMESTAMP''', (job_id,))
+                updated=0,failed=0,without_pgn=0,perf_json=NULL,error=NULL,updated_at=CURRENT_TIMESTAMP''', (job_id,))
         conn.commit()
     start_refresh_thread(job_id)
     return jsonify({'ok': True, 'status': 'queued'}), 202
@@ -455,6 +550,9 @@ def verify_lichess_username(username: str) -> bool:
 
 
 def _store_labels(conn, position_id: int, labels):
+    from coaching_taxonomy import normalize_learning_labels
+    row = conn.execute('SELECT * FROM training_positions WHERE id=?', (position_id,)).fetchone()
+    labels = normalize_learning_labels(labels, row)
     conn.execute('DELETE FROM position_concepts WHERE position_id = ?', (position_id,))
     for label in labels:
         conn.execute('''
@@ -469,6 +567,49 @@ def _store_labels(conn, position_id: int, labels):
             label.evidence,
             CLASSIFIER_VERSION,
         ))
+    primary = next((label for label in labels if label.is_primary), None)
+    if primary:
+        from coaching_taxonomy import save_taxonomy
+        row = conn.execute('SELECT * FROM training_positions WHERE id=?', (position_id,)).fetchone()
+        save_taxonomy(conn, position_id, row, primary.key, confidence=primary.confidence)
+
+
+def backfill_taxonomy_paths():
+    """Fast, non-engine migration for every older classified position."""
+    from coaching_taxonomy import TAXONOMY_VERSION, save_taxonomy
+    with connect() as conn:
+        rows = conn.execute("""
+            SELECT tp.*, pc.concept_key AS assigned_motif, pc.confidence AS motif_confidence
+            FROM training_positions tp
+            JOIN position_concepts pc ON pc.position_id=tp.id AND pc.is_primary=1
+            LEFT JOIN position_motif_taxonomy tx ON tx.position_id=tp.id
+            WHERE tx.position_id IS NULL OR tx.taxonomy_version <> ?
+                OR tx.motif_key <> pc.concept_key
+        """, (TAXONOMY_VERSION,)).fetchall()
+        from coaching_taxonomy import canonical_motif_key, evaluation_outcome_key
+        from learning import LearningLabel
+        for row in rows:
+            if canonical_motif_key(row['assigned_motif']) is None:
+                # Prevent the legacy context/pseudo-motif becoming a leaf.
+                # Refresh Metadata will test all supported candidate motifs.
+                key = evaluation_outcome_key(row)
+                _store_labels(conn, row['id'], [LearningLabel(key, .55,
+                    'Evaluation outcome for retired generic motif.', True)])
+                # _store_labels already wrote the current taxonomy path.
+                continue
+            check = False
+            best_check = False
+            try:
+                board = chess.Board(row['fen'])
+                best = chess.Move.from_uci(row['best_move_uci'])
+                check = board.is_check()
+                best_check = best in board.legal_moves and board.gives_check(best)
+            except (ValueError, TypeError, KeyError, chess.InvalidMoveError):
+                pass
+            save_taxonomy(conn, row['id'], row, row['assigned_motif'],
+                          confidence=row['motif_confidence'],
+                          is_in_check=check, root_best_is_check=best_check)
+        conn.commit()
 
 
 def backfill_learning_concepts():
@@ -481,9 +622,9 @@ def backfill_learning_concepts():
                 SELECT 1
                 FROM position_concepts pc
                 WHERE pc.position_id = tp.id
-                  AND pc.classifier_version = ?
+                  AND pc.is_primary = 1
             )
-        ''', (CLASSIFIER_VERSION,)).fetchall()
+        ''', ()).fetchall()
 
         for row in rows:
             try:
@@ -596,6 +737,12 @@ def backfill_coaching_texts():
                     best_move_san=row['best_move_san'],
                     category=row['category'],
                     labels=label_rows,
+                    taxonomy_path=(MotifPath(
+                        scoped['context_key'], scoped['move_type_key'],
+                        scoped['motif_key'], scoped['confidence'], scoped['evidence'])
+                        if (scoped := conn.execute(
+                            'SELECT * FROM position_motif_taxonomy WHERE position_id=?',
+                            (row['id'],)).fetchone()) is not None else None),
                     mate_before=row['mate_before'],
                     best_pv_uci=row['best_pv_uci'],
                     played_pv_uci=row['played_pv_uci'],
@@ -1122,20 +1269,26 @@ def lesson_detail(job_id, concept_key):
         rating_bounds = conn.execute('''
             SELECT MIN(tp.estimated_rating) AS rating_min, MAX(tp.estimated_rating) AS rating_max
             FROM training_positions tp
-            JOIN position_concepts pc ON pc.position_id = tp.id
-            WHERE tp.job_id = ? AND pc.concept_key = ? AND pc.is_primary = 1 AND tp.estimated_rating IS NOT NULL
-        ''', (job_id, concept_key)).fetchone()
+            WHERE tp.job_id = ? AND tp.estimated_rating IS NOT NULL
+        ''', (job_id,)).fetchone()
         lesson_options = conn.execute('''
             SELECT lc.key, lc.name
             FROM learning_concepts lc
             JOIN position_concepts pc ON pc.concept_key = lc.key
             JOIN training_positions tp ON tp.id = pc.position_id
             WHERE tp.job_id = ? AND pc.is_primary = 1
-              AND lc.key <> 'candidate_evaluation'
+              AND lc.key <> 'candidate_evaluation' AND lc.status <> 'retired'
               AND (lc.source = 'built_in' OR lc.status IN ('personal','promoted'))
             GROUP BY lc.key, lc.name, lc.priority
             ORDER BY lc.name COLLATE NOCASE ASC, lc.key ASC
         ''', (job_id,)).fetchall()
+        taxonomy_scopes = conn.execute("""
+            SELECT DISTINCT tx.context_key, tx.move_type_key
+            FROM training_positions tp
+            JOIN position_concepts pc ON pc.position_id=tp.id AND pc.is_primary=1
+            JOIN position_motif_taxonomy tx ON tx.position_id=tp.id
+            WHERE tp.job_id=? AND pc.concept_key=?
+        """, (job_id, concept_key)).fetchall()
         has_position = conn.execute('''
             SELECT 1
             FROM training_positions tp
@@ -1157,6 +1310,10 @@ def lesson_detail(job_id, concept_key):
         'lesson_detail.html', job_id=job_id, lesson=dict(lesson),
         rating_min=rating_min, rating_max=rating_max,
         lesson_options=[dict(row) for row in lesson_options],
+        lesson_taxonomy_contexts=[name for key, name in COACHING_CONTEXTS.items()
+                                  if any(scope['context_key'] == key for scope in taxonomy_scopes)],
+        lesson_taxonomy_move_types=[name for key, name in COACHING_MOVE_TYPES.items()
+                                    if any(scope['move_type_key'] == key for scope in taxonomy_scopes)],
     )
 
 
@@ -1170,8 +1327,17 @@ def trainer(job_id):
     learning_mode = request.args.get('learning_mode', '').strip().lower()
     if learning_mode not in {'mistakes', 'blunders', 'excellent', 'brilliant', 'opposition'}:
         learning_mode = ''
-    sort_key = request.args.get('sort', 'rating-asc').strip().lower()
-    if sort_key not in {'rating-asc', 'rating-desc', 'date-desc', 'date-asc', 'move-asc', 'move-desc'}:
+    # An unfiltered general playlist should mix openings and motifs. Preserve
+    # explicit sorting and all lesson/opening/single-position launch behavior.
+    general_playlist = not any((concept_key, opening_key, opening_variation, learning_mode,
+                                request.args.get('context'), request.args.get('move_type'),
+                                request.args.get('position'), request.args.get('rating_min'),
+                                request.args.get('rating_max')))
+    default_sort = 'balanced' if general_playlist else 'rating-asc'
+    sort_key = request.args.get('sort', default_sort).strip().lower()
+    if sort_key not in {'balanced', 'rating-asc', 'rating-desc', 'date-desc', 'date-asc', 'move-asc', 'move-desc'}:
+        sort_key = default_sort
+    if sort_key == 'balanced' and not general_playlist:
         sort_key = 'rating-asc'
     listing_scope = request.args.get('listing', '').strip() == '1'
     try:
@@ -1435,9 +1601,45 @@ def _position_concepts(conn, position_ids):
     return grouped
 
 
+def _position_taxonomies(conn, position_ids):
+    """Expose exact two/three-level paths; read-only and batch scoped."""
+    if not position_ids:
+        return {}
+    from coaching_taxonomy import CONTEXTS, MOVE_TYPES, TAXONOMY_VERSION
+    output = {}
+    for offset in range(0, len(position_ids), 400):
+        chunk = position_ids[offset:offset + 400]
+        placeholders = ','.join('?' for _ in chunk)
+        rows = conn.execute(f"""
+            SELECT tx.position_id, tx.context_key, tx.move_type_key,
+                   tx.motif_key, tx.confidence, tx.evidence, tx.taxonomy_version,
+                   lc.name AS motif_name
+            FROM position_motif_taxonomy tx
+            JOIN learning_concepts lc ON lc.key=tx.motif_key
+            WHERE tx.position_id IN ({placeholders})
+        """, tuple(chunk)).fetchall()
+        for row in rows:
+            data = dict(row)
+            ctx = data['context_key']; move_type = data['move_type_key']
+            if ctx not in CONTEXTS or move_type not in (*MOVE_TYPES, None):
+                continue
+            path = [{'level': 'context', 'key': ctx, 'name': CONTEXTS[ctx]}]
+            if move_type:
+                path.append({'level': 'move_type', 'key': move_type, 'name': MOVE_TYPES[move_type]})
+            path.append({'level': 'motif', 'key': data['motif_key'], 'name': data['motif_name']})
+            data.update(context_name=CONTEXTS[ctx], move_type_name=MOVE_TYPES.get(move_type),
+                        levels=path)
+            output[data['position_id']] = data
+    return output
+
+
 @app.get('/api/jobs/<int:job_id>/positions')
 def positions(job_id):
     concept_key = request.args.get('concept', '').strip()
+    context_filter = request.args.get('context', '').strip()
+    move_type_filter = request.args.get('move_type', '').strip()
+    if context_filter not in {'', 'attack', 'defend'} or move_type_filter not in {'', 'general', 'tactical', 'strategic'}:
+        return jsonify({'error': 'Invalid taxonomy filter'}), 400
     opening_key = request.args.get('opening', '').strip()
     opening_variation = request.args.get('variation', '')
     learning_mode = request.args.get('learning_mode', '').strip().lower()
@@ -1477,7 +1679,7 @@ def positions(job_id):
         'move-desc': 'ORDER BY tp.move_number DESC, tp.opening_history ASC, tp.id ASC',
         }.get(sort_key, 'ORDER BY CASE WHEN tp.estimated_rating IS NULL THEN 1 ELSE 0 END, tp.estimated_rating ASC, tp.id ASC')
         if concept_key:
-            join = 'JOIN position_concepts selected_pc ON selected_pc.position_id = tp.id AND selected_pc.is_primary = 1'
+            join += ' JOIN position_concepts selected_pc ON selected_pc.position_id = tp.id AND selected_pc.is_primary = 1'
             where += ' AND selected_pc.concept_key = ?'
             params.append(concept_key)
         if opening_key:
@@ -1486,6 +1688,17 @@ def positions(job_id):
             if opening_variation:
                 where += ' AND tp.opening_variation = ?'
                 params.append(opening_variation)
+        if context_filter or move_type_filter:
+            join += ' JOIN position_motif_taxonomy scoped_tx ON scoped_tx.position_id = tp.id'
+            if context_filter:
+                where += ' AND scoped_tx.context_key = ?'
+                params.append(context_filter)
+            if move_type_filter:
+                if move_type_filter == 'general':
+                    where += ' AND scoped_tx.move_type_key IS NULL'
+                else:
+                    where += ' AND scoped_tx.move_type_key = ?'
+                    params.append(move_type_filter)
         if learning_mode:
             where += ' AND tp.learning_mode = ?'
             params.append(learning_mode)
@@ -1528,7 +1741,9 @@ def positions(job_id):
             items = enrich_opening_playlist(conn, job_id, opening_key, items)
 
         concepts = _position_concepts(conn, [item['id'] for item in items])
+        taxonomy_paths = _position_taxonomies(conn, [item['id'] for item in items])
         for item in items:
+            item['taxonomy'] = taxonomy_paths.get(item['id'])
             item['concepts'] = concepts.get(item['id'], [])
             item['primary_concept'] = next(
                 (concept for concept in item['concepts'] if concept['is_primary']),
@@ -1572,6 +1787,10 @@ def training_playlist_manifest(job_id):
             return jsonify([by_id[value] for value in ids if value in by_id])
 
         concept = request.args.get('concept', '').strip()
+        context_filter = request.args.get('context', '').strip()
+        move_type_filter = request.args.get('move_type', '').strip()
+        if context_filter not in {'', 'attack', 'defend'} or move_type_filter not in {'', 'general', 'tactical', 'strategic'}:
+            return jsonify({'error': 'Invalid taxonomy filter'}), 400
         opening = request.args.get('opening', '').strip()
         variation = request.args.get('variation', '')
         mode = request.args.get('learning_mode', '').strip().lower()
@@ -1596,6 +1815,17 @@ def training_playlist_manifest(job_id):
             join = 'JOIN position_concepts pc ON pc.position_id = tp.id AND pc.is_primary = 1'
             where.append('pc.concept_key = ?')
             args.append(concept)
+        if context_filter or move_type_filter:
+            join += ' JOIN position_motif_taxonomy scoped_tx ON scoped_tx.position_id = tp.id'
+            if context_filter:
+                where.append('scoped_tx.context_key = ?')
+                args.append(context_filter)
+            if move_type_filter:
+                if move_type_filter == 'general':
+                    where.append('scoped_tx.move_type_key IS NULL')
+                else:
+                    where.append('scoped_tx.move_type_key = ?')
+                    args.append(move_type_filter)
         if opening:
             where.append('tp.opening_key = ?')
             args.append(opening)
@@ -1619,9 +1849,27 @@ def training_playlist_manifest(job_id):
             'move-asc': 'ORDER BY tp.move_number ASC, tp.opening_history ASC, tp.id ASC',
             'move-desc': 'ORDER BY tp.move_number DESC, tp.opening_history ASC, tp.id ASC',
         }.get(sort_key, 'ORDER BY tp.estimated_rating IS NULL, tp.estimated_rating ASC, tp.id ASC')
-        rows = conn.execute(f'''SELECT tp.id, tp.game_id, tp.learned, tp.fen
-            FROM training_positions tp {join}
-            WHERE {' AND '.join(where)} {order}''', tuple(args)).fetchall()
+        # Only unfiltered All Positions training uses balanced randomness.
+        # The explicit sort key is supplied by the trainer page; direct manifest
+        # consumers retain their historical rating-based default.
+        balanced = (sort_key == 'balanced' and not any((concept, context_filter,
+                    move_type_filter, opening, variation, mode, requested_id,
+                    rating_min, rating_max)))
+        if balanced:
+            rows = conn.execute(f'''SELECT tp.id, tp.game_id, tp.learned, tp.fen,
+                tp.opening_key, tp.learning_mode,
+                COALESCE(tx.motif_key,
+                    (SELECT pc.concept_key FROM position_concepts pc
+                     WHERE pc.position_id=tp.id AND pc.is_primary=1 LIMIT 1),
+                    'unclassified') AS motif_key
+                FROM training_positions tp
+                LEFT JOIN position_motif_taxonomy tx ON tx.position_id=tp.id
+                {join} WHERE {' AND '.join(where)} ORDER BY tp.id ASC''', tuple(args)).fetchall()
+            rows = balanced_playlist_order(rows)
+        else:
+            rows = conn.execute(f'''SELECT tp.id, tp.game_id, tp.learned, tp.fen
+                FROM training_positions tp {join}
+                WHERE {' AND '.join(where)} {order}''', tuple(args)).fetchall()
         seen = set()
         output = []
         for row in rows:
@@ -1670,7 +1918,9 @@ def restore_training_playlist(job_id):
                        tp.best_move_uci, tp.best_move_san,
                        tp.user_color, tp.move_number, tp.mistake_ply, tp.game_date, tp.opponent,
                        tp.learned, tp.attempts, tp.correct_attempts, tp.centipawn_loss,
-                       tp.difficulty_score, tp.estimated_rating, tp.coach_prompt, tp.opening_name, tp.opening_variation, tp.opening_eco, tp.historical_match
+                       tp.difficulty_score, tp.estimated_rating, tp.coach_prompt, tp.coach_explanation,
+                       tp.eval_before_cp, tp.eval_after_cp, tp.mate_before, tp.mate_after,
+                       tp.opening_name, tp.opening_variation, tp.opening_eco, tp.historical_match
                 FROM training_positions tp
                 WHERE tp.job_id = ? AND tp.id IN ({placeholders})
             ''', (job_id, *chunk)).fetchall()
@@ -1695,7 +1945,9 @@ def restore_training_playlist(job_id):
                     pass
 
         concepts = _position_concepts(conn, [item['id'] for item in items])
+        taxonomy_paths = _position_taxonomies(conn, [item['id'] for item in items])
         for item in items:
+            item['taxonomy'] = taxonomy_paths.get(item['id'])
             item['concepts'] = concepts.get(item['id'], [])
             item['primary_concept'] = next(
                 (concept for concept in item['concepts'] if concept['is_primary']),
@@ -1717,13 +1969,16 @@ def lesson_plans(job_id):
                        THEN COALESCE(tp.game_id, 'position:' || tp.id) END) AS learned_games,
                    SUM(CASE WHEN tp.learned = 1 THEN 1 ELSE 0 END) AS learned_positions,
                    ROUND(AVG(pc.confidence), 3) AS avg_confidence,
-                   SUM(CASE WHEN pc.is_primary = 1 THEN 1 ELSE 0 END) AS primary_positions
+                   SUM(CASE WHEN pc.is_primary = 1 THEN 1 ELSE 0 END) AS primary_positions,
+                   GROUP_CONCAT(DISTINCT tx.context_key) AS coaching_contexts,
+                   GROUP_CONCAT(DISTINCT tx.move_type_key) AS coaching_move_types
             FROM position_concepts pc
             JOIN learning_concepts lc ON lc.key = pc.concept_key
             JOIN training_positions tp ON tp.id = pc.position_id
+            LEFT JOIN position_motif_taxonomy tx ON tx.position_id = tp.id
             WHERE tp.job_id = ? AND pc.is_primary = 1
               AND lc.key <> 'candidate_evaluation'
-              AND (lc.source = 'built_in' OR lc.status IN ('personal', 'promoted'))
+              AND lc.status <> 'retired' AND (lc.source = 'built_in' OR lc.status IN ('personal', 'promoted'))
             GROUP BY lc.key, lc.name, lc.family, lc.description, lc.source, lc.status, lc.priority
             ORDER BY lc.name COLLATE NOCASE ASC, lc.key ASC
         ''', (job_id,)).fetchall()
@@ -1735,6 +1990,12 @@ def lesson_plans(job_id):
 def position_library(job_id):
     """Return one server-paginated lesson position page."""
     concept_key = request.args.get('concept', '').strip()
+    context_filter = request.args.get('context', '').strip()
+    move_type_filter = request.args.get('move_type', '').strip()
+    if context_filter not in {'', 'attack', 'defend'}:
+        return jsonify({'error': 'Invalid coaching context'}), 400
+    if move_type_filter not in {'', 'general', 'tactical', 'strategic'}:
+        return jsonify({'error': 'Invalid move type'}), 400
     opening_key = request.args.get('opening', '').strip()
     opening_variation = request.args.get('variation', '')
     status_filter = request.args.get('status', 'all').strip().lower()
@@ -1789,6 +2050,18 @@ def position_library(job_id):
                 base_where += ' AND tp.opening_variation = ?'
                 base_params.append(opening_variation)
 
+        if context_filter or move_type_filter:
+            join += ' JOIN position_motif_taxonomy scoped_tx ON scoped_tx.position_id = tp.id'
+            if context_filter:
+                base_where += ' AND scoped_tx.context_key = ?'
+                base_params.append(context_filter)
+            if move_type_filter:
+                if move_type_filter == 'general':
+                    base_where += ' AND scoped_tx.move_type_key IS NULL'
+                else:
+                    base_where += ' AND scoped_tx.move_type_key = ?'
+                    base_params.append(move_type_filter)
+
         # Concept, learning mode and rating define the lesson slice whose progress
         # we want to measure. Status is only a listing filter: otherwise choosing
         # "Learned" would make the progress statistics trivially read 100%.
@@ -1832,7 +2105,9 @@ def position_library(job_id):
             has_next = len(light_rows) > per_page
             items = [dict(row) for row in light_rows[:per_page]]
             concepts = _position_concepts(conn, [item['id'] for item in items])
+            taxonomy_paths = _position_taxonomies(conn, [item['id'] for item in items])
             for item in items:
+                item['taxonomy'] = taxonomy_paths.get(item['id'])
                 item['learned'] = bool(item['learned'])
                 item['concepts'] = concepts.get(item['id'], [])
                 item['primary_concept'] = next(
@@ -2371,6 +2646,7 @@ def attempt(position_id):
             'difficulty_score': row['difficulty_score'],
             'estimated_rating': row['estimated_rating'],
             'concepts': concepts,
+            'taxonomy': _position_taxonomies(conn, [position_id]).get(position_id),
             'coach_explanation': row['coach_explanation'],
             'accepted_move_explanation': accepted_move_explanation,
         })
@@ -2600,16 +2876,38 @@ def analytics_feedback():
     with connect() as conn:
         rows = report_rows(conn, request.args)
         facets = report_facets(conn)
-    summary = report_summary(rows)
+        change_rates = taxonomy_change_rates(conn, request.args)
+        charts = {
+            'changes': coaching_metric_chart(conn, request.args, metric='changes',
+                         group_by=request.args.get('chart_changes_group', 'motif')),
+            'approval': coaching_metric_chart(conn, request.args, metric='approval',
+                          group_by=request.args.get('chart_approval_group', 'feedback_area')),
+        }
+    # Historical motif thumbs remain in CSV and regression evidence, not the UI.
+    visible_rows = [r for r in rows if r['feedback_type'] != 'motif']
+    summary = report_summary(visible_rows)
     # Full evidence belongs in CSV. Avoid sending large JSON PV/critical
     # event blobs to the dashboard for each item on every filter change.
     recent_fields = ('feedback_type', 'rating', 'username', 'date_range',
                      'job_id', 'position_id', 'message_id', 'lesson_name',
                      'primary_motif_name', 'opening_name', 'opening_eco',
+                     'selected_taxonomy_name', 'selected_taxonomy_key', 'content_snapshot',
                      'learning_mode', 'move_number', 'updated_at')
-    return jsonify({**summary, 'facets': facets,
-                    'recent': [{k: row.get(k) for k in recent_fields}
-                               for row in rows[:80]]})
+    return jsonify({**summary, 'facets': facets, 'taxonomy_change_rates': change_rates, 'charts': charts,
+                    'recent': [{**{k: row.get(k) for k in recent_fields},
+                                'current_taxonomy_change_status': current_taxonomy_status(row)}
+                               for row in visible_rows[:80]]})
+
+
+@app.get('/api/coach/taxonomy.csv')
+def coach_taxonomy_csv():
+    """Every solved position and its current per-field change status."""
+    with connect() as conn:
+        rows = solved_taxonomy_rows(conn, request.args)
+    return send_file(
+        io.BytesIO(solved_taxonomy_csv(rows)), mimetype='text/csv; charset=utf-8',
+        as_attachment=True, download_name='chess_coaching_taxonomy.csv',
+    )
 
 
 @app.get('/api/analytics/feedback.csv')
@@ -2652,13 +2950,16 @@ def coach_reset_feedback():
                 WHERE position_id IN (SELECT id FROM training_positions WHERE job_id=?)''', (job_id,)).rowcount
             coaching = conn.execute('''DELETE FROM coach_message_feedback
                 WHERE position_id IN (SELECT id FROM training_positions WHERE job_id=?)''', (job_id,)).rowcount
+            taxonomy = conn.execute('''DELETE FROM position_taxonomy_feedback
+                WHERE position_id IN (SELECT id FROM training_positions WHERE job_id=?)''', (job_id,)).rowcount
         else:
             positions = conn.execute('DELETE FROM position_feedback').rowcount
             coaching = conn.execute('DELETE FROM coach_message_feedback').rowcount
+            taxonomy = conn.execute('DELETE FROM position_taxonomy_feedback').rowcount
         conn.commit()
     return jsonify({'ok': True, 'job_id': job_id,
                     'deleted': {'position_explanation_motif': positions,
-                                'chat_coaching': coaching}})
+                                'chat_coaching': coaching, 'taxonomy_selections': taxonomy}})
 
 
 @app.route('/api/positions/<int:position_id>/feedback', methods=['GET', 'POST'])
@@ -2669,7 +2970,8 @@ def position_feedback(position_id):
                 return jsonify({'error': 'Position not found'}), 404
             return jsonify({'ratings': position_votes(conn, position_id),
                             'corrections': position_feedback_details(conn, position_id),
-                            'motif_options': motif_feedback_options(conn, position_id)})
+                            'motif_options': motif_feedback_options(conn, position_id),
+                            'taxonomy_feedback': taxonomy_feedback_choices(conn, position_id)})
         payload = request.get_json(silent=True) or {}
         category = str(payload.get('category') or '')
         try:
@@ -2695,6 +2997,22 @@ def position_feedback(position_id):
     return jsonify({'ok': True, 'ratings': ratings, 'corrections': details})
 
 
+@app.post('/api/positions/<int:position_id>/taxonomy-feedback')
+def set_position_taxonomy_feedback(position_id):
+    payload = request.get_json(silent=True) or {}
+    try:
+        with connect() as conn:
+            result = save_taxonomy_feedback(conn, position_id,
+                payload.get('field'), payload.get('selected_key'))
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
+    except LookupError as exc:
+        return jsonify({'error': str(exc)}), 404
+    except PermissionError as exc:
+        return jsonify({'error': str(exc)}), 403
+    return jsonify({'ok': True, 'taxonomy_feedback': result})
+
+
 @app.get('/api/positions/<int:position_id>/solution')
 def position_solution(position_id):
     _enrich_saved_variations(position_id)
@@ -2718,6 +3036,7 @@ def position_solution(position_id):
         'difficulty_score': row['difficulty_score'],
         'estimated_rating': row['estimated_rating'],
         'concepts': concepts,
+        'taxonomy': _position_taxonomies(conn, [position_id]).get(position_id),
         'coach_explanation': row['coach_explanation'],
         'historical_match': row['historical_match'],
         'user_color': row['user_color'],
@@ -2917,9 +3236,10 @@ def coach_message_feedback(message_id):
 
     with connect() as conn:
         row = conn.execute('''
-            SELECT cm.id, cm.role, ct.account_id, ct.position_id
+            SELECT cm.id, cm.role, ct.account_id, ct.position_id, tp.coaching_version
             FROM coach_messages cm
             JOIN coach_threads ct ON ct.id = cm.thread_id
+            LEFT JOIN training_positions tp ON tp.id = ct.position_id
             WHERE cm.id = ?
         ''', (message_id,)).fetchone()
         if row is None:
@@ -2934,11 +3254,13 @@ def coach_message_feedback(message_id):
             return jsonify({'ok': True, 'message_id': message_id, 'rating': 0,
                             'suggested_text': None})
         conn.execute('''
-            INSERT INTO coach_message_feedback(message_id, account_id, position_id, rating, lesson_key, suggested_text)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO coach_message_feedback
+                (message_id, account_id, position_id, rating, lesson_key, suggested_text, coaching_version_at_vote)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(message_id) DO UPDATE SET
                 rating = excluded.rating,
                 lesson_key = excluded.lesson_key,
+                coaching_version_at_vote = excluded.coaching_version_at_vote,
                 suggested_text = CASE
                     WHEN excluded.rating = 1 THEN NULL
                     WHEN excluded.suggested_text IS NOT NULL THEN excluded.suggested_text
@@ -2946,7 +3268,7 @@ def coach_message_feedback(message_id):
                     ELSE NULL END,
                 updated_at = CURRENT_TIMESTAMP
         ''', (message_id, row['account_id'], row['position_id'], rating,
-              str(payload.get('lesson_key') or '')[:150], suggested_text))
+              str(payload.get('lesson_key') or '')[:150], suggested_text, row['coaching_version']))
         conn.commit()
     with connect() as conn:
         updated = conn.execute('SELECT suggested_text FROM coach_message_feedback WHERE message_id=?', (message_id,)).fetchone()
@@ -3141,6 +3463,7 @@ if __name__ == '__main__':
     import_existing_json_if_present()
     backfill_learning_concepts()
     backfill_adaptive_concepts()
+    backfill_taxonomy_paths()
     backfill_difficulty_estimates()
     backfill_coaching_texts()
     pause_interrupted_jobs_on_startup()

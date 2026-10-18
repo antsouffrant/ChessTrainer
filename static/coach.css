@@ -101,3 +101,31 @@
 
 .coach-actions .secondary-button {display:inline-flex;align-items:center;gap:8px;text-decoration:none;}
 .coach-correction-preview {max-width:275px;overflow-wrap:anywhere;line-height:1.55;}
+
+/* Shared percentage-track primitives for the two independent Coach charts. */
+.comparison-bar {height:13px; display:flex; border-radius:99px; overflow:hidden;
+  background:rgba(255,255,255,.08); border:1px solid rgba(255,255,255,.07);}
+.comparison-segment,.comparison-remaining,.comparison-unrated {display:block; height:100%;}
+.comparison-segment.comparison-approval {background:#65bb90;}
+.comparison-segment.comparison-change {background:#d6a65a;}
+.comparison-remaining {background:rgba(255,255,255,.085);}
+.comparison-unrated {width:100%; background:repeating-linear-gradient(120deg,rgba(255,255,255,.07),rgba(255,255,255,.07) 4px,transparent 4px,transparent 8px);}
+/* v75: two focused charts, each with its group-by selector in its own heading. */
+.coach-metric-panel {display:grid; gap:16px;}
+.coach-metric-heading {display:flex; justify-content:space-between; align-items:start; gap:16px; flex-wrap:wrap;}
+.coach-metric-heading > div {flex:1 1 310px; min-width:0;}
+.coach-metric-heading p, .coach-metric-help {font-size:.82rem; line-height:1.6; margin:8px 0 0;}
+.coach-chart-category {display:flex; flex-direction:column; gap:7px; min-width:190px; font-size:.79rem; font-weight:700; color:var(--muted);}
+.coach-chart-category select {min-height:42px; min-width:0; max-width:100%; color:var(--text); background:#1c222a; border:1px solid var(--line); border-radius:10px; padding:8px 10px;}
+.coach-chart-axis {display:flex; justify-content:space-between; margin-left:calc(205px + 12px); margin-right:calc(60px + 58px + 20px); color:var(--muted); font-size:.72rem; font-variant-numeric:tabular-nums;}
+#coach-changes-chart,#coach-approval-chart {display:grid; gap:0; min-width:0;}
+.coach-metric-row {display:grid; grid-template-columns:minmax(95px,205px) minmax(0,1fr) 60px 58px; gap:12px; align-items:center; min-width:0; border-top:1px solid rgba(255,255,255,.08); padding:15px 0;}
+.coach-metric-category {overflow-wrap:anywhere; font-size:.84rem; font-weight:650;}
+.coach-metric-value {text-align:right; font-size:.84rem; font-variant-numeric:tabular-nums;}
+.coach-metric-count {font-size:.74rem; color:var(--muted); text-align:right; white-space:nowrap; font-variant-numeric:tabular-nums;}
+@media (max-width:700px) {
+  .coach-metric-row {grid-template-columns:minmax(0,1fr) 58px 54px; gap:8px;}
+  .coach-metric-category {grid-column:1/-1;}
+  .coach-chart-axis {margin-left:0; margin-right:calc(58px + 54px + 16px);}
+  .coach-chart-category {width:100%;}
+}

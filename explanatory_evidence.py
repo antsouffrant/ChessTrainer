@@ -204,7 +204,7 @@ def position_context(board):
 
 def explanation_variations(board, best, played, best_pv, played_pv,
                            best_cp=None, played_cp=None, best_mate=None,
-                           played_mate=None, alternatives=None, probe=None):
+                           played_mate=None, alternatives=None, probe=None, coaching_probes=None):
     """2-3 non-duplicated explanatory lines: best, actual, strongest contrast.
 
     A probe is an extra engine-tested reply to the actual move. For positive
@@ -257,6 +257,28 @@ def explanation_variations(board, best, played, best_pv, played_pv,
         if (len(line['pv_uci']) >= 2 and
                 not any(x['pv_uci'][:2] == line['pv_uci'][:2] for x in lines)):
             lines.append(line)
+    # Independently tested replies are supplementary: never replace the
+    # deeper principal variations saved during Analyze. Retain only legal,
+    # nonduplicate branches for future explanation/regression inspection.
+    if isinstance(coaching_probes, dict):
+        for branch in coaching_probes.get('branches', []):
+            if not isinstance(branch, dict):
+                continue
+            try:
+                root = chess.Move.from_uci(branch['root_uci'])
+            except (KeyError, ValueError, TypeError):
+                continue
+            if root not in board.legal_moves:
+                continue
+            for tested in branch.get('lines', [])[:2]:
+                role = 'coaching_best_reply' if branch.get('role') == 'best' else 'coaching_game_reply'
+                line = describe_variation(board, tested.get('pv_uci'), role,
+                                          tested.get('eval_cp'), tested.get('mate'),
+                                          tested.get('depth'), first_move=root,
+                                          source='proactive_stockfish')
+                if (len(line['pv_uci']) >= 2 and
+                        not any(item['pv_uci'][:2] == line['pv_uci'][:2] for item in lines)):
+                    lines.append(line)
     grounded = decision_facts(board, best, played, best_pv, played_pv,
                               alternatives, best_cp, played_cp) if best in board.legal_moves else None
     # Keep the lightweight summary, not duplicate PV traces, in persistence.
@@ -270,7 +292,7 @@ def explanation_variations(board, best, played, best_pv, played_pv,
                            'difference_cp': (max(0, best_cp - played_cp)
                                              if best_cp is not None and played_cp is not None else None),
                            'recommended_mate': best_mate, 'played_mate': played_mate},
-            'lines': [x for x in lines if x['pv_uci']][:3]}
+            'lines': [x for x in lines if x['pv_uci']][:7]}
 
 
 def decode_variations(raw):

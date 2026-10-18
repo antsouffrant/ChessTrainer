@@ -28,11 +28,16 @@ function renderLessons(lessons) {
     const learned = Number(lesson.learned_positions || 0);
     const pct = positions ? Math.round((learned / positions) * 100) : 0;
     const detailHref = `/lessons/${lessonJobId}/${encodeURIComponent(lesson.key)}`;
+    const rootLabels = (lesson.coaching_contexts || '').split(',').filter(Boolean).map(key =>
+      key === 'attack' ? 'Attacking Plans' : key === 'defend' ? 'Defensive Resources' : '');
+    const typeLabels = (lesson.coaching_move_types || '').split(',').filter(Boolean).map(key =>
+      key === 'tactical' ? 'Tactical Calculation' : key === 'strategic' ? 'Strategic Comprehension' : '');
+    const taxonomyTag = [...rootLabels, ...typeLabels].filter(Boolean).join(' · ');
     return `
       <article class="lesson-card lesson-tile glass" data-href="${detailHref}" tabindex="0" aria-label="Open ${escapeHtml(lesson.name)} lesson">
         <div class="lesson-rank">${index + 1}</div>
         <div class="lesson-card-main">
-          <div class="lesson-family ${lesson.source !== 'built_in' ? 'personal' : ''}">${escapeHtml(lesson.family)}${lesson.source !== 'built_in' ? ' · PERSONAL' : ''}</div>
+          <div class="lesson-family ${lesson.source !== 'built_in' ? 'personal' : ''}">${escapeHtml(taxonomyTag || lesson.family)}${lesson.source !== 'built_in' ? ' · PERSONAL' : ''}</div>
           <h2>${escapeHtml(lesson.name)}</h2>
           <p class="lesson-subtitle">${escapeHtml(lesson.description)}</p>
           <div class="lesson-card-meta"><span><strong>${fmtCount(games)}</strong> game${games === 1 ? '' : 's'}</span><span><strong>${fmtCount(positions)}</strong> position${positions === 1 ? '' : 's'}</span><span><strong>${fmtCount(learned)}</strong> learned</span><span><strong>${pct}%</strong> complete</span></div>

@@ -5,10 +5,10 @@
   <header class="lesson-hero glass">
     <div><div class="eyebrow"><i class="fa-solid fa-gears"></i> BACKGROUND WORK</div>
       <h1>Process</h1>
-      <p class="lede">Monitor game retrieval, Stockfish evaluation, and metadata refresh for each game list. One database-intensive task runs at a time; training can continue while work proceeds.</p>
+      <p class="lede">Track Games (Lichess retrieval), Positions (Stockfish evaluation), and Coaching (computer-aided coaching analysis) for each game list. Engine-intensive tasks run separately; training can continue.</p>
     </div>
   </header>
-  <div class="process-legend glass">Retrieval downloads games once when a new list is created. Successful retrieval automatically starts analysis. Analysis uses the saved game batch and Stockfish. Refresh rebuilds lesson motifs, opening labels, difficulty estimates, and explanations using already stored information. Pause preserves the checkpoint. Restart Analysis deletes this game list’s existing analysis, positions, metadata, learned progress, and associated coaching feedback before reanalyzing its saved PGN. Export feedback first if you want to keep it.</div>
+  <div class="process-legend glass">Games downloads PGNs from Lichess once when a list is created, then starts Positions automatically. Positions screens and deep-evaluates games with Stockfish. Coaching uses its own targeted Stockfish probes and the retained position evaluations to regenerate motifs, context, and explanations. An unchanged coaching probe is reused when its inputs and engine settings match. Pause preserves the checkpoint. Restart Analysis deletes this game list’s existing analysis, positions, metadata, learned progress, and associated coaching feedback before reanalyzing its saved PGN. Export feedback first if you want to keep it.</div>
   <div class="process-error hidden" id="process-feedback" role="alert"></div>
   <div id="process-list" class="process-list" aria-live="polite"><div class="glass process-card"><p>Loading process status…</p></div></div>
 </section>
