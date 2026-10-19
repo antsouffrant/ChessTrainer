@@ -259,6 +259,33 @@ CREATE TABLE IF NOT EXISTS coach_messages (
     FOREIGN KEY(thread_id) REFERENCES coach_threads(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS coach_board_attempts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    position_id INTEGER NOT NULL,
+    session_key TEXT NOT NULL,
+    move_uci TEXT NOT NULL,
+    move_san TEXT,
+    correct INTEGER NOT NULL DEFAULT 0,
+    from_saved_line INTEGER NOT NULL DEFAULT 0,
+    eval_cp INTEGER,
+    mate INTEGER,
+    best_reply_san TEXT,
+    verified_pv_json TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(position_id) REFERENCES training_positions(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_coach_board_attempts_session
+    ON coach_board_attempts(position_id, session_key, id);
+
+CREATE TABLE IF NOT EXISTS coach_solve_recaps (
+    position_id INTEGER NOT NULL,
+    session_key TEXT NOT NULL,
+    message_id INTEGER NOT NULL UNIQUE,
+    PRIMARY KEY(position_id, session_key),
+    FOREIGN KEY(position_id) REFERENCES training_positions(id) ON DELETE CASCADE,
+    FOREIGN KEY(message_id) REFERENCES coach_messages(id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS coach_proactive_history (
     job_id INTEGER NOT NULL,
     classic_key TEXT NOT NULL,
@@ -382,6 +409,28 @@ CREATE TABLE IF NOT EXISTS coach_message_feedback (
 );
 CREATE INDEX IF NOT EXISTS idx_coach_feedback_account ON coach_message_feedback(account_id, rating, updated_at);
 
+-- A rated explanation belongs to a specific attempted continuation, rather
+-- than one combined solve recap. The original position_feedback explanation
+-- row remains the canonical 'solving' continuation for backward compatibility.
+CREATE TABLE IF NOT EXISTS continuation_explanation_feedback (
+    position_id INTEGER NOT NULL,
+    continuation_key TEXT NOT NULL,
+    account_id INTEGER NOT NULL,
+    rating INTEGER NOT NULL CHECK(rating IN (-1, 1)),
+    lesson_key TEXT,
+    content_snapshot TEXT,
+    coaching_version TEXT,
+    suggested_text TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY(position_id, continuation_key),
+    FOREIGN KEY(position_id) REFERENCES training_positions(id) ON DELETE CASCADE,
+    FOREIGN KEY(account_id) REFERENCES accounts(id)
+);
+CREATE INDEX IF NOT EXISTS idx_continuation_feedback_account
+ON continuation_explanation_feedback(account_id, rating, updated_at);
+
+
 -- Activity history is append-only across manual puzzle resets. The first
 -- legal training attempt creates a session; merely showing a puzzle does not.
 CREATE TABLE IF NOT EXISTS player_solve_sessions (
@@ -493,6 +542,11 @@ def _seed_learning_concepts(conn):
 def init_db():
     with connect() as conn:
         conn.executescript(SCHEMA)
+
+        # Store the Stockfish PV already computed when verifying an attempted move.
+        # This is a lightweight additive migration; no deep reanalysis.
+        if 'verified_pv_json' not in _columns(conn, 'coach_board_attempts'):
+            conn.execute('ALTER TABLE coach_board_attempts ADD COLUMN verified_pv_json TEXT')
 
         # Existing chat thumbs remain intact. Context is optional for older rows.
         if 'lesson_key' not in _columns(conn, 'coach_message_feedback'):

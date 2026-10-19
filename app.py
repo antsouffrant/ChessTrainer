@@ -34,6 +34,7 @@ from retrieval import retrieve_game_list
 from list_readiness import list_state
 from feedback_analytics import (
     record_position_vote, position_votes, position_feedback_details, motif_feedback_options,
+    record_continuation_vote, continuation_votes, continuation_feedback_details,
     save_taxonomy_feedback, taxonomy_feedback_choices,
     report_rows, report_facets, report_summary, taxonomy_change_rates, solved_taxonomy_rows, solved_taxonomy_csv, coaching_comparison, coaching_metric_chart, current_taxonomy_status, csv_bytes, regression_candidate_rows,
 )
@@ -41,6 +42,7 @@ from process_policy import queue_analysis, restart_analysis
 from player_learning import record_attempt as record_player_attempt, abandon_session as abandon_player_session, summary as player_summary, facets as player_facets, export_rows as player_export_rows, csv_data as player_csv_data, reset_player_records
 from opening_playlist import enrich_opening_playlist, board_identity
 from balanced_playlist import balanced_playlist_order
+from coach_session_recap import record_board_attempt, save_solved_recap, refresh_saved_recaps
 from adaptive_coach import (
     apply_adaptive_concepts_to_position, coach_history, handle_coach_message, get_or_create_thread,
 )
@@ -2509,20 +2511,45 @@ def attempt(position_id):
         move_mate = None
         best_gap_cp = None
         improvement_cp = None
+        review_quality = None
 
         # If the player found a different legal move, judge the quality of that
         # move rather than automatically failing it.  Exact-best remains free
         # and instant; alternatives get a short Stockfish verification.
         if not correct:
-            try:
-                quality = evaluate_move_quality(
-                    row['fen'],
-                    attempted_uci,
-                    chess.BLACK if row['user_color'] == 'black' else chess.WHITE,
-                )
-            except (FileNotFoundError, chess.engine.EngineError, RuntimeError, ValueError) as exc:
-                return jsonify({'error': f'Could not verify move quality: {exc}'}), 503
+            # The actual game move was already evaluated during Positions.
+            # Its saved score and PV are authoritative for this puzzle; avoid
+            # launching an identical Stockfish search in the Training UI.
+            quality = None
+            if (attempted_uci == row['played_move_uci']
+                    and row['eval_after_cp'] is not None):
+                cached_reply = None
+                # played_pv_uci was analyzed *after* the user's game move,
+                # so its first UCI move is already the opponent's reply.
+                saved_pv = str(row['played_pv_uci'] or '').split()
+                if saved_pv:
+                    next_board = board.copy(stack=False)
+                    next_board.push(resolved)
+                    try:
+                        reply = chess.Move.from_uci(saved_pv[0])
+                        if reply in next_board.legal_moves:
+                            cached_reply = next_board.san(reply)
+                    except ValueError:
+                        pass
+                quality = {'eval_cp': int(row['eval_after_cp']),
+                           'mate': row['mate_after'], 'best_reply_san': cached_reply,
+                           'pv_uci': [attempted_uci] + saved_pv}
+            if quality is None:
+                try:
+                    quality = evaluate_move_quality(
+                        row['fen'],
+                        attempted_uci,
+                        chess.BLACK if row['user_color'] == 'black' else chess.WHITE,
+                    )
+                except (FileNotFoundError, chess.engine.EngineError, RuntimeError, ValueError) as exc:
+                    return jsonify({'error': f'Could not verify move quality: {exc}'}), 503
 
+            review_quality = quality
             move_eval_cp = quality['eval_cp']
             move_mate = quality['mate']
             best_cp = row['eval_before_cp']
@@ -2564,6 +2591,14 @@ def attempt(position_id):
                 opening_key=payload.get('opening_key'),
                 max_solve_seconds=puzzle_settings['max_puzzle_solve_seconds'],
             )
+
+        # Independent of optional Player statistics. This lightweight local
+        # evidence log enables a post-solve recap; no additional engine search.
+        record_board_attempt(
+            conn, row, session_key=payload.get('coach_session_key'),
+            move_uci=attempted_uci, move_san=attempted_san,
+            correct=correct, quality=review_quality,
+        )
 
         if correct:
             conn.execute("""
@@ -2889,7 +2924,7 @@ def analytics_feedback():
     # Full evidence belongs in CSV. Avoid sending large JSON PV/critical
     # event blobs to the dashboard for each item on every filter change.
     recent_fields = ('feedback_type', 'rating', 'username', 'date_range',
-                     'job_id', 'position_id', 'message_id', 'lesson_name',
+                     'job_id', 'position_id', 'message_id', 'continuation_key', 'lesson_name',
                      'primary_motif_name', 'opening_name', 'opening_eco',
                      'selected_taxonomy_name', 'selected_taxonomy_key', 'content_snapshot',
                      'learning_mode', 'move_number', 'updated_at')
@@ -2948,17 +2983,21 @@ def coach_reset_feedback():
                 return jsonify({'error': 'Game list not found'}), 404
             positions = conn.execute('''DELETE FROM position_feedback
                 WHERE position_id IN (SELECT id FROM training_positions WHERE job_id=?)''', (job_id,)).rowcount
+            continuations = conn.execute('''DELETE FROM continuation_explanation_feedback
+                WHERE position_id IN (SELECT id FROM training_positions WHERE job_id=?)''', (job_id,)).rowcount
             coaching = conn.execute('''DELETE FROM coach_message_feedback
                 WHERE position_id IN (SELECT id FROM training_positions WHERE job_id=?)''', (job_id,)).rowcount
             taxonomy = conn.execute('''DELETE FROM position_taxonomy_feedback
                 WHERE position_id IN (SELECT id FROM training_positions WHERE job_id=?)''', (job_id,)).rowcount
         else:
             positions = conn.execute('DELETE FROM position_feedback').rowcount
+            continuations = conn.execute('DELETE FROM continuation_explanation_feedback').rowcount
             coaching = conn.execute('DELETE FROM coach_message_feedback').rowcount
             taxonomy = conn.execute('DELETE FROM position_taxonomy_feedback').rowcount
         conn.commit()
     return jsonify({'ok': True, 'job_id': job_id,
                     'deleted': {'position_explanation_motif': positions,
+                                'continuation_explanations': continuations,
                                 'chat_coaching': coaching, 'taxonomy_selections': taxonomy}})
 
 
@@ -2970,6 +3009,8 @@ def position_feedback(position_id):
                 return jsonify({'error': 'Position not found'}), 404
             return jsonify({'ratings': position_votes(conn, position_id),
                             'corrections': position_feedback_details(conn, position_id),
+                            'continuation_ratings': continuation_votes(conn, position_id),
+                            'continuation_corrections': continuation_feedback_details(conn, position_id),
                             'motif_options': motif_feedback_options(conn, position_id),
                             'taxonomy_feedback': taxonomy_feedback_choices(conn, position_id)})
         payload = request.get_json(silent=True) or {}
@@ -2979,6 +3020,16 @@ def position_feedback(position_id):
         except (ValueError, TypeError):
             return jsonify({'error': 'Rating must be -1, 0, or 1'}), 400
         try:
+            if category == 'continuation':
+                continuation_ratings = record_continuation_vote(
+                    conn, position_id, payload.get('continuation_key'), rating,
+                    lesson_key=payload.get('lesson_key') or '',
+                    text=payload.get('content_snapshot') or '',
+                    suggested_text=payload.get('suggested_text'))
+                return jsonify({'ok': True, 'ratings': position_votes(conn, position_id),
+                                'corrections': position_feedback_details(conn, position_id),
+                                'continuation_ratings': continuation_ratings,
+                                'continuation_corrections': continuation_feedback_details(conn, position_id)})
             ratings = record_position_vote(
                 conn, position_id, category, rating,
                 lesson_key=payload.get('lesson_key') or '',
@@ -3044,17 +3095,53 @@ def position_solution(position_id):
     })
 
 
+@app.post('/api/positions/<int:position_id>/coach/solve-recap')
+def position_solve_recap(position_id):
+    """Publish cached post-solve coaching, idempotently, off the move path.
+
+    This endpoint never invokes Stockfish and cannot reveal a solution to an
+    unsolved position. Uncached lines retain the short evaluation returned by
+    the existing attempt verifier, for a future bounded re-probe workflow.
+    """
+    payload = request.get_json(silent=True) or {}
+    with connect() as conn:
+        row = conn.execute('''SELECT tp.*, j.account_id FROM training_positions tp
+            JOIN analysis_jobs j ON j.id=tp.job_id WHERE tp.id=?''', (position_id,)).fetchone()
+        if row is None:
+            return jsonify({'error': 'Position not found'}), 404
+        try:
+            recap = save_solved_recap(conn, row, session_key=payload.get('session_key'))
+        except PermissionError as exc:
+            return jsonify({'error': str(exc)}), 403
+        except ValueError as exc:
+            return jsonify({'error': str(exc)}), 400
+    return jsonify({'ok': True, 'message': recap})
+
+
 @app.get('/api/positions/<int:position_id>/coach')
 def position_coach_history(position_id):
     with connect() as conn:
         row = conn.execute("""
-            SELECT tp.id, j.account_id
+            SELECT tp.*, j.account_id
             FROM training_positions tp JOIN analysis_jobs j ON j.id = tp.job_id
             WHERE tp.id = ?
         """, (position_id,)).fetchone()
         if row is None:
             return jsonify({'error': 'Position not found'}), 404
+        if row['learned']:
+            refresh_saved_recaps(conn, row)
         history = coach_history(conn, position_id, row['account_id'])
+        if not row['learned']:
+            # Re-opening an already-practiced puzzle must not disclose the
+            # previous solve recap or post-solve suggestions prematurely.
+            def post_solve_only(message):
+                try:
+                    kind = json.loads(message.get('structured_json') or '{}').get('kind')
+                except (TypeError, ValueError, AttributeError):
+                    return False
+                return kind in ('solved_attempt_recap', 'historical_reference',
+                                'brilliant_reference')
+            history = [m for m in history if not post_solve_only(m)]
     return jsonify({'messages': history})
 
 

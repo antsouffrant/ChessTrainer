@@ -2996,3 +2996,48 @@ body.theme-wood .mini-square.dark { background: #7b4d2e; }
 .taxonomy-feedback-note { margin-top: 6px; text-align: right; }
 #taxonomy-feedback-status { display: block; font-size: .72rem; color: var(--muted); line-height: 1.35; }
 @media(max-width:780px) { #lesson-concepts { justify-content: flex-start; } .taxonomy-feedback-note { text-align: left; } }
+
+/* v77: the coach owns the explanation and its original position-feedback UI. */
+.coach-position-review { align-self: stretch; max-width:100%; }
+.coach-position-review .explanation-feedback-area { width:100%; }
+.coach-position-review .coach-text { margin:0 0 5px; font-size:.85rem; line-height:1.55; }
+.coach-position-review .inline-feedback-votes { margin-top:9px; }
+.solved-opening { margin:4px 0 0; color:#aab7c8; font-size:.77rem; }
+
+/* v78: one compact explanation package, with move-by-move comments. */
+.coach-panel { grid-template-rows: auto auto auto minmax(200px, 1fr) auto; }
+.coach-form-primary { align-self: end; padding-top: 4px; }
+.coach-form-primary textarea { min-height: 58px; }
+.coach-position-review { gap: 5px; }
+.coach-position-review .explanation-feedback-area { padding: 9px 10px; }
+.coach-attempt-comments { display: grid; gap: 7px; margin-bottom: 8px; }
+.coach-attempt-comments.hidden { display: none; }
+.coach-attempt-comment { padding: 0 0 7px; border-bottom: 1px solid rgba(255,255,255,.09); }
+.coach-attempt-comment p { margin: 2px 0 0; color: #d3d8dc; font-size: .8rem; line-height: 1.45; }
+.coach-attempt-label { display: inline-block; font-size: .62rem; font-weight: 800; letter-spacing: .03em; color: #e1c98c; }
+.coach-solution-comment .coach-text { margin: 3px 0 0; }
+.coach-position-review .inline-feedback-votes { margin-top: 9px; padding-top: 7px; border-top: 1px solid rgba(255,255,255,.08); }
+
+/* Continuation-specific coaching: equal-width chat bubbles irrespective of
+   their sentence length, with failed attempts visually distinct from solving. */
+.coach-chat > .coach-message { width: 88%; max-width: 88%; min-width: 0; box-sizing: border-box; }
+.coach-chat > .coach-message .coach-message-body { box-sizing: border-box; width: 100%; }
+.coach-chat > .coach-attempt-comments {
+  display: flex; flex-direction: column; gap: 10px; align-self: flex-start;
+  width: 88%; max-width: 88%; min-width: 0;
+}
+.coach-chat > .coach-attempt-comments.hidden { display: none; }
+.coach-attempt-comments .coach-continuation-message { width: 100%; max-width: 100%; }
+.coach-message.assistant.coach-continuation-message .coach-message-body {
+  background: linear-gradient(145deg, rgba(69, 133, 186, .2), rgba(46, 89, 139, .15));
+  border: 1px solid rgba(126, 189, 235, .31); color: #e2edf6;
+  padding: 9px 10px;
+}
+.coach-continuation-message .coach-message-label { color: #b0d8f5; }
+.coach-continuation-message .coach-text { margin: 0 0 4px; font-size: .85rem; line-height: 1.55; }
+.coach-continuation-message .inline-feedback-votes {
+  justify-content: flex-end; margin-top: 9px; padding-top: 7px;
+  border-top: 1px solid rgba(163, 213, 247, .15);
+}
+.coach-position-review { align-self: flex-start; width: 88%; max-width: 88%; }
+.coach-position-review .explanation-feedback-area { box-sizing: border-box; }

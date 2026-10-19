@@ -1,3 +1,9 @@
+## v83 · Message-specific approval dimensions
+
+The Approval chart now includes **Continuation type**. It counts thumbs-up over all rated **individual messages/continuations**: solving lines (including legacy explanation votes), earlier/game moves, and other chat coaching. This chart is different from the older **Feedback area** grouping, which intentionally retains distinct-rated-position denominators for historical comparison. The recent feedback table and CSV include `continuation_key` (`solving` for historical solving ratings and the UCI root for failed/game moves), and an optional continuation filter. Correction/regression rows retain the same continuation key. Ratings are latest-per-solution or latest-per-position-and-root, rather than an immutable event log.
+
+---
+
 # Coach analytics — two focused percentage charts (v75)
 
 Coach maintains **two distinct measurements**. Neither is the complement of

@@ -92,3 +92,16 @@ regression evaluator; `trusted_probe_explanation` will refine generic prose
 only when a short demonstrated refutation is better supported. The original
 saved root evaluations and puzzle selection remain authoritative.
 See `PROACTIVE_COACHING.md` for budgets, error handling and limitations.
+
+## v81 · Unified post-solve narrative ownership
+
+Proactive coaching still generates a position-level best-move lead, but
+`continuation_coach.py` now owns the entire rendering of each played branch:
+it uses that lead **instead of**, not in addition to, another immediate root
+observation. Saved/verified PVs supply only distinct opponent and solver
+consequences. `coach_session_recap.py` owns persistence/idempotence only and
+reuses the canonical branch lookup. This removes repeated check evasion in
+"Kh1 moves the king out of check. Kh1 legally answers the check" and strips
+uninformative "after Kh1, ...Kh8" filler when no concrete consequence exists.
+See `NARRATIVE_ARCHITECTURE.md` for the complete responsibilities and remaining
+consolidation plan.

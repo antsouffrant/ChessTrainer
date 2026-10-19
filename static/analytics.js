@@ -30,7 +30,7 @@
   }
   const chartGroupNames = {opening:'opening',motif:'primary learning motif',lesson:'lesson',version:'coach version',
     context:'position context',move_type:'move type',learning_mode:'learning mode',game_list:'game list',
-    taxonomy_field:'taxonomy field',feedback_area:'feedback area'};
+    taxonomy_field:'taxonomy field',feedback_area:'feedback area',continuation_kind:'continuation / message type'};
   function percent(n) { return n == null ? '—' : `${Number(n).toFixed(1)}%`; }
   function drawRateChart(data, metric) {
     const chart = data.charts?.[metric] || {};
@@ -44,7 +44,9 @@
         : ' Historical approvals use versions saved at feedback time.') : '';
     help.textContent = isChange
       ? `Change rate by ${groupName}: positions with any corrected taxonomy label / all solved positions in each category. A position counts once.${caveat}`
-      : `Approval rate by ${groupName}: positions with any thumbs-up / positions with thumbs feedback in each category. Unrated positions are excluded.${caveat}`;
+      : chart.group_by === 'continuation_kind'
+        ? `Approval rate by ${groupName}: independently approved continuations or coach messages / individually rated continuations or coach messages. Unrated messages are excluded.${caveat}`
+        : `Approval rate by ${groupName}: positions with any thumbs-up / positions with thumbs feedback in each category. Unrated positions are excluded.${caveat}`;
     if (!chart.rows?.length) {
       target.innerHTML = '<p class="analytics-empty">No solved positions or rated feedback match these filters.</p>';
       return;
@@ -98,7 +100,9 @@
       const when = r.updated_at ? escape(String(r.updated_at).slice(0, 16)) : '—';
       const taxonomy = r.feedback_type.startsWith('taxonomy_');
       const correction = taxonomy ? r.selected_taxonomy_name || r.selected_taxonomy_key : r.suggested_motif_name || r.suggested_text;
-      return `<tr><td>${escape(title[r.feedback_type] || r.feedback_type)}</td>
+      const continuation = r.feedback_type === 'explanation' && r.continuation_key
+        ? `<small>${r.continuation_key === 'solving' ? 'Solving continuation' : `Earlier move · ${escape(r.continuation_key)}`}</small>` : '';
+      return `<tr><td>${escape(title[r.feedback_type] || r.feedback_type)}${continuation}</td>
         <td><span class="analytics-vote ${r.rating === 1 ? 'positive':'negative'}">${taxonomy
           ? (r.current_taxonomy_change_status === 'changed' ? 'Changed' : 'Unchanged') : (r.rating === 1 ? '👍 Yes' : '👎 No')}</span></td>
         <td class="coach-correction-preview" title="${escape(correction || '')}">${escape(String(correction || '—').slice(0, 130))}</td>
@@ -168,7 +172,7 @@
       loadedFacets = false;
       await update();
       document.getElementById('coach-reset-note').textContent =
-        `Feedback reset: ${fmt(body.deleted.position_explanation_motif + body.deleted.chat_coaching + (body.deleted.taxonomy_selections || 0))} records deleted. Analysis and positions were kept.`;
+        `Feedback reset: ${fmt(body.deleted.position_explanation_motif + (body.deleted.continuation_explanations || 0) + body.deleted.chat_coaching + (body.deleted.taxonomy_selections || 0))} records deleted. Analysis and positions were kept.`;
     } catch (err) {
       error.textContent = err.message;
       error.classList.remove('hidden');

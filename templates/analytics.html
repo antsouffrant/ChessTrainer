@@ -33,6 +33,11 @@
         <option value="taxonomy_motif">Learning motif selections</option>
         <option value="coaching">Chat coaching</option>
       </select></label>
+      <label>Explanation continuation<select name="continuation_scope">
+        <option value="">All records / continuations</option>
+        <option value="solving">Solving continuation</option>
+        <option value="attempted">Earlier attempts and game moves</option>
+      </select></label>
       <label>Feedback records<select name="rating"><option value="">All records</option><option value="1">Thumbs up / selected original</option><option value="-1">Thumbs down / selected alternative</option></select></label>
       <label>Coach version (rated or current)<select name="coaching_version"><option value="">All versions</option></select></label>
       <label>Position category<select name="position_category"><option value="">All categories</option></select></label>
@@ -50,7 +55,7 @@
       <article class="analytics-score glass" data-score="taxonomy_move_type"><span>Move type · change rate</span><strong>—</strong><small>0 of 0 solved positions changed</small><div class="analytics-score-track"><span></span></div></article>
       <article class="analytics-score glass" data-score="taxonomy_motif"><span>Learning motif · change rate</span><strong>—</strong><small>0 of 0 solved positions changed</small><div class="analytics-score-track"><span></span></div></article>
     </section>
-    <p class="analytics-summary-note muted">Headline approval rates are rating-based; category approval charts count distinct rated positions. Historical-version filters apply to feedback recorded under that version; the three taxonomy change-rate cards always describe the current solved-position classifications, not historical reconstructed predictions. Taxonomy change rate = solved positions whose current selected label differs from the current coach label ÷ all solved positions in the selected game-list/position filters. Untouched positions and selections changed back to the coach label count as unchanged. Approval rate = thumbs-up ratings ÷ all thumbs ratings in that area. Taxonomy change is a separate current-position metric; neither rate implies the other. Feedback-type and rating filters do not change the solved-position denominator.</p>
+    <p class="analytics-summary-note muted">Headline approval rates are rating-based; most category approval charts count distinct rated positions. The continuation/message breakdown instead counts individually rated messages, so the solving line and each attempted move remain independent. Historical-version filters apply to feedback recorded under that version; the three taxonomy change-rate cards always describe the current solved-position classifications, not historical reconstructed predictions. Taxonomy change rate = solved positions whose current selected label differs from the current coach label ÷ all solved positions in the selected game-list/position filters. Untouched positions and selections changed back to the coach label count as unchanged. Approval rate = thumbs-up ratings ÷ all thumbs ratings in that area. Taxonomy change is a separate current-position metric; neither rate implies the other. Feedback-type and rating filters do not change the solved-position denominator.</p>
     <section class="glass analytics-table-panel coach-metric-panel" aria-label="Taxonomy change rates by category">
       <div class="coach-metric-heading">
         <div><h2>Changes · Change rate</h2><p class="muted">Percentage of solved positions with any context, move-type, or learning-motif correction. Each position counts once.</p></div>
@@ -78,6 +83,7 @@
         <label class="coach-chart-category">Group by
           <select id="coach-approval-group" aria-label="Group feedback approvals by">
             <option value="feedback_area">Feedback area</option>
+            <option value="continuation_kind">Continuation / message type</option>
             <option value="motif">Primary learning motif</option>
               <option value="opening">Opening</option>
               <option value="context">Position context</option>
@@ -94,7 +100,7 @@
       <div id="coach-approval-chart" aria-live="polite"></div>
     </section>
     <section class="glass analytics-export-guide" aria-label="Coaching development dataset">
-      <div><h2>Coaching development dataset</h2><p>Export thumbs for position relevance, explanations and chat, plus taxonomy selections with both the at-selection coach prediction and the latest current comparison. Earlier retired-category ratings are retained in CSV for backward compatibility. Each CSV row has a stable position ID and the evidence needed to revisit the decision.</p></div>
+      <div><h2>Coaching development dataset</h2><p>Export thumbs for position relevance, explanations and chat, plus taxonomy selections with both the at-selection coach prediction and the latest current comparison. Earlier retired-category ratings are retained in CSV for backward compatibility. Each CSV row has a stable position ID and, for explanation feedback, a continuation_key identifying "solving" or the earlier move in UCI notation, plus evidence needed to revisit the decision.</p></div>
       <p class="muted">Coach versions are recorded at feedback time for new ratings and taxonomy selections. Older chat/taxonomy records without a saved version use the current position version. Refreshing metadata does not remove historical feedback snapshots. Ratings are the latest vote per item. The <strong>content_snapshot</strong> is what was rated; <strong>current_explanation</strong> and current motif fields may have changed after model revisions. The export includes suggested_text, suggested_motif_key, and suggested_motif_name for downvotes, alongside FENs and engine variations (but not complete PGNs). Switching a rating to thumbs-up clears its correction. Regression candidates include corrected taxonomy choices and downvotes with saved corrections; they are user-proposed examples, not independently verified chess truth.</p>
     </section>
     <section class="glass analytics-table-panel analytics-records-panel"><div class="analytics-records-heading"><div><h2>Recent feedback</h2><p class="muted">Up to 80 recent ratings. CSV exports every matching rating, its original feedback snapshot, current coaching text, FEN, Stockfish lines, evaluation, motifs, and version metadata for reproducible review.</p></div><span id="analytics-record-count" class="eyebrow"></span></div><div class="analytics-table-scroll"><table class="analytics-table" id="analytics-records"><thead><tr><th>Type</th><th>Feedback</th><th>Selected label / correction</th><th>Game list</th><th>Lesson / motif</th><th>Opening</th><th>Position</th><th>Updated</th></tr></thead><tbody></tbody></table></div></section>

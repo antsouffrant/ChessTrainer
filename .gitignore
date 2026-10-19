@@ -6,5 +6,5 @@ data/chess_trainer.sqlite3
 data/chess_trainer.sqlite3-shm
 data/chess_trainer.sqlite3-wal
 stockfish/
-data/batches
 tests/
+data/batches/

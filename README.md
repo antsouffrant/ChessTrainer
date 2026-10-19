@@ -1,14 +1,4 @@
-> **v76 — Balanced All Positions training:** A newly created, unfiltered general training playlist uses a randomized ordering that interleaves primary learning motifs and openings, with learning mode as an additional diversity signal. It preserves every eligible unlearned position and approximately preserves the underlying category frequencies while avoiding repetitive streaks. The complete session order is pinned for Last/Next and page reloads. Lesson, opening, individual-position and explicitly sorted playlists are unchanged. No game retrieval, Stockfish reanalysis, coaching refresh or database migration is required.
-
-> **v75 — Separate Coach rate charts:** Coach now displays two independently grouped charts with controls inside their headings: **Changes** (default: primary learning motif, any corrected taxonomy field per solved position) and **Approval** (default: feedback area, showing Training positions, Explanations, and Chat coaching thumbs). Neither chart has an additional metric selector. The separate chat-approval summary card is hidden while chat history and approval-chart data remain available. CSV exports, regression data, historical versions, and feedback records are unchanged. See `COACH_METRICS.md`. No metadata refresh, reanalysis, or schema migration required.
-
-> **v74 — Consolidated Coach metrics:** Thumbs-based summary cards are explicitly labeled **Approval rate**, while taxonomy context/type/motif cards remain **Change rate**. Four separate category tables have been replaced by a configurable chart (opening, motif, lesson, version, etc.) showing two **parallel 100%-stacked bars** on the same 0–100% axis. Aggregate chart approval uses *any approved thumbs category per rated solved position*; aggregate taxonomy change uses *any currently corrected field per solved position*. See `COACH_METRICS.md` for denominators, historical-version caveats, and filters. No database migration, metadata refresh, or reanalysis is required.
-
-> **v73 — Historical Coach version filters:** Coach version options now combine the active position versions with saved historical feedback versions. Filtering uses the coaching version recorded with the rating/selection rather than the mutable version on the refreshed position. New taxonomy selections and chat ratings save their coach-version snapshot. Older chat/taxonomy records lacking a snapshot are shown using the current position version with an explicit CSV provenance flag. The existing latest-feedback-per-item behavior remains unchanged. No metadata refresh or game reanalysis is necessary.
-
-> **v69 — Inline taxonomy feedback pills:** Training now displays clickable pill-shaped context, optional move type, and primary motif directly in the coaching path, replacing the separate feedback dropdown panel. Pill selections can be changed or cleared; they update only feedback, preserving the model prediction at the moment of the vote. Coach and Regression CSV exports include current and at-selection hierarchy, legacy motif mapping, and user corrections. Thumbs remain for position relevance, explanation and coach chat. No reanalysis required.
-
-# Personal Chess Trainer — v76
+# Personal Chess Trainer — v83
 
 A local Flask application that retrieves Lichess games, evaluates them with Stockfish, and builds training positions, lessons, opening playlists, and position-aware chess coaching. Saved game lists, evaluations, training progress, and thumbs feedback use a local SQLite database.
 
@@ -70,10 +60,6 @@ A new game list **retrieves a PGN batch once**, then starts analysis. Analyze us
 | **Analyze Again** | Continue with a deeper refinement pass using saved games. |
 | **Refresh Metadata** | Run independent Stockfish reply probes and regenerate explanations/motifs from saved training positions; preserve root evaluations, learning progress and feedback. |
 | **Restart Analysis** | **Destructive for one list.** Remove that list's derived training positions, evaluated results, learned progress, conversations and ratings, then start fresh Stockfish analysis from its existing PGN. Other lists are unaffected. |
-| **Training taxonomy pills** display the coach's suggested context, an optional Tactical/Strategic move type, and the specific primary motif. Click/tap a pill (or use the keyboard) to choose a different canonical label, explicitly agree with the coach, or clear feedback. A two-level path includes a subtle **+ Move type** pill for adding a qualifier. Corrections show a check mark and accent color, but **do not alter the model's classification, Stockfish evidence, lessons, or deep analysis**. The feedback is saved separately and already flows to Coach and regression exports.
-
-**Coach → Reset feedback** | Delete thumbs ratings only (selected game list, or all if unfiltered). Positions, engine data and chat content remain. |
-
 **Export feedback CSV before a destructive restart or reset if you need a record of your previous coaching iteration.** Restart and feedback reset require confirmation.
 
 ## Explanation and motif pipeline
@@ -92,7 +78,7 @@ See **`COACHING_PIPELINE.md`** for evidence standards, motif distinctions, endga
 - `templates/` — Jinja page templates. `templates/analytics.html` remains the Coach view template for route compatibility.
 - `static/styles.css` — shared app styles; `static/coach.css` — responsive Coach page layout, loaded only on Coach; `static/*.js` — page-specific interactions.
 - `tests/` — Python database/chess logic and Node JavaScript UI tests. Tests are preserved for future iterations.
-- `MAINTENANCE_AUDIT.md` — v55 source/size review and conservative cleanup policy.
+- `MAINTENANCE_AUDIT_V81.md` — current dependency and distribution audit (`MAINTENANCE_AUDIT.md` is the historical v55 snapshot).
 
 ## Testing
 
@@ -116,133 +102,12 @@ Some tests need a live Stockfish executable or optional tablebases to validate c
 
 This source archive intentionally includes regression tests but excludes runtime caches (`__pycache__`, `*.pyc`), imported personal games, SQLite files, and engine binaries. Obsolete historical release notes are not carried forward in the main README; prior versioned ZIP archives preserve their history. Audit before deleting a source module—most coaching modules are connected despite their overlapping names.
 
-## v70 solved review and motif refinements
+## Current coaching architecture and historical regression material
 
-- Returning to a learned position via Last/Next restores its saved explanation and explanation-rating controls immediately; the solution endpoint can refresh the details without leaving the puzzle in an unsolved hint state.
-- Focusing or toggling Stockfish does not disable left/right board history or Shift+arrow puzzle navigation; typing fields and feedback menus still own their arrow keys.
-- Canonical learning-motif pills list named chess concepts alphabetically, then append evaluation-outcome fallback labels alphabetically.
-- New **Blocking** tactical motif requires an actual legal check interposition or interrupted sliding attack on valuable material. **Discovery** denotes a stationary slider revealed by another piece; **Double Attack** denotes two actionable threats from the mover.
-- **Material Loss** is the general evidenced-loss label, distinct from newly hanging one's mover and from saving a loose piece already present at the root. A defended **strategic sacrifice** is supported with additional differential evidence, not by a blanket motif remapping.
+The v83 solved-position coach renders a separately rateable explanation for each attempted continuation, plus a distinct solving continuation. Previous-session attempts and the original game move appear as light-blue messages; the solving continuation remains gold. Thumbs and suggested revisions attach to the continuation and position, not to a merged recap. Historical explanation ratings remain attached to the solving continuation. All feedback exports and Coach filtering retain this dimension.
 
-## v57 UI feedback refinements
+The solving-position explanation is assembled from saved chess evidence. The proactive explanation supplies one coherent root explanation; observed moves and their consequences are appended only when they add distinct information. It does not trigger an additional Stockfish search at solve time. See `NARRATIVE_ARCHITECTURE.md`, `COACH_SESSION_GUIDE.md`, and `COACHING_PIPELINE.md` for implementation contracts and evidence ownership.
 
-- Clicking an active 👍 or 👎 removes the rating and deletes any correction associated with it. Click the other thumb to change the rating instead.
-- A separate **Edit suggestion** button appears on downvotes so feedback can be refined without unchecking the vote.
-- Board arrow-key navigation is suspended while a feedback modal is open or a text field/select is active.
-- Motifs in feedback, lesson picker, and lesson listings are alphabetized by name.
+For test data and earlier behavior changes, refer to `FEEDBACK_BENCHMARK.md`, `PROACTIVE_COACHING.md`, `PROCESS_PERFORMANCE.md`, and prior versioned source archives. The historical feedback fixtures in `tests/fixtures/` are deliberate benchmark inputs, **not runtime data**. Keep them when executing the full regression suite; a production-only distribution may exclude `tests/`, `tools/`, and developer documentation.
 
-The SQLite schema is unchanged; unchecking removes rows instead of storing a zero-valued vote.
-
-### Coaching feedback and regression (v58)
-
-See `FEEDBACK_BENCHMARK.md` for an anonymized 109-record Coach feedback fixture,
-a motif hierarchy, near-root refutation scans and an offline regression
-reporter. Run `python tools/evaluate_coach_feedback.py --input tests/fixtures/coach_feedback_v58.jsonl --output coach_report.csv` after
-installing the dependencies in `requirements.txt`. **Refresh Metadata** uses Stockfish to re-test opponent replies without redoing game evaluation; **Restart
-Analysis** is destructive and not needed for this coaching-only update.
-
-## v59 — Direct board analysis after solving
-
-After a puzzle is solved, the displayed board accepts normal click-to-move or drag-and-drop input without requiring the Stockfish checkbox first. The first attempted move switches the board to Analysis and applies that same move to the displayed FEN; no second gesture is necessary. The server validates legal moves and handles queen promotion as the default. The board uses the FEN's active side, which may be the opponent after the learner's correct move. Navigating game history or revisiting solved positions preserves this convenience. Unsolved positions still require the ordinary training move verification. Manual Stockfish toggling remains available, and failed moves leave the analysis board ready for further input.
-
-## Coaching comprehension and regression (v60)
-
-The coaching and primary-motif engines share a causal ranking layer
-(`causal_selection.py`). It favors demonstrated near-term tactics and concrete
-strategic consequences over generic context or incidental long-PV effects.
-`continuation_refutations.py` checks short supported replies and defender
-removal, while `semantic_coaching.py` adds positional differentiation for
-endgame king activity and demonstrated pawn-structure damage.
-
-See `FEEDBACK_BENCHMARK.md` for the historical 109-record feedback corpus,
-the additional 51 proposed correction cases, tests, offline benchmark command,
-and caveats about unverified user-proposed corrections. Existing local
-feedback and training databases are unchanged; use **Refresh Metadata** to
-regenerate current coaching from saved positions and PVs.
-
-## Player learning analytics (v61)
-
-The new Player page uses two SQLite tables: `player_solve_sessions` and `player_solve_attempts`. Each legal training attempt is an event, with a session starting only on the first attempt of an unsolved puzzle. This preserves repeat solve history without collecting statistics from untouched puzzles. A foreground-aware clock accumulates active solving time while the Training page is visible and focused. Puzzle solves exceeding the configurable **Maximum recorded puzzle solve time** (default 300 seconds) are excluded from time averages, but still count as solves. Change the limit in Settings → Trainer. The Player page supports game-list, motif, opening, learning mode, and position filters, plus separate CSV exports for sessions and attempt events.
-
-The first-time solve rate counts only each puzzle's earliest attempted session so replaying an easy puzzle cannot inflate the score. **Existing attempts and learned flags remain in place, but historical first-try accuracy and solve durations cannot be reliably backfilled.** See `LEARNING_PIPELINE.md` for definitions, timestamps, and reset semantics.
-
-### Player tracking clock-in/out (v62)
-
-The Training progress header contains **Learning stats on/off**. The preference is
-remembered in the current browser across game lists (default: on). Turning it
-off stops the foreground solve timer and ends any unfinished tracked practice
-session. Future legal moves still solve puzzles and change the ordinary learned
-status and legacy attempts, but do **not** create Player session/attempt events.
-Turning it back on begins a fresh tracked session on the next legal attempt.
-Already recorded Player history is never deleted by this switch. The Player
-dashboard's total/learned positions still reflect ordinary puzzle progress.
-
-Note: First-try statistics describe the first *recorded* training encounter;
-training with the clock turned off is intentionally not reconstructible.
-
-
-### Player data export and reset (v63)
-
-On **Player**, use *Sessions CSV* and *Attempt events CSV* for filtered
-exports. *Reset Player records* deletes practice sessions/attempts for the
-selected game list, or all lists when unfiltered by game list, after explicit
-confirmation. It preserves learned-position flags, engine analysis, game lists,
-and Coach feedback. Other Player filters never limit deletion; see
-`LEARNING_PIPELINE.md` for the complete data contract. Download both CSVs first.
-
-### v64: evidence-and-purpose coaching
-
-The Coach model now looks for **demonstrated material recovery after a
-sacrifice**, and the *positional purpose* of some balanced trades (such as
-creating doubled opponent pawns), rather than describing every exchange as
-simple simplification or every sacrifice as an unexplained investment.
-Straightforward captures and trades remain concise when the saved variations
-show no more instructive cause. The motif taxonomy is deliberately stable;
-classification and prose use the same ranked causal evidence.
-
-The full 281-rating positive/negative Coach feedback snapshot and reproducible
-evaluation process are documented in `FEEDBACK_BENCHMARK.md`. Refresh Metadata
-regenerates coaching text and motif assignments **without reanalyzing games**;
-previous Coach feedback is retained. Chess-specific tests and benchmark replay
-require installing dependencies from `requirements.txt`.
-
-The top navigation keeps your requested order: **Home, Training, Lessons,
-Openings, Player, Coach, Process, Settings**.
-
-
-### Proactive Stockfish coaching (v65)
-
-After Analyze has identified and deep-confirmed training positions, an independent
-Stockfish coaching probe tests credible replies to the engine-recommended and
-actual game moves. The saved probe evidence (`proactive_coach_json`) contains
-board context, observed move effects, scored reply variations, and supported
-short-range mechanisms. **Screening, deep evaluation, position selection, root
-evaluations/PVs, solve history, Coach feedback, and Player history are not
-replaced by this follow-up evidence.** The reactive chat remains separate.
-
-**Process → Refresh Metadata** now requires a configured local Stockfish
-executable. It re-runs bounded coaching probes and regenerates curriculum labels
-and explanations without reanalyzing the games or retrieving PGNs. Refresh runs
-in a worker with per-position search budgets, bounded three-position batches,
-probes outside database write transactions, persisted pause/resume progress, and
-visible errors when Stockfish cannot start. Configure the extra coaching time,
-number of opponent replies and search-depth cap in Settings → Proactive coaching.
-
-The probes are supplementary evidence, not proof that every defense fails. A
-verified, near-root refutation may replace a vague generic explanation or motif,
-while already-supported precise explanations remain intact. See
-`PROACTIVE_COACHING.md` for architecture and evidence limits.
-
-### v71 — Games / Positions / Coaching performance
-
-The Process page now separates **Games (Game Retrieval)**, **Positions (Position Evaluation)**, and **Coaching (Coaching Analysis)**. It reports measured stage times after new processing work, and reuses exact-input coaching Stockfish probes on a later unchanged Refresh Metadata. Coaching still regenerates current explanations, contexts, and motifs from the saved evidence. PGN parsing is reused across metadata batches. See [PROCESS_PERFORMANCE.md](PROCESS_PERFORMANCE.md) for the performance breakdown, cache invalidation rules, and local profiling workflow. No game reanalysis is needed to use the updated Coaching process.
-
-### v72 · Coach taxonomy change-rate reporting
-
-Coach reports the percentage of **solved** positions whose current taxonomy
-feedback disagrees with the coach for each of context, move type, and motif.
-Solved positions without edits are included as unchanged. Changing a pill
-back to the coach's choice (or clearing it) removes that field from the changed
-count. Legacy motif thumbs are absent from the UI but remain in exports.
-Use **Taxonomy CSV** on Coach to audit all solved positions, including matches
-without dropdown feedback. No metadata refresh or migration required.
+See `MAINTENANCE_AUDIT_V81.md` for the current inventory, cleanup decisions, and safe next steps.

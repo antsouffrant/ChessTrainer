@@ -230,6 +230,10 @@ const coachTextEl = document.getElementById('coach-text');
 const categoryEl = document.getElementById('category');
 const hintToggleEl = document.getElementById('hint-toggle');
 const coachChatEl = document.getElementById('coach-chat');
+const coachPositionReviewEl = document.getElementById('coach-position-review');
+const coachAttemptCommentsEl = document.getElementById('coach-attempt-comments');
+const coachSolutionLabelEl = document.getElementById('coach-solution-label');
+const solvedOpeningEl = document.getElementById('solved-opening');
 const coachFormEl = document.getElementById('coach-form');
 const coachInputEl = document.getElementById('coach-input');
 const coachSendEl = document.getElementById('coach-send');
@@ -243,6 +247,135 @@ let coachThreadReadyPositionId = null;
 const historicCoachRequests = new Set();
 const brilliantCoachRequests = new Set();
 const proactiveCoachRequests = new Map();
+const coachSolveSessionKeys = new Map();
+function coachSolveSessionKey(positionId) {
+  const id = Number(positionId || 0);
+  if (!coachSolveSessionKeys.has(id)) {
+    const token = (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function')
+      ? crypto.randomUUID().replaceAll('-', '')
+      : `${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}`;
+    coachSolveSessionKeys.set(id, token);
+  }
+  return coachSolveSessionKeys.get(id);
+}
+function preserveCoachReviewInThread() {
+  if (!coachChatEl) return;
+  // Both components are distinct chat messages; attempted moves precede the
+  // solving continuation, even after chat history is reloaded.
+  if (coachPositionReviewEl && coachPositionReviewEl.parentElement !== coachChatEl)
+    coachChatEl.prepend(coachPositionReviewEl);
+  if (coachAttemptCommentsEl && coachAttemptCommentsEl.parentElement !== coachChatEl)
+    coachChatEl.prepend(coachAttemptCommentsEl);
+}
+function attemptNotesFromRecap(structured) {
+  if (!structured || structured.kind !== 'solved_attempt_recap') return [];
+  if (Array.isArray(structured.attempt_comments)) return structured.attempt_comments;
+  // Older v77 recaps already saved their complete, verified attempt evidence.
+  // Render them as separate comments without requiring new engine work.
+  const attempts = Array.isArray(structured.attempts) ? structured.attempts : [];
+  return attempts.map(attempt => {
+    const san = attempt.move_san || attempt.move_uci || 'Move';
+    const correct = Boolean(attempt.correct);
+    let text;
+    if (correct) text = structured.model_explanation || `${san} solved the position.`;
+    else if (attempt.best_reply_san)
+      text = `After ${san}, your opponent can respond with ${attempt.best_reply_san}. The saved evidence does not yet establish a specific tactical consequence.`;
+    else text = `${san} was evaluated, but no detailed tactical continuation was retained.`;
+    return {move_san:san, move_uci:attempt.move_uci, correct, text,
+      cached:Boolean(attempt.from_saved_line)};
+  });
+}
+function explanationPackageSnapshot() {
+  // The solving thumbs must never rate another attempted continuation.
+  return coachTextEl?.textContent?.trim() || '';
+}
+function renderCoachAttemptComments(recap, positionId = null) {
+  if (!coachAttemptCommentsEl || !coachPositionReviewEl) return;
+  if (positionId !== null && Number(displayedPositionId) !== Number(positionId)) return;
+  let structured = recap;
+  if (recap && typeof recap.structured_json === 'string') {
+    try { structured = JSON.parse(recap.structured_json); } catch (_) { structured = {}; }
+  }
+  const notes = attemptNotesFromRecap(structured);
+  coachAttemptCommentsEl.replaceChildren();
+  const solutionNote = [...notes].reverse().find(note => note.correct);
+  if (coachSolutionLabelEl) {
+    coachSolutionLabelEl.textContent = solutionNote
+      ? `Solution · ${solutionNote.move_san || solutionNote.move_uci}` : 'Solution';
+    coachSolutionLabelEl.dataset.fromRecap = solutionNote ? '1' : '0';
+  }
+  // A move attempted twice in the same session is the same continuation, not
+  // two independently judged chess claims. The last verified note wins.
+  const attempts = new Map();
+  for (const note of notes.filter(entry => !entry.correct)) {
+    if (note.move_uci) attempts.set(note.move_uci, note);
+  }
+  for (const [key, note] of attempts) {
+    const section = document.createElement('div');
+    section.className = 'coach-message assistant coach-continuation-message';
+    const title = document.createElement('div');
+    title.className = 'coach-message-label';
+    title.textContent = `Coach · ${note.origin === 'game' ? 'Your game' :
+      note.origin === 'previous_session' ? 'Previously tried' : 'Earlier attempt'} · ${note.move_san || key}`;
+    const bubble = document.createElement('div');
+    bubble.className = 'coach-message-body rate-hover-zone explanation-feedback-area';
+    const copy = document.createElement('p');
+    copy.className = 'coach-text';
+    copy.textContent = note.text || 'No continuation-specific explanation was retained.';
+    const votes = document.createElement('div');
+    votes.className = 'inline-feedback-votes';
+    votes.dataset.feedbackCategory = 'continuation';
+    votes.dataset.continuationKey = key;
+    votes.setAttribute('role', 'group');
+    votes.setAttribute('aria-label', `Was the coaching for ${note.move_san || key} helpful?`);
+    votes.innerHTML = `<span class="rating-prompt">Helpful explanation?</span>
+      <button type="button" class="inline-rating-button" data-rating="1" aria-label="Helpful explanation" title="Helpful explanation">👍</button>
+      <button type="button" class="inline-rating-button" data-rating="-1" aria-label="Unhelpful explanation" title="Unhelpful explanation">👎</button>
+      <button type="button" class="feedback-edit-correction hidden" aria-label="Edit suggested correction" title="Edit suggested correction">Edit suggestion</button>`;
+    bubble.append(copy, votes);
+    section.append(title, bubble);
+    coachAttemptCommentsEl.append(section);
+  }
+  coachAttemptCommentsEl.classList.toggle('hidden', !coachAttemptCommentsEl.childElementCount);
+  if (solutionNote?.text && coachTextEl) {
+    coachTextEl.textContent = solutionNote.text;
+    explainedPositionId = Number(displayedPositionId);
+  }
+  updatePositionRatingUI();
+  if (notes.length && coachChatEl) coachChatEl.scrollTop = 0;
+}
+function clearCoachAttemptComments() {
+  if (coachAttemptCommentsEl) {
+    coachAttemptCommentsEl.replaceChildren();
+    coachAttemptCommentsEl.classList.add('hidden');
+  }
+  if (coachSolutionLabelEl) {
+    coachSolutionLabelEl.textContent = 'Solution';
+    delete coachSolutionLabelEl.dataset.fromRecap;
+  }
+}
+async function publishPostSolveCoach(position) {
+  if (!position || !coachChatEl) return;
+  const positionId = Number(position.id);
+  const sessionKey = coachSolveSessionKey(positionId);
+  try {
+    const response = await fetch(`/api/positions/${positionId}/coach/solve-recap`, {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({session_key: sessionKey})
+    });
+    if (!response.ok) return;
+    const result = await response.json();
+    const message = result.message;
+    if (!message || displayedPositionId !== positionId) return;
+    if (coachThreadReadyPositionId !== positionId) {
+      await loadCoachThread(position);
+      return;
+    }
+    // Each attempted continuation is a separate independently rateable message.
+    renderCoachAttemptComments(message, positionId);
+  } catch (_) { /* A recap is optional and must never block the board. */ }
+}
+
 const fmtCount = value => window.pctFormatCount ? window.pctFormatCount(value) : String(Number(value || 0));
 let trainerKeyboardArmed = false;
 let boardGridOrientation = null;
@@ -320,6 +453,8 @@ function renderConcepts(concepts = [], taxonomy = null) {
 // Feedback belongs to the position, not a transient playlist or render cycle.
 const positionRatings = new Map();
 const positionCorrections = new Map();
+const continuationRatings = new Map();
+const continuationCorrections = new Map();
 const taxonomyFeedbackRecords = new Map();
 const taxonomyFeedbackEl = document.getElementById('taxonomy-feedback');
 const taxonomyFeedbackStatusEl = document.getElementById('taxonomy-feedback-status');
@@ -343,12 +478,12 @@ function closeCorrectionDialog() {
   if (correctionDialog?.open) correctionDialog.close();
   correctionTarget = null;
 }
-function openCorrectionDialog(category, targetId, existing = {}, snapshot = '') {
-  if (!correctionDialog || !['position', 'explanation', 'coaching'].includes(category)) return;
-  correctionTarget = {category, targetId, snapshot};
+function openCorrectionDialog(category, targetId, existing = {}, snapshot = '', continuationKey = '') {
+  if (!correctionDialog || !['position', 'explanation', 'coaching', 'continuation'].includes(category)) return;
+  correctionTarget = {category, targetId, snapshot, continuationKey};
   const position = category === 'position';
   const names = {position:'Improve this training position',
-                 explanation:'Suggest a better explanation', coaching:'Suggest a better coach response'};
+                 explanation:'Suggest a better explanation', continuation:'Improve this continuation', coaching:'Suggest a better coach response'};
   document.getElementById('coaching-correction-title').textContent = names[category];
   document.getElementById('coaching-correction-help').textContent = position
     ? 'What is wrong with this training position, or how could it be more useful?'
@@ -366,7 +501,7 @@ document.getElementById('coaching-correction-skip')?.addEventListener('click', c
 correctionForm?.addEventListener('submit', async event => {
   event.preventDefault();
   if (!correctionTarget) return;
-  const {category, targetId, snapshot} = correctionTarget;
+  const {category, targetId, snapshot, continuationKey} = correctionTarget;
   const value = document.getElementById('coaching-correction-text').value.trim();
   if (!value) return;
   const btn = document.getElementById('coaching-correction-save');
@@ -376,7 +511,11 @@ correctionForm?.addEventListener('submit', async event => {
     const chat = category === 'coaching';
     const url = chat ? `/api/coach/messages/${targetId}/feedback` : `/api/positions/${targetId}/feedback`;
     const payload = {rating: -1, lesson_key: new URLSearchParams(location.search).get('concept') || ''};
-    if (!chat) { payload.category = category; payload.content_snapshot = snapshot; }
+    if (!chat) {
+      payload.category = category;
+      payload.content_snapshot = snapshot;
+      if (category === 'continuation') payload.continuation_key = continuationKey;
+    }
     payload.suggested_text = value;
     const response = await fetch(url, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
     const data = await response.json();
@@ -387,6 +526,10 @@ correctionForm?.addEventListener('submit', async event => {
     } else {
       positionRatings.set(targetId, data.ratings || {});
       positionCorrections.set(targetId, data.corrections || {});
+      if (category === 'continuation') {
+        continuationRatings.set(targetId, data.continuation_ratings || {});
+        continuationCorrections.set(targetId, data.continuation_corrections || {});
+      }
       if (Number(currentPosition()?.id) === targetId) updatePositionRatingUI();
     }
     closeCorrectionDialog();
@@ -535,17 +678,21 @@ function updatePositionRatingUI() {
   updateTaxonomyFeedbackUI();
   document.querySelectorAll('.inline-feedback-votes[data-feedback-category]').forEach(group => {
     const category = group.dataset.feedbackCategory;
+    const key = group.dataset.continuationKey;
+    const voted = category === 'continuation'
+      ? Number((continuationRatings.get(Number(p?.id)) || {})[key] || 0)
+      : Number(ratings[category] || 0);
     const eligible = ready &&
       (category !== 'explanation' || explainedPositionId === Number(p?.id));
     group.classList.toggle('hidden', !eligible);
     group.querySelectorAll('[data-rating]').forEach(button => {
-      const selected = eligible && Number(ratings[category] || 0) === Number(button.dataset.rating);
+      const selected = eligible && voted === Number(button.dataset.rating);
       button.classList.toggle('active', selected);
       button.setAttribute('aria-pressed', String(selected));
       button.title = selected ? 'Remove this rating' : button.getAttribute('aria-label');
     });
     group.querySelector('.feedback-edit-correction')?.classList.toggle(
-      'hidden', !eligible || Number(ratings[category] || 0) !== -1);
+      'hidden', !eligible || voted !== -1);
   });
 }
 async function loadPositionRatings(positionId) {
@@ -559,6 +706,8 @@ async function loadPositionRatings(positionId) {
     if (serial !== ratingRequestSerial) return; // An earlier read must not erase a newly saved vote.
     positionRatings.set(id, data.ratings || {});
     positionCorrections.set(id, data.corrections || {});
+    continuationRatings.set(id, data.continuation_ratings || {});
+    continuationCorrections.set(id, data.continuation_corrections || {});
     if (data.taxonomy_feedback) taxonomyFeedbackRecords.set(id, data.taxonomy_feedback);
     if (Array.isArray(data.motif_options)) suggestedMotifOptions = data.motif_options;
     if (Number(currentPosition()?.id) === id) updatePositionRatingUI();
@@ -571,9 +720,13 @@ async function ratePositionFeedback(button) {
   const group = button.closest('[data-feedback-category]');
   const category = group?.dataset.feedbackCategory;
   const chosenRating = Number(button.dataset.rating);
-  if (!['position', 'explanation'].includes(category) || ![-1, 1].includes(chosenRating)) return;
-  // Clicking the selected thumb withdraws the vote (and its correction).
-  const priorRating = Number(positionRatings.get(id)?.[category] || 0);
+  if (!['position', 'explanation', 'continuation'].includes(category) || ![-1, 1].includes(chosenRating)) return;
+  const key = group.dataset.continuationKey || '';
+  // Each failed continuation owns its vote and correction, independently of
+  // solving and of all other attempted moves.
+  const priorRating = category === 'continuation'
+    ? Number((continuationRatings.get(id) || {})[key] || 0)
+    : Number(positionRatings.get(id)?.[category] || 0);
   const rating = nextFeedbackRating(priorRating, chosenRating);
   const buttons = [...group.querySelectorAll('[data-rating]')];
   ++ratingRequestSerial; // Invalidate any in-flight GET from an earlier render.
@@ -583,19 +736,29 @@ async function ratePositionFeedback(button) {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({
         category, rating, lesson_key: new URLSearchParams(location.search).get('concept') || '',
-        content_snapshot: category === 'explanation' ? coachTextEl?.textContent || '' : ''
+        content_snapshot: category === 'explanation' ? explanationPackageSnapshot()
+          : category === 'continuation' ? group.closest('.coach-message')?.querySelector('.coach-text')?.textContent || '' : '',
+        continuation_key: category === 'continuation' ? key : undefined
       })
     });
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || 'Could not save rating');
     positionRatings.set(id, data.ratings || {});
     positionCorrections.set(id, data.corrections || {});
+    if (category === 'continuation') {
+      continuationRatings.set(id, data.continuation_ratings || {});
+      continuationCorrections.set(id, data.continuation_corrections || {});
+    }
     if (Number(currentPosition()?.id) === id) updatePositionRatingUI();
     group.title = rating === 0 ? 'Rating removed.' : rating === 1
       ? 'Helpful rating saved; any correction was removed.' : 'Rating saved — you can suggest an improvement.';
     if (rating === -1) openCorrectionDialog(category, id,
-      positionCorrections.get(id)?.[category] || {}, category === 'explanation' ? coachTextEl?.textContent || '' : '');
-    else if (correctionTarget?.targetId === id && correctionTarget?.category === category) closeCorrectionDialog();
+      category === 'continuation' ? (continuationCorrections.get(id) || {})[key] || {}
+        : positionCorrections.get(id)?.[category] || {},
+      category === 'explanation' ? explanationPackageSnapshot()
+        : category === 'continuation' ? group.closest('.coach-message')?.querySelector('.coach-text')?.textContent || '' : '', key);
+    else if (correctionTarget?.targetId === id && correctionTarget?.category === category &&
+             (category !== 'continuation' || correctionTarget.continuationKey === key)) closeCorrectionDialog();
   } catch (err) {
     group.title = err.message || 'Could not save rating';
   } finally {
@@ -603,21 +766,32 @@ async function ratePositionFeedback(button) {
   }
 }
 
-document.querySelectorAll('.inline-feedback-votes[data-feedback-category]').forEach(group => {
-  group.addEventListener('click', event => {
-    const edit = event.target.closest('.feedback-edit-correction');
-    if (edit && !edit.disabled) {
-      const id = Number(currentPosition()?.id || 0);
-      const category = group.dataset.feedbackCategory;
-      if (id && Number(positionRatings.get(id)?.[category] || 0) === -1) {
-        openCorrectionDialog(category, id, positionCorrections.get(id)?.[category] || {},
-          category === 'explanation' ? coachTextEl?.textContent || '' : '');
-      }
-      return;
+function handleExplanationFeedbackClick(event) {
+  const group = event.target.closest('.inline-feedback-votes[data-feedback-category]');
+  if (!group) return;
+  const edit = event.target.closest('.feedback-edit-correction');
+  if (edit && !edit.disabled) {
+    const id = Number(currentPosition()?.id || 0);
+    const category = group.dataset.feedbackCategory;
+    const key = group.dataset.continuationKey || '';
+    const rating = category === 'continuation'
+      ? (continuationRatings.get(id) || {})[key]
+      : positionRatings.get(id)?.[category];
+    if (id && Number(rating || 0) === -1) {
+      openCorrectionDialog(category, id,
+        category === 'continuation' ? (continuationCorrections.get(id) || {})[key] || {}
+          : positionCorrections.get(id)?.[category] || {},
+        category === 'explanation' ? explanationPackageSnapshot()
+          : category === 'continuation' ? group.closest('.coach-message')?.querySelector('.coach-text')?.textContent || '' : '', key);
     }
-    const button = event.target.closest('[data-rating]');
-    if (button && !button.disabled) ratePositionFeedback(button);
-  });
+    return;
+  }
+  const button = event.target.closest('[data-rating]');
+  if (button && !button.disabled) ratePositionFeedback(button);
+}
+document.addEventListener('click', event => {
+  if (event.target.closest('.inline-feedback-votes[data-feedback-category]'))
+    handleExplanationFeedbackClick(event);
 });
 
 function parseFen(fen) {
@@ -834,6 +1008,7 @@ function coachMessageHtml(message) {
   let brilliantLink = '';
   let historical = false;
   let brilliant = false;
+  let solvedRecap = false;
   try {
     const structured = typeof message.structured_json === 'string'
       ? JSON.parse(message.structured_json || '{}')
@@ -846,6 +1021,7 @@ function coachMessageHtml(message) {
     const reference = structured.historical_reference;
     historical = role === 'assistant' && structured.kind === 'historical_reference';
     brilliant = role === 'assistant' && structured.kind === 'brilliant_reference';
+    solvedRecap = role === 'assistant' && structured.kind === 'solved_attempt_recap';
     // Only an HTTPS link is allowed in the stored history message. Text and
     // href attributes are escaped; other coaching text stays plain text.
     if (historical && reference && /^https:\/\/[^\s<>"']+$/.test(String(reference.source_url || ''))) {
@@ -858,16 +1034,19 @@ function coachMessageHtml(message) {
       brilliantLink = `<a class="historic-coach-link" href="${escapeCoachHtml(own.url)}">${escapeCoachHtml(own.title || 'Review this position')} ↗</a>`;
     }
   } catch (_) {}
+  // Stored session recaps are expanded into separate, independently rated
+  // continuation cards above, avoiding a duplicate combined chat paragraph.
+  if (solvedRecap) return '';
   const messageId = Number(message.id || 0);
   const rating = Number(message.feedback_rating || 0);
-  const feedback = role === 'assistant' && messageId && !historical && !brilliant
+  const feedback = role === 'assistant' && messageId && !historical && !brilliant && !solvedRecap
     ? `<div class="coach-response-feedback" data-message-id="${messageId}" data-suggested-text="${escapeCoachHtml(message.feedback_suggested_text || '')}" aria-label="Rate this coaching response">
          <button type="button" class="coach-feedback-button${rating === 1 ? ' active' : ''}" data-rating="1" title="Helpful coaching response" aria-label="Thumbs up" aria-pressed="${rating === 1}">👍</button>
          <button type="button" class="coach-feedback-button${rating === -1 ? ' active' : ''}" data-rating="-1" title="Unhelpful coaching response" aria-label="Thumbs down" aria-pressed="${rating === -1}">👎</button>
          <button type="button" class="feedback-edit-correction${rating === -1 ? '' : ' hidden'}" title="Edit your suggestion" aria-label="Edit coaching suggestion">Edit suggestion</button>
        </div>`
     : '';
-  return `<div class="coach-message ${role}${historical ? ' historic-coach-message' : ''}${brilliant ? ' brilliant-coach-message' : ''}"${messageId ? ` data-message-id="${messageId}"` : ''}><div class="coach-message-label">${historical ? 'Coach · Chess history' : brilliant ? 'Coach · From your games' : label}</div>${verdict}<div class="coach-message-body">${escapeCoachHtml(message.content)}${historicalLink || brilliantLink ? `<div class="historic-coach-link-row">${historicalLink || brilliantLink}</div>` : ''}</div>${feedback}</div>`;
+  return `<div class="coach-message ${role}${historical ? ' historic-coach-message' : ''}${brilliant ? ' brilliant-coach-message' : ''}"${messageId ? ` data-message-id="${messageId}"` : ''}><div class="coach-message-label">${historical ? 'Coach · Chess history' : brilliant ? 'Coach · From your games' : solvedRecap ? 'Coach · Your attempted moves' : label}</div>${verdict}<div class="coach-message-body">${escapeCoachHtml(message.content)}${historicalLink || brilliantLink ? `<div class="historic-coach-link-row">${historicalLink || brilliantLink}</div>` : ''}</div>${feedback}</div>`;
 }
 
 // The server stores each historical reference as an ordinary coach message,
@@ -942,18 +1121,24 @@ async function loadCoachThread(position) {
   coachThreadReadyPositionId = null;
   coachConceptEventEl?.classList.add('hidden');
   coachChatEl.innerHTML = '<div class="coach-empty">Loading coaching thread…</div>';
+  let lastRecap = null;
   try {
     const response = await fetch(`/api/positions/${position.id}/coach`);
     const result = await response.json();
     if (!response.ok) throw new Error(result.error || 'Could not load coach');
     if (displayedPositionId !== position.id) return;
     const messages = result.messages || [];
-    if (!messages.length) {
-      coachChatEl.innerHTML = `<div class="coach-empty">${solved
+    lastRecap = solved ? [...messages].reverse().find(message => {
+      try { return JSON.parse(message.structured_json || '{}').kind === 'solved_attempt_recap'; }
+      catch (_) { return false; }
+    }) : null;
+    const visibleMessages = messages.map(coachMessageHtml).filter(Boolean);
+    if (!visibleMessages.length) {
+      coachChatEl.innerHTML = solved && coachPositionReviewEl ? '' : `<div class="coach-empty">${solved
         ? 'Ask about a move, line, plan, or concept. Try: <em>“What if Nc3?”</em>'
         : 'Ask about a candidate move or idea. The coach can test your move without revealing the engine preference.'}</div>`;
     } else {
-      coachChatEl.innerHTML = messages.map(coachMessageHtml).join('');
+      coachChatEl.innerHTML = visibleMessages.join('');
       coachChatEl.scrollTop = coachChatEl.scrollHeight;
     }
   } catch (error) {
@@ -961,7 +1146,12 @@ async function loadCoachThread(position) {
     coachChatEl.innerHTML = `<div class="coach-empty">Coach history unavailable: ${escapeCoachHtml(error.message)}</div>`;
   }
   if (displayedPositionId !== position.id) return;
+  preserveCoachReviewInThread();
+  if (solved) renderCoachAttemptComments(lastRecap, position.id);
   coachThreadReadyPositionId = position.id;
+  // Fetching/rebuilding the thread detaches the static explanation bubble;
+  // restore its thumbs state after reattaching it, including Last Position.
+  updatePositionRatingUI();
   updateCoachMode();
   if (solved) void maybeOfferProactiveCoach(position);
 }
@@ -1752,7 +1942,14 @@ function submitBoardMove(from, to, legalMove) {
 
 function renderSolvedDetails(result) {
   updateCoachMode();
-  if (taskHeadingEl) taskHeadingEl.textContent = 'Why this works';
+  if (taskHeadingEl) taskHeadingEl.textContent = 'Position solved.';
+  coachPositionReviewEl?.classList.remove('hidden');
+  preserveCoachReviewInThread();
+  if (solvedOpeningEl) {
+    const opening = String(currentPosition()?.opening_name || '').trim();
+    solvedOpeningEl.textContent = opening ? `Opening · ${opening}` : '';
+    solvedOpeningEl.classList.toggle('hidden', !opening);
+  }
   if (hintToggleEl) hintToggleEl.classList.add('hidden');
   const modeMeta = learningModeMeta(currentPosition()?.learning_mode, currentPosition()?.category);
   if (categoryEl) {
@@ -1761,7 +1958,7 @@ function renderSolvedDetails(result) {
     categoryEl.className = `eyebrow result-category mode-${modeMeta.tone}`;
     categoryEl.classList.remove('hidden');
   }
-  if (coachTextEl) {
+  if (coachTextEl && coachSolutionLabelEl?.dataset.fromRecap !== '1') {
     coachTextEl.textContent = (result.accepted_alternative && result.accepted_move_explanation)
       ? result.accepted_move_explanation
       : (result.coach_explanation || 'Review how the move changes the threats, defenders, and resulting position.');
@@ -1844,7 +2041,8 @@ async function attemptMove(from, to, legalMove = null) {
       headers: {'Content-Type':'application/json'},
       body: JSON.stringify({move: moveUci, opening_key:openingKey, lesson_key:conceptKey,
         track_learning:trackLearning, start_new_learning_session:startNewLearningSession,
-        active_seconds_delta:activeSecondsDelta})
+        active_seconds_delta:activeSecondsDelta,
+        coach_session_key:coachChatEl ? coachSolveSessionKey(position.id) : null})
     });
     result = await response.json();
   } catch (_) {
@@ -1952,6 +2150,7 @@ async function attemptMove(from, to, legalMove = null) {
     updatePositionRatingUI();
     loadPositionRatings(position.id);
     if (!result.accepted_alternative) loadSolvedDetails(position);
+    void publishPostSolveCoach(position);
     engineToggleEl.disabled = false;
     if (engineToggleWrapEl) engineToggleWrapEl.classList.remove('hidden');
     solvedPositionControlsEl?.classList.remove('hidden');
@@ -1972,6 +2171,7 @@ async function refreshCurrentPosition() {
     if (!response.ok) throw new Error(result.error || 'Could not reset puzzle');
     position.learned = 0;
     delete sessionSolvedMoves[String(position.id)];
+    coachSolveSessionKeys.delete(Number(position.id));
     keepPlaylistSnapshot();
     solved = false;
     showingSolvedMove = false;
@@ -2199,9 +2399,12 @@ async function showPosition(index) {
   document.getElementById('move-chip').textContent = `Move ${p.move_number}`;
 
   if (taskHeadingEl) taskHeadingEl.textContent = 'Find a strong move.';
+  coachPositionReviewEl?.classList.add('hidden');
+  clearCoachAttemptComments();
+  solvedOpeningEl?.classList.add('hidden');
   if (coachTextEl) {
     coachTextEl.textContent = 'Watch the last move, then find a strong response.';
-    coachTextEl.classList.remove('hidden');
+    coachTextEl.classList.toggle('hidden', Boolean(coachPositionReviewEl));
   }
   if (hintToggleEl) {
     hintToggleEl.textContent = 'Show hint';

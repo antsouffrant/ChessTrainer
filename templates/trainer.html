@@ -86,6 +86,8 @@
         </div>
         <div id="opponent-move" class="opponent-move hidden"></div>
         <button id="hint-toggle" class="hint-toggle secondary-button" type="button">Show hint</button>
+        <p id="solved-opening" class="solved-opening hidden"></p>
+        {% if not coach_enabled %}
         <div id="explanation-feedback-area" class="rate-hover-zone explanation-feedback-area">
           <p id="coach-text" class="coach-text">Watch the last move, then find a strong response.</p>
           <div class="inline-feedback-votes hidden" data-feedback-category="explanation" role="group" aria-label="Was this explanation helpful?">
@@ -95,6 +97,7 @@
             <button type="button" class="feedback-edit-correction hidden" aria-label="Edit suggested correction" title="Edit suggested correction">Edit suggestion</button>
           </div>
         </div>
+        {% endif %}
         <div id="category" class="eyebrow result-category hidden">TRAINING POSITION</div>
       </div>
 
@@ -150,6 +153,24 @@
         <span class="coach-learning-badge" title="Verified ideas can become personal learning motifs">learns</span>
       </div>
       <p class="coach-panel-intro">Ask why a move works, test a continuation, or explore a learning motif. Stockfish and the same explanation engine used by the puzzle will help compare the possibilities. After solving, the coach may suggest a relevant classic or a strong move from your own games.</p>
+      <div id="coach-concept-event" class="coach-concept-event hidden"></div>
+      <div id="coach-chat" class="coach-chat" aria-live="polite">
+        <div id="coach-attempt-comments" class="coach-attempt-comments hidden" aria-label="Your attempted continuations"></div>
+        <div id="coach-position-review" class="coach-message assistant coach-position-review hidden">
+          <div class="coach-message-label">Coach · Solving continuation</div>
+          <div id="explanation-feedback-area" class="rate-hover-zone explanation-feedback-area coach-message-body">
+            <div class="coach-solution-comment"><span class="coach-attempt-label" id="coach-solution-label">Solution</span>
+              <p id="coach-text" class="coach-text"></p></div>
+            <div class="inline-feedback-votes hidden" data-feedback-category="explanation" role="group" aria-label="Was this explanation helpful?">
+              <span class="rating-prompt">Helpful explanation?</span>
+              <button type="button" class="inline-rating-button" data-rating="1" aria-label="Helpful explanation" title="Helpful explanation">👍</button>
+              <button type="button" class="inline-rating-button" data-rating="-1" aria-label="Unhelpful explanation" title="Unhelpful explanation">👎</button>
+              <button type="button" class="feedback-edit-correction hidden" aria-label="Edit suggested correction" title="Edit suggested correction">Edit suggestion</button>
+            </div>
+          </div>
+        </div>
+        <div class="coach-empty">Try: <em>“What about d6?”</em>, <em>“What if the knight blocks?”</em>, or <em>“I thought taking that pawn gives my king f2.”</em></div>
+      </div>
       <form id="coach-form" class="coach-form coach-form-primary">
         <textarea id="coach-input" rows="3" maxlength="2000" placeholder="Ask about a move, line, or idea…"></textarea>
         <div class="coach-form-footer">
@@ -157,10 +178,6 @@
           <button id="coach-send" class="primary-button" type="submit">Send</button>
         </div>
       </form>
-      <div id="coach-concept-event" class="coach-concept-event hidden"></div>
-      <div id="coach-chat" class="coach-chat" aria-live="polite">
-        <div class="coach-empty">Try: <em>“What about d6?”</em>, <em>“What if the knight blocks?”</em>, or <em>“I thought taking that pawn gives my king f2.”</em></div>
-      </div>
     </aside>
     {% endif %}
   </div>
