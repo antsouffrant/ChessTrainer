@@ -484,10 +484,12 @@ def evidence_findings(board, best, played, best_pv=None, played_pv=None,
             add('capture_mate_trap', 'mating_net', 2, 3, 114, statement)
         elif free or (len(good['steps']) >= 2 and
                       good['material_delta'] >= VALUES[root['victim'].piece_type]):
+            checking_capture = board.gives_check(best)
             if _queen_activity(board, best, root):
-                statement = f'{best_name} captures a {label}{victim} and keeps your queen active.'
+                statement = (f'{best_name} captures a {label}{victim}'
+                             f'{" with check" if checking_capture else ""} and keeps your queen active.')
             else:
-                statement = f'{best_name} takes a {label}{victim}.'
+                statement = f'{best_name} takes a {label}{victim}{" with check" if checking_capture else ""}.'
             same_root_capture = bool(bad and any(c['ply'] == 0 and c['by_solver']
                                        and c['square'] == _s(best.to_square)
                                        for c in bad['captures']))

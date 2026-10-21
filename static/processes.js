@@ -1,4 +1,4 @@
-/* v52 – Pause preserves the checkpoint; Restart re-evaluates saved games. */
+/* Process controls: pause/resume, analysis restart, and coaching-only invalidation. */
 (() => {
   const root = document.getElementById('process-root');
   const list = document.getElementById('process-list');
@@ -11,7 +11,7 @@
   const active = s => ['queued','running','retrieving','restarting'].includes(s);
   const label = s => ({waiting_for_games:'Waiting for retrieval', queued:'Queued',running:'Running',restarting:'Restarting',
     paused:'Paused',stopped:'Stopped',complete:'Complete',error:'Error',superseded:'Superseded',
-    idle:'Not started'})[s] || s || 'Not started';
+    needs_refresh:'Needs refresh',idle:'Not started'})[s] || s || 'Not started';
   const hasSavedBatch = j => !j.retrieval_status || j.retrieval_status === 'complete';
   const isAnalyzing = j => active(j.analysis_status);
   const isRefreshing = j => active(j.refresh_status);
@@ -19,6 +19,7 @@
   const canAnalyze = j => hasSavedBatch(j) && !isAnalyzing(j) && !isRefreshing(j);
   const canRefresh = j => hasSavedBatch(j) && !isAnalyzing(j) && !isRefreshing(j);
   const canRestart = j => hasSavedBatch(j) && !isRefreshing(j) && j.analysis_status !== 'restarting';
+  const canClearCoaching = j => hasSavedBatch(j) && !!Number(j.has_training_positions || j.positions_found) && !isAnalyzing(j) && !isRefreshing(j);
 
   function currentProcess(j) {
     if (!hasSavedBatch(j)) return {kind:'retrieve',status:j.retrieval_status};
@@ -112,12 +113,16 @@
       `<button type="button" class="secondary-button process-media-button process-restart"
         data-process-action="analyze" data-command="restart" data-job-id="${j.id}"
         aria-label="Restart analysis" title="Clear this list’s analysis and training history; reanalyze saved games with current settings"
-        ${canRestart(j)?'':'disabled'}><i class="fa-solid fa-rotate-right" aria-hidden="true"></i><span>Restart analysis</span></button>`;
+        ${canRestart(j)?'':'disabled'}><i class="fa-solid fa-rotate-right" aria-hidden="true"></i><span>Restart analysis</span></button>` +
+      `<button type="button" class="secondary-button process-media-button process-clear-coaching"
+        data-process-action="coaching-cache" data-command="clear" data-job-id="${j.id}"
+        aria-label="Clear coaching cache" title="Remove this list's generated coaching and classifications without changing Stockfish analysis or progress"
+        ${canClearCoaching(j)?'':'disabled'}><i class="fa-solid fa-broom" aria-hidden="true"></i><span>Clear coaching cache</span></button>`;
     const analysisText = j.analysis_status === 'complete' ? 'Analyze again · next pass' :
       j.analysis_status === 'paused' || j.analysis_status === 'stopped' || j.analysis_status === 'error' ? 'Resume analysis' : 'Start analysis';
-    const refreshText = j.refresh_status === 'complete' ? 'Refresh again' : 'Start refresh';
+    const refreshText = j.refresh_status === 'complete' ? 'Refresh again' : j.refresh_status === 'needs_refresh' ? 'Start coaching refresh' : 'Start refresh';
     const detail = isRetrieving(j) ? 'Retrieving games' : j.analysis_status === 'restarting' ? 'Restarting analysis' : isAnalyzing(j) ? 'Analyzing games' :
-      isRefreshing(j) ? 'Coaching analysis in progress' : kind && paused ? `${title[0].toUpperCase()+title.slice(1)} paused` :
+      isRefreshing(j) ? 'Coaching analysis in progress' : j.refresh_status === 'needs_refresh' ? 'Coaching cache cleared · refresh required' : kind && paused ? `${title[0].toUpperCase()+title.slice(1)} paused` :
       hasSavedBatch(j) ? 'Ready for processing' : 'Retrieval interrupted';
     const action = (actionName,txt,enabled) => `<button type="button" class="secondary-button process-operation"
       data-process-action="${actionName}" data-command="start" data-job-id="${j.id}" ${enabled?'':'disabled'}>${txt}</button>`;
@@ -132,6 +137,17 @@
     const summary = !hasSavedBatch(j) ? (active(j.retrieval_status)?'Retrieving games':`Retrieval ${label(j.retrieval_status).toLowerCase()}`) :
       j.analysis_status === 'restarting' ? 'Restarting analysis' : isAnalyzing(j) ? 'Analyzing games' : isRefreshing(j) ? 'Refreshing' :
       ready ? 'Ready to train' : j.analysis_status === 'complete' ? 'No training positions found' : 'Awaiting training positions';
+    const cohort=j.benchmark;
+    const benchmarkUi=cohort ? `<div class="process-benchmark" aria-label="Fixed coaching benchmark">
+       <strong>Fixed coaching benchmark · ${fmt(cohort.size)} positions</strong>
+       <span>${fmt(cohort.versions?.length||0)} completed model snapshots · ${fmt(cohort.available)} positions available</span>
+       ${j.evaluation_run ? `<a class="secondary-button" href="/trainer/${j.id}?benchmark=1&run_id=${j.evaluation_run.id}">Continue evaluation #${j.evaluation_run.id} · ${fmt(j.evaluation_run.solved)}/${fmt(j.evaluation_run.total)} solved →</a>` : `<span class="process-detail">Complete Coaching refresh to create your first evaluation.</span>`}
+       <button type="button" class="secondary-button" data-process-action="evaluation" data-command="new" data-job-id="${j.id}" ${!j.benchmark?.versions?.length||isRefreshing(j)?'disabled':''}>Start new evaluation</button>
+       <a class="secondary-button" href="/coach?job_id=${j.id}">Compare coaching models →</a>
+       ${(cohort.versions||[]).map(v=>`<span class="process-detail">${esc(v.coaching_version)} · ${fmt(v.captured)}/${fmt(v.expected)} snapshotted · ${fmt(v.rated_messages)} explanation ratings on ${fmt(v.rated_positions)} positions · ${v.approval_pct===null?'Not yet rated':v.approval_pct+'% approval'} · ${fmt(v.taxonomy_corrected_fields)} taxonomy corrections/${fmt(v.taxonomy_rated_fields)} rated fields</span>`).join('')}
+       ${(cohort.comparisons||[]).map(c=>`<span class="process-detail">Matched ${esc(c.from_version)} → ${esc(c.to_version)}: ${fmt(c.paired_messages)} identically rated messages · ${c.before_approval_pct===null?'Awaiting matched ratings':c.before_approval_pct+'% → '+c.after_approval_pct+'% approval'} · ${fmt(c.motif_changes)} motif differences across ${fmt(c.paired_positions_with_snapshots)} shared snapshots</span>`).join('')}
+       ${cohort.available!==cohort.size?'<span class="process-error-history">Some fixed benchmark positions are missing after analysis restart; sample membership has not been silently redrawn.</span>':''}
+     </div>` : `<p class="process-detail">Coaching benchmark will be selected at the first Coaching refresh.</p>`;
     return `<article class="process-card glass ${j.id===selected?'process-highlight':''}" data-process-job="${j.id}">
       <header class="process-card-heading"><div><span class="eyebrow">GAME LIST #${j.id}</span>
         <h2>${esc(j.source_type === 'opposition' ? 'Opposition · '+(j.source_username||j.username) : j.username+' · '+j.date_range)}</h2>
@@ -139,7 +155,7 @@
         <div class="process-card-summary"><span class="process-state">${summary}</span>
           ${ready?`<a class="secondary-button" href="/trainer/${j.id}">Training →</a>`:''}</div></header>
       <div class="process-task-grid">${stage(j,'retrieve')}${stage(j,'analyze')}${stage(j,'refresh')}</div>
-      ${renderControls(j)}</article>`;
+      ${renderControls(j)}${benchmarkUi}</article>`;
   }
 
   async function update() {
@@ -159,7 +175,24 @@
     const job=Number(button.dataset.jobId),kind=button.dataset.processAction,command=button.dataset.command;
     let url=`/api/jobs/${job}/process/${kind}`;
     let body='{}';
-    if(command==='restart') {
+    if(command==='new' && kind==='evaluation') {
+      if (!window.confirm('Start a new evaluation of the same fixed positions? Current evaluation progress and feedback will be retained. The new run starts unanswered.')) return;
+      busy=true;
+      try {
+        const response=await fetch(`/api/jobs/${job}/evaluations`,{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
+        const data=await response.json();
+        if (!response.ok) throw new Error(data.error||'Could not start evaluation');
+        location.href=data.url;
+      } catch(err) { if(feedback){feedback.textContent=err.message;feedback.classList.remove('hidden');} }
+      finally {busy=false;}
+      return;
+    }
+    if(command==='clear') {
+      if(typeof window !== 'undefined' && typeof window.confirm === 'function' &&
+         !window.confirm('Clear this game list\'s coaching cache? Generated explanations, classifications and the coach conversation will be permanently removed. All rated feedback, including chat thumbs and their message snapshots, remains in Feedback History. Learned progress, games, Stockfish evaluations and PVs are preserved. Then run Coaching refresh (Stockfish probes will be recalculated).')) return;
+      url=`/api/jobs/${job}/process/coaching-cache/clear`;
+      body=JSON.stringify({confirmation:'CLEAR COACHING CACHE'});
+    } else if(command==='restart') {
       if(typeof window !== 'undefined' && typeof window.confirm === 'function' &&
          !window.confirm('Restart this game list from scratch? Its training positions, learned progress, explanations, motifs, and position/chat feedback will be permanently deleted. The downloaded PGN is kept. Download the Coach CSV first if you need the old feedback.')) return;
       url=`/api/jobs/${job}/process/analyze/restart`;

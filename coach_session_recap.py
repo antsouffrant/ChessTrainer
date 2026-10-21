@@ -99,49 +99,63 @@ def _build_recap(conn, position_row, session_key):
         raise ValueError('No verified completed solve in this session')
     best_san = position_row['best_move_san'] or position_row['best_move_uci']
     saved_explanation = position_row['coach_explanation'] or ''
-    comments = [_comment_for_attempt(a, best_san, model_explanation=saved_explanation,
-                                     position_row=position_row) for a in attempts]
-    # Attempts from earlier completed sessions deserve their own blue messages
-    # too. Only include ones made BEFORE this solve, never retroactively attach
-    # future moves when an older recap is refreshed. One card per distinct
-    # move is enough; the approval identity is root-locked across sessions.
-    current_roots = {a['move_uci'] for a in attempts}
+    solving = _comment_for_attempt(attempts[-1], best_san,
+                                   model_explanation=saved_explanation, position_row=position_row)
+    solving['origin'] = 'solving'
+    solving['purpose'] = 'explanation'
+    # Latest move per root in this solve. A solution is not a failed attempt.
+    attempts_by_root = {}
+    for attempt in attempts[:-1]:
+        if not attempt['correct']:
+            attempts_by_root[attempt['move_uci']] = attempt
+    current_notes = []
+    for attempt in attempts_by_root.values():
+        note = _comment_for_attempt(attempt, best_san,
+                                    model_explanation=saved_explanation, position_row=position_row)
+        note['origin'] = 'attempt'
+        note['purpose'] = 'learning'
+        current_notes.append(note)
+    # Earlier training attempts remain distinct from this solve, deduplicated
+    # by chess root for feedback identity and avoiding repeated cards.
+    known = set(attempts_by_root) | {attempts[-1]['move_uci']}
+    evaluation_session = str(session_key).startswith('eval_')
     earlier = conn.execute('''SELECT move_uci, move_san, correct, from_saved_line,
                 eval_cp, mate, best_reply_san, verified_pv_json
         FROM coach_board_attempts WHERE position_id=? AND correct=0 AND id<?
-        ORDER BY id DESC''', (position_row['id'], attempts[0]['id'])).fetchall()
-    earlier_roots = set()
+          AND (?=0 OR session_key=?)
+        ORDER BY id DESC''', (position_row['id'], attempts[0]['id'], int(evaluation_session), session_key)).fetchall()
     earlier_notes = []
-    for a in earlier:
-        root = a['move_uci']
-        if root in current_roots or root in earlier_roots:
-            continue
-        earlier_roots.add(root)
-        note = _comment_for_attempt(a, best_san,
-                                    model_explanation=saved_explanation,
-                                    position_row=position_row)
+    for attempt in earlier:
+        root = attempt['move_uci']
+        if root in known: continue
+        known.add(root)
+        note = _comment_for_attempt(attempt, best_san,
+                                    model_explanation=saved_explanation, position_row=position_row)
         note['origin'] = 'previous_session'
+        note['purpose'] = 'learning'
         earlier_notes.append(note)
-    comments[:0] = reversed(earlier_notes)
-    # The move from the original game is a useful earlier continuation even
-    # when the learner did not happen to replay it in this solve session.
-    # Include only saved, root-locked evidence, and never label an untested
-    # original-game move as a failed training attempt.
+    # At most one card per root move. An attempted-move learning card takes
+    # precedence over a duplicate original-game card, including past sessions.
     game_uci = position_row['played_move_uci']
-    solved_uci = attempts[-1]['move_uci']
-    if (game_uci and game_uci != solved_uci and game_uci != position_row['best_move_uci']
-            and all(note['move_uci'] != game_uci for note in comments)
-            and _saved_continuation(position_row, game_uci)):
+    game_notes = []
+    if game_uci and game_uci not in known and _saved_continuation(position_row, game_uci):
+        game_mode = str(position_row['learning_mode'] or '').lower() if 'learning_mode' in position_row.keys() else ''
+        game_category = str(position_row['category'] or '').lower() if 'category' in position_row.keys() else ''
+        game_is_best = (game_uci == position_row['best_move_uci'] or
+                        ((game_mode in {'correct', 'excellent', 'brilliant', 'creative'} or
+                          game_category in {'correct', 'excellent', 'brilliant', 'creative'}) and
+                         game_category not in {'missed_checkmate','allowed_checkmate','major_blunder'}))
         game_note = _comment_for_attempt({
             'move_uci':game_uci,
             'move_san':position_row['played_move_san'] or game_uci,
-            'correct':0, 'from_saved_line':1,
-        }, best_san, model_explanation=saved_explanation,
-           position_row=position_row)
+            'correct':int(game_is_best), 'from_saved_line':1,
+        }, best_san, model_explanation=saved_explanation, position_row=position_row)
         game_note['origin'] = 'game'
-        comments.insert(0, game_note)
+        game_note['purpose'] = 'explanation' if game_is_best else 'learning'
+        game_notes.append(game_note)
+    comments = [solving, *current_notes, *earlier_notes, *game_notes]
     content = '\n'.join(f"{c['move_san']}: {c['text']}" for c in comments)
-    evidence = {'kind':'solved_attempt_recap', 'explanation_version':5,
+    evidence = {'kind':'solved_attempt_recap', 'explanation_version':7,
                 'session_key':session_key, 'source':'root_aligned_chess_interpretation',
                 'attempt_count':len(attempts), 'attempts':[dict(a) for a in attempts],
                 'attempt_comments':comments, 'model_explanation':saved_explanation,
@@ -165,7 +179,12 @@ def refresh_saved_recaps(conn, position_row):
             if not isinstance(structured, dict): structured = {}
         except (TypeError, ValueError):
             structured = {}
-        if structured.get('kind') != 'solved_attempt_recap' or structured.get('explanation_version', 0) >= 5:
+        if structured.get('kind') != 'solved_attempt_recap':
+            continue
+        # Never rewrite an old model's rated conversation in place.
+        if structured.get('coaching_version') != position_row['coaching_version']:
+            continue
+        if structured.get('explanation_version', 0) >= 7:
             continue
         try:
             content, evidence = _build_recap(conn, position_row, r['session_key'])
@@ -179,29 +198,44 @@ def refresh_saved_recaps(conn, position_row):
     return upgraded
 
 
-def save_solved_recap(conn, position_row, *, session_key):
+def save_solved_recap(conn, position_row, *, session_key, evaluation_solved=False):
     """Persist one concise post-solve report; never synthesize new chess claims."""
     if not valid_session_key(session_key):
         raise ValueError('Invalid solve-session identifier')
-    if not position_row['learned']:
+    if not position_row['learned'] and not evaluation_solved:
         raise PermissionError('Solve the position before viewing the coaching recap')
     previous = conn.execute('''SELECT cm.id, cm.content, cm.structured_json
         FROM coach_solve_recaps csr JOIN coach_messages cm ON cm.id=csr.message_id
         WHERE csr.position_id=? AND csr.session_key=?''',
         (position_row['id'], session_key)).fetchone()
+    stale_previous = False
     if previous:
-        refresh_saved_recaps(conn, position_row)
-        current = conn.execute('SELECT content, structured_json FROM coach_messages WHERE id=?', (previous['id'],)).fetchone()
-        return dict(id=previous['id'], content=current['content'],
-                    structured_json=current['structured_json'], created=False)
+        try:
+            old_record = json.loads(previous['structured_json'] or '{}')
+        except (TypeError, ValueError):
+            old_record = {}
+        stale_previous = old_record.get('coaching_version') != position_row['coaching_version']
+        if not stale_previous:
+            refresh_saved_recaps(conn, position_row)
+            current = conn.execute('SELECT content, structured_json FROM coach_messages WHERE id=?', (previous['id'],)).fetchone()
+            return dict(id=previous['id'], content=current['content'],
+                        structured_json=current['structured_json'], created=False)
 
     content, evidence = _build_recap(conn, position_row, session_key)
     from adaptive_coach import get_or_create_thread
     thread_id = get_or_create_thread(conn, position_row['id'], position_row['account_id'])
     cursor = conn.execute('''INSERT INTO coach_messages(thread_id, role, content, structured_json)
         VALUES (?, 'assistant', ?, ?)''', (thread_id, content, evidence))
-    conn.execute('''INSERT INTO coach_solve_recaps(position_id, session_key, message_id)
-        VALUES (?, ?, ?)''', (position_row['id'], session_key, cursor.lastrowid))
+    if stale_previous:
+        # Retain the original message and its feedback history, but point this
+        # session to a NEW message for the current version. Never overwrite a
+        # historical rated explanation or reuse its approval state.
+        conn.execute('''UPDATE coach_solve_recaps SET message_id=?
+            WHERE position_id=? AND session_key=?''',
+            (cursor.lastrowid, position_row['id'], session_key))
+    else:
+        conn.execute('''INSERT INTO coach_solve_recaps(position_id, session_key, message_id)
+            VALUES (?, ?, ?)''', (position_row['id'], session_key, cursor.lastrowid))
     conn.commit()
     return dict(id=cursor.lastrowid, content=content,
                 structured_json=evidence, created=True)

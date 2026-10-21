@@ -14,6 +14,7 @@ from explanatory_evidence import position_context, board_events
 from continuation_refutations import scan_branch
 
 PROACTIVE_VERSION = 1
+PROACTIVE_CACHE_SCHEMA = 2  # v90: tie probe reuse to the coaching rule set
 
 
 def coaching_probe_cache_key(row, settings, engine_name=''):
@@ -29,8 +30,13 @@ def coaching_probe_cache_key(row, settings, engine_name=''):
         except (KeyError, IndexError):
             return None
 
+    # A previous ruleset's probe may have different narrative and motif
+    # selection semantics, even when its Stockfish depth is unchanged.
+    from coaching import COACHING_VERSION
     inputs = {
         'probe_version': PROACTIVE_VERSION,
+        'cache_schema': PROACTIVE_CACHE_SCHEMA,
+        'coaching_version': COACHING_VERSION,
         'engine': str(engine_name or ''),
         'fen': field('fen'),
         'best_move_uci': field('best_move_uci'),
@@ -56,7 +62,9 @@ def reusable_coaching_probe(row, settings, engine_name=''):
     except (KeyError, IndexError):
         return None
     data = decode_probes(raw)
-    if data and data.get('cache_key') == coaching_probe_cache_key(row, settings, engine_name):
+    from coaching import COACHING_VERSION
+    if (data and data.get('coaching_version') == COACHING_VERSION
+            and data.get('cache_key') == coaching_probe_cache_key(row, settings, engine_name)):
         return data
     return None
 
@@ -67,7 +75,9 @@ def decode_probes(raw):
             raw = json.loads(raw)
         except (ValueError, TypeError):
             return None
+    from coaching import COACHING_VERSION
     return raw if (isinstance(raw, dict) and raw.get('version') == PROACTIVE_VERSION
+                   and raw.get('coaching_version') == COACHING_VERSION
                    and isinstance(raw.get('branches'), list)) else None
 
 
@@ -252,7 +262,9 @@ def probe_training_position(engine, row, settings):
         })
     engine_name = getattr(engine, 'id', {}) or {}
     engine_name = engine_name.get('name', '') if isinstance(engine_name, dict) else str(engine_name)
-    return {'version': PROACTIVE_VERSION, 'cache_key': coaching_probe_cache_key(row, settings, engine_name), 'root_fen': board.fen(),
+    from coaching import COACHING_VERSION
+    return {'version': PROACTIVE_VERSION, 'coaching_version': COACHING_VERSION,
+            'cache_key': coaching_probe_cache_key(row, settings, engine_name), 'root_fen': board.fen(),
             'context': position_context(board),
             'strategic_context': strategic_context(board),
             'root_loss_cp': root_loss,

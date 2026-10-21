@@ -129,3 +129,29 @@
   .coach-chart-axis {margin-left:0; margin-right:calc(58px + 54px + 16px);}
   .coach-chart-category {width:100%;}
 }
+
+/* Fixed cohort model comparison, v91 */
+.coach-benchmark-panel{display:grid;gap:17px;padding:24px;margin:0 0 22px}
+.coach-benchmark-heading{display:flex;align-items:start;justify-content:space-between;gap:20px;flex-wrap:wrap}
+.coach-benchmark-heading h2{margin:6px 0 8px}
+.coach-benchmark-heading .muted{max-width:780px;line-height:1.5}
+.coach-benchmark-controls{display:grid;grid-template-columns:minmax(180px,2fr) repeat(2,minmax(165px,1fr));gap:14px}
+.coach-benchmark-controls label{display:grid;gap:6px;font-size:.82rem;color:var(--muted)}
+.coach-benchmark-controls select{padding:10px 12px;border-radius:9px;min-width:0;background:#1c222a;color:var(--text);border:1px solid var(--line)}
+#benchmark-model-chart{display:grid;gap:16px}
+.benchmark-pair{display:grid;gap:13px;padding:17px 18px;border:1px solid var(--line);border-radius:12px}
+.benchmark-pair header{display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap}
+.benchmark-pair h3{font-size:1rem;margin:0;overflow-wrap:anywhere}
+.benchmark-pair header .muted{font-size:.78rem}
+.benchmark-metric{display:grid;grid-template-columns:minmax(138px,210px) minmax(80px,1fr) 72px 72px;align-items:center;gap:12px;font-size:.83rem}
+.benchmark-metric-track{background:rgba(255,255,255,.08);height:12px;border-radius:12px;overflow:hidden}
+.benchmark-metric-track>span{display:block;height:100%;background:#7ca9d1}
+.benchmark-metric strong,.benchmark-metric small{font-variant-numeric:tabular-nums;text-align:right}
+.benchmark-metric small,.benchmark-approval small{color:var(--muted)}
+.benchmark-approval{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:13px;padding-top:13px;border-top:1px solid var(--line)}
+.benchmark-approval>div{display:grid;gap:5px}
+.benchmark-approval span{font-size:.78rem;color:var(--muted)}
+.benchmark-approval strong{font-size:1.15rem}
+.benchmark-approval small{font-size:.75rem}
+.coach-benchmark-footnote{font-size:.79rem;line-height:1.55}
+@media(max-width:780px){.coach-benchmark-controls,.benchmark-approval{grid-template-columns:1fr}.benchmark-metric{grid-template-columns:1fr 90px;gap:6px}.benchmark-metric-track{grid-column:1;grid-row:2}.benchmark-metric strong{grid-column:2;grid-row:2}.benchmark-metric small{grid-column:2;grid-row:1}}

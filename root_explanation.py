@@ -183,6 +183,11 @@ def root_move_impact(board, best, played=None, best_pv=None):
                 return {'kind': 'king_activity', 'text':
                         f'{san} brings your king closer to the center, improving its activity in the endgame.'}
 
+    # A direct check is the immediate decision and must precede secondary
+    # rook-file development. Stronger verified tactics are ranked upstream.
+    if mover and after.is_check():
+        return {'kind': 'check', 'text': f'{san} gives check, requiring an immediate reply.'}
+
     if mover and mover.piece_type == chess.ROOK:
         original_file, new_file = chess.square_file(best.from_square), chess.square_file(best.to_square)
         if new_file != original_file:
@@ -198,10 +203,6 @@ def root_move_impact(board, best, played=None, best_pv=None):
                 and not _legal_recaptures(after, best.to_square)):
             return {'kind': 'escape', 'text':
                     f'{san} moves your attacked {_name(mover)} out of immediate danger.'}
-        # A direct check is specific, but avoid overshadowing a mate or an
-        # actual tactical result established elsewhere.
-        if after.is_check():
-            return {'kind': 'check', 'text': f'{san} gives check, requiring an immediate reply.'}
         new_central = [sq for sq in CENTRAL if
                        sq in after.attacks(best.to_square) and not board.is_attacked_by(side, sq)]
         if new_central:

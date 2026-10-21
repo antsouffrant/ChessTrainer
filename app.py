@@ -39,10 +39,17 @@ from feedback_analytics import (
     report_rows, report_facets, report_summary, taxonomy_change_rates, solved_taxonomy_rows, solved_taxonomy_csv, coaching_comparison, coaching_metric_chart, current_taxonomy_status, csv_bytes, regression_candidate_rows,
 )
 from process_policy import queue_analysis, restart_analysis
+from coaching_cache import clear_coaching_cache
+from feedback_history import append_feedback
 from player_learning import record_attempt as record_player_attempt, abandon_session as abandon_player_session, summary as player_summary, facets as player_facets, export_rows as player_export_rows, csv_data as player_csv_data, reset_player_records
 from opening_playlist import enrich_opening_playlist, board_identity
 from balanced_playlist import balanced_playlist_order
 from coach_session_recap import record_board_attempt, save_solved_recap, refresh_saved_recaps
+from coach_benchmark import ensure_cohort, snapshot_completed_refresh, benchmark_status, benchmark_manifest
+from evaluation_runs import (start_evaluation_run, resolve_run, run_position,
+                             record_evaluation_attempt, evaluation_manifest, run_history)
+from coach_benchmark import benchmark_comparison
+from coaching_taxonomy import TAXONOMY_VERSION
 from adaptive_coach import (
     apply_adaptive_concepts_to_position, coach_history, handle_coach_message, get_or_create_thread,
 )
@@ -308,6 +315,16 @@ def _run_refresh_worker(job_id):
                              result['processed'], result['total'], result['updated'],
                              result['failed'], result['without_pgn'],
                              'complete' if result['done'] else 'running', job_id))
+                        if result['done']:
+                            snapshot_completed_refresh(conn,job_id,COACHING_VERSION,TAXONOMY_VERSION)
+                            # Every completed refresh creates a fresh, independently
+                            # unanswered evaluation. Earlier runs remain immutable.
+                            try:
+                                start_evaluation_run(conn,job_id,COACHING_VERSION)
+                            except ValueError:
+                                # Incomplete/stale benchmark stays visible but
+                                # is not misrepresented as ready for evaluation.
+                                pass
                         conn.commit()
                     busy_retries = 0
                     if result['done']:
@@ -364,6 +381,51 @@ def processes():
     return render_template('processes.html', selected_job_id=selected)
 
 
+@app.get('/api/jobs/<int:job_id>/coaching-benchmark')
+def coaching_benchmark(job_id):
+    with connect() as conn:
+        if not conn.execute('SELECT 1 FROM analysis_jobs WHERE id=?',(job_id,)).fetchone():
+            return jsonify({'error':'Game list not found'}),404
+        result=benchmark_status(conn,job_id)
+        return jsonify({'benchmark':result,'position_ids':[r['id'] for r in benchmark_manifest(conn,job_id)],
+                        'evaluation_runs':run_history(conn,job_id)})
+
+
+@app.post('/api/jobs/<int:job_id>/evaluations')
+def create_evaluation(job_id):
+    """New independent attempt of the fixed cohort; never resets learned state."""
+    payload=request.get_json(silent=True) or {}
+    version=str(payload.get('coaching_version') or '').strip() or None
+    with connect() as conn:
+        if not conn.execute('SELECT 1 FROM analysis_jobs WHERE id=?',(job_id,)).fetchone():
+            return jsonify({'error':'Game list not found'}),404
+        try:
+            run_id=start_evaluation_run(conn,job_id,version)
+        except ValueError as exc:
+            return jsonify({'error':str(exc)}),409
+        conn.commit()
+    return jsonify({'ok':True,'run_id':run_id,'url':f'/trainer/{job_id}?benchmark=1&run_id={run_id}'}),201
+
+
+@app.get('/api/coach/benchmark-comparison')
+def coaching_benchmark_comparison():
+    try:
+        job_id=int(request.args.get('job_id') or 0)
+    except ValueError:
+        return jsonify({'error':'Select a game list'}),400
+    if job_id<=0:return jsonify({'error':'Select a game list'}),400
+    model_a=str(request.args.get('model_a') or '').strip()
+    model_b=str(request.args.get('model_b') or '').strip()
+    with connect() as conn:
+        if not conn.execute('SELECT 1 FROM analysis_jobs WHERE id=?',(job_id,)).fetchone():
+            return jsonify({'error':'Game list not found'}),404
+        try:
+            result=benchmark_comparison(conn,job_id,model_a,model_b)
+        except ValueError as exc:
+            return jsonify({'error':str(exc)}),400
+    return jsonify(result)
+
+
 @app.get('/api/processes')
 def process_listing():
     # Reads never need to wait for a full evaluation/metadata write cycle.
@@ -385,7 +447,16 @@ def process_listing():
             LEFT JOIN metadata_processes p ON p.job_id=j.id
             LEFT JOIN retrieval_processes r ON r.job_id=j.id
             ORDER BY j.id DESC''').fetchall()
-            return jsonify({'processes': [dict(row) for row in jobs]})
+                # Benchmark lookups must share the live connection used to fetch
+                # jobs. db._ClosingConnection closes at the end of `with`.
+                details = []
+                for row in jobs:
+                    item = dict(row)
+                    item['benchmark'] = benchmark_status(conn, row['id'])
+                    history = run_history(conn, row['id'])
+                    item['evaluation_run'] = history[0] if history else None
+                    details.append(item)
+            return jsonify({'processes': details})
         except sqlite3.OperationalError as exc:
             if 'locked' not in str(exc).lower() and 'busy' not in str(exc).lower():
                 raise
@@ -426,6 +497,39 @@ def process_stop_retrieval(job_id):
     return jsonify({'ok':True,'status':'stopped'})
 
 
+@app.post('/api/jobs/<int:job_id>/process/coaching-cache/clear')
+def process_clear_coaching_cache(job_id):
+    """Discard one list's generated coaching, never root Stockfish/game data.
+
+    Chat transcript and its live thumbs projection are deleted. Immutable
+    feedback_events snapshots survive, including rated chat message content.
+    """
+    payload = request.get_json(silent=True) or {}
+    if payload.get('confirmation') != 'CLEAR COACHING CACHE':
+        return jsonify({'error': 'Explicit CLEAR COACHING CACHE confirmation required.'}), 400
+    # Synchronize with the same local worker lock used by metadata/analysis.
+    # Do not block the web request behind a multi-minute Stockfish operation.
+    if not PROCESS_LOCK.acquire(blocking=False):
+        return jsonify({'error': 'An analysis or coaching worker is still active. Pause it and retry after it stops.'}), 409
+    try:
+        with connect() as conn:
+            job = conn.execute('SELECT status FROM analysis_jobs WHERE id=?', (job_id,)).fetchone()
+            if job is None:
+                return jsonify({'error': 'Game list not found.'}), 404
+            refresh = conn.execute('SELECT status FROM metadata_processes WHERE job_id=?', (job_id,)).fetchone()
+            retrieval = conn.execute('SELECT status FROM retrieval_processes WHERE job_id=?', (job_id,)).fetchone()
+            if job['status'] in ('queued','running','retrieving','restarting','waiting_for_games') or \
+                    (refresh and refresh['status'] in ('queued','running')) or \
+                    (retrieval and retrieval['status'] != 'complete'):
+                return jsonify({'error':'Finish or pause retrieval, Analysis, and Coaching refresh before clearing the cache.'}), 409
+            deleted = clear_coaching_cache(conn, job_id)
+            conn.commit()
+        return jsonify({'ok':True, 'status':'needs_refresh', 'job_id':job_id,
+                        'cleared':deleted, 'next_step':'Start Coaching refresh.'})
+    finally:
+        PROCESS_LOCK.release()
+
+
 @app.post('/api/jobs/<int:job_id>/process/refresh')
 def process_refresh(job_id):
     with connect() as conn:
@@ -441,6 +545,8 @@ def process_refresh(job_id):
         retrieval = conn.execute('SELECT status FROM retrieval_processes WHERE job_id=?',(job_id,)).fetchone()
         if retrieval is not None and retrieval['status'] != 'complete':
             return jsonify({'error':'Retrieval must finish before refreshing metadata.'}), 409
+        # Cohort is chosen only on the FIRST refresh. Never redraw it.
+        ensure_cohort(conn,job_id)
         # Paused work resumes at its cursor. A completed refresh starts from zero.
         resume = bool(current and current['status'] == 'paused' and
                       (request.get_json(silent=True) or {}).get('resume'))
@@ -554,7 +660,21 @@ def verify_lichess_username(username: str) -> bool:
 def _store_labels(conn, position_id: int, labels):
     from coaching_taxonomy import normalize_learning_labels
     row = conn.execute('SELECT * FROM training_positions WHERE id=?', (position_id,)).fetchone()
-    labels = normalize_learning_labels(labels, row)
+    is_in_check = False
+    king_evasion = False
+    try:
+        board = chess.Board(row['fen'])
+        best = chess.Move.from_uci(row['best_move_uci'])
+        is_in_check = board.is_check()
+        king_evasion = (is_in_check and best in board.legal_moves
+                        and board.piece_at(best.from_square) is not None
+                        and board.piece_at(best.from_square).piece_type == chess.KING
+                        and not board.is_capture(best))
+    except (ValueError, TypeError, KeyError, chess.InvalidMoveError):
+        pass
+    labels = normalize_learning_labels(labels, row,
+                                       is_in_check=is_in_check,
+                                       best_is_king_evasion=king_evasion)
     conn.execute('DELETE FROM position_concepts WHERE position_id = ?', (position_id,))
     for label in labels:
         conn.execute('''
@@ -573,7 +693,8 @@ def _store_labels(conn, position_id: int, labels):
     if primary:
         from coaching_taxonomy import save_taxonomy
         row = conn.execute('SELECT * FROM training_positions WHERE id=?', (position_id,)).fetchone()
-        save_taxonomy(conn, position_id, row, primary.key, confidence=primary.confidence)
+        save_taxonomy(conn, position_id, row, primary.key, confidence=primary.confidence,
+                      is_in_check=is_in_check)
 
 
 def backfill_taxonomy_paths():
@@ -585,8 +706,10 @@ def backfill_taxonomy_paths():
             FROM training_positions tp
             JOIN position_concepts pc ON pc.position_id=tp.id AND pc.is_primary=1
             LEFT JOIN position_motif_taxonomy tx ON tx.position_id=tp.id
-            WHERE tx.position_id IS NULL OR tx.taxonomy_version <> ?
-                OR tx.motif_key <> pc.concept_key
+            WHERE (tx.position_id IS NULL OR tx.taxonomy_version <> ?
+                OR tx.motif_key <> pc.concept_key)
+              AND tp.job_id NOT IN (SELECT job_id FROM metadata_processes
+                                    WHERE status='needs_refresh')
         """, (TAXONOMY_VERSION,)).fetchall()
         from coaching_taxonomy import canonical_motif_key, evaluation_outcome_key
         from learning import LearningLabel
@@ -626,6 +749,8 @@ def backfill_learning_concepts():
                 WHERE pc.position_id = tp.id
                   AND pc.is_primary = 1
             )
+              AND tp.job_id NOT IN (SELECT job_id FROM metadata_processes
+                                    WHERE status='needs_refresh')
         ''', ()).fetchall()
 
         for row in rows:
@@ -667,7 +792,9 @@ def backfill_adaptive_concepts():
         """).fetchone()['n']
         if not active:
             return
-        rows = conn.execute('SELECT id FROM training_positions').fetchall()
+        rows = conn.execute('''SELECT id FROM training_positions
+            WHERE job_id NOT IN (SELECT job_id FROM metadata_processes
+                                 WHERE status='needs_refresh')''').fetchall()
         for row in rows:
             try:
                 apply_adaptive_concepts_to_position(conn, row['id'])
@@ -712,56 +839,26 @@ def backfill_difficulty_estimates():
 
 
 def backfill_coaching_texts():
-    """Populate/update local coaching copy for existing saved positions."""
-    with connect() as conn:
-        rows = conn.execute("""
-            SELECT * FROM training_positions
-            WHERE coach_prompt IS NULL OR coach_explanation IS NULL
-               OR coaching_version IS NULL OR coaching_version <> ?
-        """, (COACHING_VERSION,)).fetchall()
+    """Fill gaps only for positions already owned by this version.
 
+    A new release MUST NOT relabel old evidence on startup. Older versions
+    require a deliberate Coaching refresh (which regenerates probes first).
+    """
+    from coaching_copy_refresh import rebuild_coaching_copy
+    with connect() as conn:
+        rows=conn.execute("""SELECT id FROM training_positions
+            WHERE (coach_prompt IS NULL OR coach_explanation IS NULL)
+              AND coaching_version = ?
+              AND job_id NOT IN (SELECT job_id FROM metadata_processes
+                                 WHERE status='needs_refresh')""",
+            (COACHING_VERSION,)).fetchall()
         for row in rows:
-            label_rows = conn.execute("""
-                SELECT concept_key AS key, confidence, is_primary, evidence
-                FROM position_concepts
-                WHERE position_id = ?
-                ORDER BY is_primary DESC, confidence DESC
-            """, (row['id'],)).fetchall()
             try:
-                prompt, explanation = generate_coaching_text(
-                    fen=row['fen'],
-                    previous_fen=row['previous_fen'],
-                    opponent_move_uci=row['opponent_move_uci'],
-                    opponent_move_san=row['opponent_move_san'],
-                    played_move_uci=row['played_move_uci'],
-                    played_move_san=row['played_move_san'],
-                    best_move_uci=row['best_move_uci'],
-                    best_move_san=row['best_move_san'],
-                    category=row['category'],
-                    labels=label_rows,
-                    taxonomy_path=(MotifPath(
-                        scoped['context_key'], scoped['move_type_key'],
-                        scoped['motif_key'], scoped['confidence'], scoped['evidence'])
-                        if (scoped := conn.execute(
-                            'SELECT * FROM position_motif_taxonomy WHERE position_id=?',
-                            (row['id'],)).fetchone()) is not None else None),
-                    mate_before=row['mate_before'],
-                    best_pv_uci=row['best_pv_uci'],
-                    played_pv_uci=row['played_pv_uci'],
-                    alternative_pvs_json=row['alternative_pvs_json'],
-                    eval_before_cp=row['eval_before_cp'],
-                    eval_after_cp=row['eval_after_cp'],
-                    critical_events_json=row['critical_events_json'],
-                    explanatory_lines_json=row['explanatory_lines_json'],
-                )
-            except (ValueError, TypeError, KeyError):
+                rebuild_coaching_copy(conn,row['id'])
+            except (ValueError,TypeError,KeyError):
                 continue
-            conn.execute("""
-                UPDATE training_positions
-                SET coach_prompt = ?, coach_explanation = ?, coaching_version = ?
-                WHERE id = ?
-            """, (prompt, explanation, COACHING_VERSION, row['id']))
         conn.commit()
+
 
 def import_existing_json_if_present():
     source = Path('data/training_positions.json')
@@ -1354,6 +1451,17 @@ def trainer(job_id):
         selected_position_id = int(request.args.get('position', '') or 0) or None
     except (TypeError, ValueError):
         selected_position_id = None
+    evaluation_run_id = None
+    if request.args.get('benchmark') == '1':
+        with connect() as conn:
+            requested_run=request.args.get('run_id',type=int)
+            evaluated=resolve_run(conn,job_id,requested_run)
+            # An invalid explicit run must not silently select a different run.
+            if requested_run and evaluated is None:
+                return redirect(url_for('processes',job_id=job_id))
+            evaluation_run_id=evaluated['id'] if evaluated else None
+            if evaluation_run_id is None:
+                return redirect(url_for('processes',job_id=job_id))
     opening = None
     if opening_key:
         with connect() as conn:
@@ -1378,6 +1486,7 @@ def trainer(job_id):
         coach_enabled=coach_enabled, selected_position_id=selected_position_id,
         learning_mode=learning_mode, sort_key=sort_key, listing_scope=listing_scope,
         rating_min=rating_min, rating_max=rating_max,
+        evaluation_run_id=evaluation_run_id,
     )
 
 
@@ -1788,6 +1897,13 @@ def training_playlist_manifest(job_id):
                               for row in rows})
             return jsonify([by_id[value] for value in ids if value in by_id])
 
+        if request.args.get('benchmark') == '1':
+            run_id=request.args.get('run_id',type=int)
+            run=resolve_run(conn,job_id,run_id)
+            if not run or (run_id and int(run['id'])!=run_id):
+                return jsonify({'error':'No evaluation run. Complete Coaching refresh or start one from Process.'}),409
+            return jsonify(evaluation_manifest(conn,job_id,run['id']))
+
         concept = request.args.get('concept', '').strip()
         context_filter = request.args.get('context', '').strip()
         move_type_filter = request.args.get('move_type', '').strip()
@@ -1892,6 +2008,10 @@ def restore_training_playlist(job_id):
     # Client passes saved position IDs; every ID is scoped to the analysis job.
     payload = request.get_json(silent=True) or {}
     opening_key = str(payload.get('opening_key') or '').strip()
+    try:
+        evaluation_run_id=int(payload.get('evaluation_run_id') or 0)
+    except (ValueError,TypeError):
+        return jsonify({'error':'Invalid evaluation run'}),400
     raw_ids = payload.get('position_ids')
     if not isinstance(raw_ids, list) or len(raw_ids) > 20000:
         return jsonify({'error': 'Invalid playlist'}), 400
@@ -1920,13 +2040,28 @@ def restore_training_playlist(job_id):
                        tp.best_move_uci, tp.best_move_san,
                        tp.user_color, tp.move_number, tp.mistake_ply, tp.game_date, tp.opponent,
                        tp.learned, tp.attempts, tp.correct_attempts, tp.centipawn_loss,
-                       tp.difficulty_score, tp.estimated_rating, tp.coach_prompt, tp.coach_explanation,
+                       tp.difficulty_score, tp.estimated_rating, tp.coach_prompt, tp.coach_explanation, tp.coaching_version,
                        tp.eval_before_cp, tp.eval_after_cp, tp.mate_before, tp.mate_after,
                        tp.opening_name, tp.opening_variation, tp.opening_eco, tp.historical_match
                 FROM training_positions tp
                 WHERE tp.job_id = ? AND tp.id IN ({placeholders})
             ''', (job_id, *chunk)).fetchall()
             items_by_id.update({int(row['id']): dict(row) for row in rows})
+        # Evaluation has its own completion state. Global learned remains the
+        # curriculum record, never the state of a new benchmark attempt.
+        if evaluation_run_id:
+            run=resolve_run(conn,job_id,evaluation_run_id)
+            if not run:
+                return jsonify({'error':'Evaluation run not found'}),404
+            for pid,card in list(items_by_id.items()):
+                state=run_position(conn,evaluation_run_id,pid,job_id)
+                if state is None:
+                    return jsonify({'error':'Position is not in this evaluation'}),400
+                card['learned'] = int(state['status']=='solved')
+                card['evaluation_run_id']=evaluation_run_id
+                # Suppress stale current-version prose when refresh incomplete.
+                if card.get('coach_explanation') and card.get('coaching_version') != run['coaching_version']:
+                    card['coach_explanation']=''
         # Preserve the original, user-selected sort order from the snapshot.
         items = [items_by_id[pid] for pid in position_ids if pid in items_by_id]
         if opening_key:
@@ -2475,6 +2610,19 @@ def attempt(position_id):
         """, (position_id,)).fetchone()
         if row is None:
             return jsonify({'error': 'Position not found'}), 404
+        try:
+            evaluation_run_id=int(payload.get('evaluation_run_id') or 0)
+        except (TypeError,ValueError):
+            return jsonify({'error':'Invalid evaluation run'}),400
+        evaluation_item=None
+        if evaluation_run_id:
+            evaluation_item=run_position(conn,evaluation_run_id,position_id,row['job_id'])
+            if evaluation_item is None:
+                return jsonify({'error':'Position not in evaluation run'}),404
+            if row['coaching_version']!=evaluation_item['coaching_version']:
+                return jsonify({'error':'This evaluation requires its original coaching model; start a current-version evaluation.'}),409
+            if evaluation_item['status']=='solved':
+                return jsonify({'error':'Already solved in this evaluation run'}),409
 
         board = chess.Board(row['fen'])
         legal_moves = list(board.legal_moves)
@@ -2580,10 +2728,10 @@ def attempt(position_id):
         # Already-learned positions can be reviewed in Analysis mode without
         # creating another learning session.
         learning_event = None
-        if not row['learned'] and (payload.get('track_learning', True) is False
+        if not evaluation_run_id and not row['learned'] and (payload.get('track_learning', True) is False
                                    or payload.get('start_new_learning_session') is True):
             abandon_player_session(conn, position_id)
-        if not row['learned'] and payload.get('track_learning', True) is not False:
+        if not evaluation_run_id and not row['learned'] and payload.get('track_learning', True) is not False:
             learning_event = record_player_attempt(
                 conn, row, move_uci=attempted_uci, correct=correct,
                 elapsed_seconds=payload.get('active_seconds_delta'),
@@ -2600,7 +2748,9 @@ def attempt(position_id):
             correct=correct, quality=review_quality,
         )
 
-        if correct:
+        if evaluation_run_id:
+            record_evaluation_attempt(conn,evaluation_run_id,position_id,correct,attempted_uci)
+        if correct and not evaluation_run_id:
             conn.execute("""
                 UPDATE training_positions
                 SET attempts = attempts + 1,
@@ -2613,7 +2763,7 @@ def attempt(position_id):
             # across source games/jobs are retired together so progress accumulates.
             _set_account_position_learned(conn, row['account_id'], row, True)
             _set_opening_position_group_learned(conn, row, str(payload.get('opening_key') or '').strip(), True)
-        else:
+        elif not evaluation_run_id:
             conn.execute(
                 'UPDATE training_positions SET attempts = attempts + 1 WHERE id = ?',
                 (position_id,),
@@ -2758,7 +2908,7 @@ def _enrich_saved_variations(position_id):
                         WHERE id = ?''',
                      (updates.get('best_pv_uci'), updates.get('played_pv_uci'), position_id))
         refreshed = conn.execute('SELECT * FROM training_positions WHERE id = ?', (position_id,)).fetchone()
-        _refresh_position_labels(conn, position_id, refreshed)
+        _refresh_position_labels(conn, position_id, refreshed, regenerate_copy=False)
         conn.commit()
 
 
@@ -2837,7 +2987,7 @@ def enrich_job_motifs(job_id):
                 WHERE id = ?
             ''', (best_raw, played_raw, row['id']))
             refreshed = conn.execute('SELECT * FROM training_positions WHERE id = ?', (row['id'],)).fetchone()
-            _refresh_position_labels(conn, row['id'], refreshed)
+            _refresh_position_labels(conn, row['id'], refreshed, regenerate_copy=False)
             conn.commit()
         updated += 1
 
@@ -2945,10 +3095,29 @@ def coach_taxonomy_csv():
     )
 
 
+@app.get('/api/analytics/feedback/history')
+def feedback_history_events():
+    """Immutable event history for one position, including vote withdrawals."""
+    position = request.args.get('position_id', type=int)
+    if not position:
+        return jsonify({'error':'position_id required'}),400
+    with connect() as conn:
+        if not conn.execute('SELECT 1 FROM training_positions WHERE id=?',(position,)).fetchone():
+            return jsonify({'error':'Position not found'}),404
+        records = conn.execute('''SELECT e.id,e.created_at,e.feedback_type,e.rating,e.coaching_version,
+            e.classifier_version,e.taxonomy_version,e.lesson_key,e.content_snapshot,
+            e.suggested_text,e.suggested_motif_key,e.model_key,e.selected_key,
+            e.source_message_id,e.position_key,e.continuation_id,fc.move_key AS continuation_key
+          FROM feedback_events e JOIN feedback_position_sources fps ON fps.position_key=e.position_key
+          LEFT JOIN feedback_continuations fc ON fc.continuation_id=e.continuation_id
+          WHERE fps.position_id=? ORDER BY e.id''',(position,)).fetchall()
+    return jsonify({'events':[dict(r) for r in records]})
+
+
 @app.get('/api/analytics/feedback.csv')
 def analytics_feedback_csv():
     with connect() as conn:
-        rows = report_rows(conn, request.args)
+        rows = report_rows(conn, {**request.args.to_dict(), 'history': 'all'})
     return send_file(
         io.BytesIO(csv_bytes(rows)), mimetype='text/csv; charset=utf-8',
         as_attachment=True, download_name='chess_coaching_feedback.csv',
@@ -2994,27 +3163,48 @@ def coach_reset_feedback():
             continuations = conn.execute('DELETE FROM continuation_explanation_feedback').rowcount
             coaching = conn.execute('DELETE FROM coach_message_feedback').rowcount
             taxonomy = conn.execute('DELETE FROM position_taxonomy_feedback').rowcount
+        if job_id is not None:
+            events = conn.execute('''DELETE FROM feedback_events WHERE source_position_id IN
+                (SELECT id FROM training_positions WHERE job_id=?)''',(job_id,)).rowcount
+        else:
+            events = conn.execute('DELETE FROM feedback_events').rowcount
         conn.commit()
     return jsonify({'ok': True, 'job_id': job_id,
-                    'deleted': {'position_explanation_motif': positions,
+                    'deleted': {'feedback_history_events': events,
+                                'position_explanation_motif': positions,
                                 'continuation_explanations': continuations,
                                 'chat_coaching': coaching, 'taxonomy_selections': taxonomy}})
 
 
 @app.route('/api/positions/<int:position_id>/feedback', methods=['GET', 'POST'])
 def position_feedback(position_id):
+    payload=request.get_json(silent=True) or {} if request.method=='POST' else {}
+    requested_run=payload.get('evaluation_run_id') if request.method=='POST' else request.args.get('evaluation_run_id')
+    try: run_id=int(requested_run) if requested_run else None
+    except (TypeError,ValueError):return jsonify({'error':'Invalid evaluation run'}),400
     with connect() as conn:
+        if run_id:
+            state=run_position(conn,run_id,position_id)
+            if not state or state['status']!='solved':
+                return jsonify({'error':'Solve this evaluation position before rating'}),403
+            position_model=conn.execute('SELECT coaching_version FROM training_positions WHERE id=?',(position_id,)).fetchone()
+            if not position_model or position_model['coaching_version']!=state['coaching_version']:
+                return jsonify({'error':'Historical evaluation is read-only under a different current model'}),409
         if request.method == 'GET':
             if not conn.execute('SELECT 1 FROM training_positions WHERE id = ?', (position_id,)).fetchone():
                 return jsonify({'error': 'Position not found'}), 404
-            return jsonify({'ratings': position_votes(conn, position_id),
-                            'corrections': position_feedback_details(conn, position_id),
-                            'continuation_ratings': continuation_votes(conn, position_id),
-                            'continuation_corrections': continuation_feedback_details(conn, position_id),
+            return jsonify({'ratings': position_votes(conn, position_id, run_id),
+                            'corrections': position_feedback_details(conn, position_id, run_id),
+                            'continuation_ratings': continuation_votes(conn, position_id, run_id),
+                            'continuation_corrections': continuation_feedback_details(conn, position_id, run_id),
                             'motif_options': motif_feedback_options(conn, position_id),
-                            'taxonomy_feedback': taxonomy_feedback_choices(conn, position_id)})
-        payload = request.get_json(silent=True) or {}
+                            'taxonomy_feedback': taxonomy_feedback_choices(conn, position_id, run_id)})
         category = str(payload.get('category') or '')
+        if category in ('explanation', 'continuation'):
+            version = conn.execute('SELECT coaching_version FROM training_positions WHERE id=?',
+                                   (position_id,)).fetchone()
+            if version and version['coaching_version'] != COACHING_VERSION:
+                return jsonify({'error':'Refresh coaching before rating newly generated explanations.'}), 409
         try:
             rating = int(payload.get('rating'))
         except (ValueError, TypeError):
@@ -3025,17 +3215,17 @@ def position_feedback(position_id):
                     conn, position_id, payload.get('continuation_key'), rating,
                     lesson_key=payload.get('lesson_key') or '',
                     text=payload.get('content_snapshot') or '',
-                    suggested_text=payload.get('suggested_text'))
-                return jsonify({'ok': True, 'ratings': position_votes(conn, position_id),
-                                'corrections': position_feedback_details(conn, position_id),
+                    suggested_text=payload.get('suggested_text'),evaluation_run_id=run_id)
+                return jsonify({'ok': True, 'ratings': position_votes(conn, position_id, run_id),
+                                'corrections': position_feedback_details(conn, position_id, run_id),
                                 'continuation_ratings': continuation_ratings,
-                                'continuation_corrections': continuation_feedback_details(conn, position_id)})
+                                'continuation_corrections': continuation_feedback_details(conn, position_id, run_id)})
             ratings = record_position_vote(
                 conn, position_id, category, rating,
                 lesson_key=payload.get('lesson_key') or '',
                 text=payload.get('content_snapshot') or '',
                 suggested_text=payload.get('suggested_text'),
-                suggested_motif_key=payload.get('suggested_motif_key'),
+                suggested_motif_key=payload.get('suggested_motif_key'), evaluation_run_id=run_id,
             )
         except ValueError as exc:
             return jsonify({'error': str(exc)}), 400
@@ -3044,17 +3234,23 @@ def position_feedback(position_id):
         except PermissionError as exc:
             return jsonify({'error': str(exc)}), 403
     with connect() as conn:
-        details = position_feedback_details(conn, position_id)
+        details = position_feedback_details(conn, position_id, run_id)
     return jsonify({'ok': True, 'ratings': ratings, 'corrections': details})
 
 
 @app.post('/api/positions/<int:position_id>/taxonomy-feedback')
 def set_position_taxonomy_feedback(position_id):
     payload = request.get_json(silent=True) or {}
+    try: run_id=int(payload.get('evaluation_run_id') or 0) or None
+    except (TypeError,ValueError):return jsonify({'error':'Invalid evaluation run'}),400
     try:
         with connect() as conn:
+            if run_id:
+                state=run_position(conn,run_id,position_id)
+                if not state or state['status']!='solved':
+                    return jsonify({'error':'Solve this evaluation position before rating'}),403
             result = save_taxonomy_feedback(conn, position_id,
-                payload.get('field'), payload.get('selected_key'))
+                payload.get('field'), payload.get('selected_key'),evaluation_run_id=run_id)
     except ValueError as exc:
         return jsonify({'error': str(exc)}), 400
     except LookupError as exc:
@@ -3066,14 +3262,30 @@ def set_position_taxonomy_feedback(position_id):
 
 @app.get('/api/positions/<int:position_id>/solution')
 def position_solution(position_id):
-    _enrich_saved_variations(position_id)
+    run_id=request.args.get('evaluation_run_id',type=int)
+    # The lazy PV-enrichment path can also rebuild coaching text. Do not let
+    # it bypass an explicit coaching-cache clear before Coaching refresh.
+    with connect() as check_conn:
+        pending = check_conn.execute('''SELECT mp.status FROM training_positions tp
+            LEFT JOIN metadata_processes mp ON mp.job_id=tp.job_id
+            WHERE tp.id=?''', (position_id,)).fetchone()
+    if not pending or pending['status'] != 'needs_refresh':
+        _enrich_saved_variations(position_id)
     with connect() as conn:
         row = conn.execute('SELECT * FROM training_positions WHERE id = ?', (position_id,)).fetchone()
         if row is None:
             return jsonify({'error': 'Position not found'}), 404
-        if not row['learned']:
+        evaluation_solved=False
+        if run_id:
+            state=run_position(conn,run_id,position_id,row['job_id'])
+            if state is None:return jsonify({'error':'Position not in evaluation run'}),404
+            evaluation_solved=state['status']=='solved'
+            if state['coaching_version']!=row['coaching_version']:
+                return jsonify({'error':'This evaluation belongs to an earlier model; review its saved snapshot in Coach'}),409
+        if (run_id and not evaluation_solved) or (not run_id and not row['learned']):
             return jsonify({'error': 'Solve the position before viewing the solution'}), 403
         concepts = _position_concepts(conn, [position_id]).get(position_id, [])
+        taxonomy = _position_taxonomies(conn, [position_id]).get(position_id)
 
     return jsonify({
         'best_move_uci': row['best_move_uci'],
@@ -3087,7 +3299,7 @@ def position_solution(position_id):
         'difficulty_score': row['difficulty_score'],
         'estimated_rating': row['estimated_rating'],
         'concepts': concepts,
-        'taxonomy': _position_taxonomies(conn, [position_id]).get(position_id),
+        'taxonomy': taxonomy,
         'coach_explanation': row['coach_explanation'],
         'historical_match': row['historical_match'],
         'user_color': row['user_color'],
@@ -3109,8 +3321,17 @@ def position_solve_recap(position_id):
             JOIN analysis_jobs j ON j.id=tp.job_id WHERE tp.id=?''', (position_id,)).fetchone()
         if row is None:
             return jsonify({'error': 'Position not found'}), 404
+        eval_run_id=payload.get('evaluation_run_id')
+        if eval_run_id:
+            try: state=run_position(conn,int(eval_run_id),position_id,row['job_id'])
+            except (TypeError,ValueError): state=None
+            if not state or state['status']!='solved':
+                return jsonify({'error':'Evaluation position has not been solved.'}),409
+        if row['coaching_version'] != COACHING_VERSION:
+            return jsonify({'error': 'Coaching cache needs a refresh before new explanation messages can be generated.'}), 409
         try:
-            recap = save_solved_recap(conn, row, session_key=payload.get('session_key'))
+            recap = save_solved_recap(conn, row, session_key=payload.get('session_key'),
+                                      evaluation_solved=bool(eval_run_id))
         except PermissionError as exc:
             return jsonify({'error': str(exc)}), 403
         except ValueError as exc:
@@ -3120,6 +3341,7 @@ def position_solve_recap(position_id):
 
 @app.get('/api/positions/<int:position_id>/coach')
 def position_coach_history(position_id):
+    evaluation_run_id=request.args.get('run_id',type=int)
     with connect() as conn:
         row = conn.execute("""
             SELECT tp.*, j.account_id
@@ -3128,12 +3350,38 @@ def position_coach_history(position_id):
         """, (position_id,)).fetchone()
         if row is None:
             return jsonify({'error': 'Position not found'}), 404
-        if row['learned']:
+        state=run_position(conn,evaluation_run_id,position_id,row['job_id']) if evaluation_run_id else None
+        if evaluation_run_id and state is None:
+            return jsonify({'error':'Position not in evaluation run'}),404
+        evaluation_solved=bool(state['status']=='solved') if state else bool(row['learned'])
+        if row['learned'] and not evaluation_run_id:
             refresh_saved_recaps(conn, row)
         history = coach_history(conn, position_id, row['account_id'])
-        if not row['learned']:
-            # Re-opening an already-practiced puzzle must not disclose the
-            # previous solve recap or post-solve suggestions prematurely.
+        # Old solved recaps stay in the database for historical audit/ratings,
+        # but must never be displayed as the current coaching model's advice.
+        def current_recap(message):
+            try:
+                payload = json.loads(message.get('structured_json') or '{}')
+            except (TypeError, ValueError, AttributeError):
+                return True
+            return (payload.get('kind') != 'solved_attempt_recap'
+                    or payload.get('coaching_version') == row['coaching_version'])
+        history = [m for m in history if current_recap(m)]
+        if evaluation_run_id:
+            # Evaluate exclusively within this run. No old chat history,
+            # previous model recap or previous evaluation solve is inherited.
+            key_prefix=f'eval_{evaluation_run_id}_'
+            scoped=[]
+            if evaluation_solved:
+                for message in history:
+                    try: meta=json.loads(message.get('structured_json') or '{}')
+                    except (TypeError,ValueError,AttributeError): continue
+                    if (meta.get('kind')=='solved_attempt_recap'
+                        and str(meta.get('session_key') or '').startswith(key_prefix)):
+                        scoped.append(message)
+            history=scoped
+        elif not evaluation_solved:
+            # Ordinary unsolved puzzles also suppress earlier solve recaps.
             def post_solve_only(message):
                 try:
                     kind = json.loads(message.get('structured_json') or '{}').get('kind')
@@ -3294,6 +3542,8 @@ def position_coach_message(position_id):
         """, (position_id,)).fetchone()
         if row is None:
             return jsonify({'error': 'Position not found'}), 404
+        if row['coaching_version'] != COACHING_VERSION:
+            return jsonify({'error':'Coaching cache needs a refresh before Coach chat can be used.'}), 409
         try:
             result = handle_coach_message(
                 conn, row, text, payload.get('fen'), dialogue_context
@@ -3333,6 +3583,34 @@ def coach_message_feedback(message_id):
             return jsonify({'error': 'Coach message not found'}), 404
         if row['role'] != 'assistant':
             return jsonify({'error': 'Only coach responses can be rated'}), 400
+        snapshot = conn.execute('''SELECT cm.content,cm.structured_json,cm.thread_id,
+            (SELECT q.content FROM coach_messages q WHERE q.thread_id=cm.thread_id
+             AND q.role='user' AND q.id<cm.id ORDER BY q.id DESC LIMIT 1) AS question
+            FROM coach_messages cm WHERE cm.id=?''', (message_id,)).fetchone()
+        try:
+            snapshot_metadata = json.loads(snapshot['structured_json'] or '{}')
+        except (ValueError, TypeError):
+            snapshot_metadata = {}
+        if (snapshot_metadata.get('kind') == 'solved_attempt_recap'
+                and snapshot_metadata.get('coaching_version') != row['coaching_version']):
+            return jsonify({'error': 'This message belongs to an earlier coaching model. Refresh coaching to rate the current explanation.'}), 409
+        previous = conn.execute('SELECT suggested_text FROM coach_message_feedback WHERE message_id=?',
+                                (message_id,)).fetchone()
+        effective_correction = (suggested_text if suggested_text is not None else
+                                 (previous['suggested_text'] if previous and rating==-1 else None))
+        try: evaluation_run_id=int(payload.get('evaluation_run_id') or 0) or None
+        except (TypeError,ValueError):return jsonify({'error':'Invalid evaluation run'}),400
+        if evaluation_run_id:
+            state=run_position(conn,evaluation_run_id,row['position_id'])
+            if not state or state['status']!='solved':
+                return jsonify({'error':'This evaluation has not been solved'}),403
+        append_feedback(conn,row['position_id'],'coaching',rating,
+            evaluation_run_id=evaluation_run_id,
+            lesson_key=str(payload.get('lesson_key') or '')[:150],
+            content_snapshot=snapshot['content'],coaching_version=row['coaching_version'],
+            suggested_text=effective_correction if rating==-1 else None,
+            message_id=message_id,chat_user_message=snapshot['question'],
+            chat_structured_json=snapshot['structured_json'])
         if rating == 0:
             # Remove the whole record, including any user correction, when a
             # selected thumb is clicked a second time.

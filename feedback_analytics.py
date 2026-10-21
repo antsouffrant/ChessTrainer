@@ -1,7 +1,8 @@
-"""Persistent ratings and filterable feedback reporting.
+"""Coaching ratings: append-only history plus compatible live projections.
 
-Ratings are *latest per item*: one (position, category) vote or one chat
-message vote. Re-voting updates the row rather than inflating sample sizes.
+All user feedback events are retained in feedback_events. Latest per-item,
+per-model is a query, not a destructive update. Unrated solved positions
+remain part of taxonomy-change denominators, never invented feedback rows.
 """
 from __future__ import annotations
 
@@ -11,43 +12,81 @@ import csv
 import io
 import hashlib
 import re
+from feedback_history import append_feedback, current_feedback
 
 RATING_KINDS = ('position', 'explanation', 'motif', 'coaching', 'taxonomy_context', 'taxonomy_move_type', 'taxonomy_motif')
 POSITION_KINDS = RATING_KINDS[:3]
 
 
-def position_votes(conn, position_id):
-    return {row['category']: row['rating'] for row in conn.execute(
-        'SELECT category, rating FROM position_feedback WHERE position_id = ?', (position_id,)
-    )}
+def position_votes(conn, position_id, evaluation_run_id=None):
+    """Selected thumbs for this position's *current* model, using history."""
+    version = conn.execute('SELECT coaching_version FROM training_positions WHERE id=?',
+                           (position_id,)).fetchone()
+    if not version:
+        return {}
+    ratings = {r['feedback_type']:r['rating'] for r in current_feedback(
+        conn,position_id,version=version['coaching_version'],evaluation_run_id=evaluation_run_id)
+        if r['feedback_type'] in POSITION_KINDS and
+        (r['feedback_type']!='explanation' or r['continuation_key']=='solving')}
+    # Position usefulness is model independent; an explicit withdrawal wins.
+    pos = conn.execute('''SELECT e.rating FROM feedback_events e
+        JOIN feedback_position_sources s ON s.position_key=e.position_key
+        WHERE s.position_id=? AND e.feedback_type='position'
+          AND (? IS NULL OR e.evaluation_run_id=?)
+        ORDER BY e.id DESC LIMIT 1''',(position_id,evaluation_run_id,evaluation_run_id)).fetchone()
+    if pos:
+        if pos['rating']==0: ratings.pop('position',None)
+        else: ratings['position']=pos['rating']
+    return ratings
 
 
-def position_feedback_details(conn, position_id):
-    return {row['category']: {'suggested_text': row['suggested_text'] or '',
-                              'suggested_motif_key': row['suggested_motif_key'] or ''}
-            for row in conn.execute('''SELECT category, suggested_text, suggested_motif_key
-                                       FROM position_feedback WHERE position_id=?''', (position_id,))}
+def position_feedback_details(conn, position_id, evaluation_run_id=None):
+    version = conn.execute('SELECT coaching_version FROM training_positions WHERE id=?',
+                           (position_id,)).fetchone()
+    if not version:
+        return {}
+    details={r['feedback_type']:{'suggested_text':r['suggested_text'] or '',
+            'suggested_motif_key':r['suggested_motif_key'] or ''}
+            for r in current_feedback(conn,position_id,version=version['coaching_version'],evaluation_run_id=evaluation_run_id)
+            if r['feedback_type'] in POSITION_KINDS and
+            (r['feedback_type']!='explanation' or r['continuation_key']=='solving')}
+    independent=conn.execute('''SELECT e.rating,e.suggested_text,e.suggested_motif_key
+        FROM feedback_events e JOIN feedback_position_sources s ON s.position_key=e.position_key
+        WHERE s.position_id=? AND e.feedback_type='position'
+          AND (? IS NULL OR e.evaluation_run_id=?) ORDER BY e.id DESC LIMIT 1''',
+        (position_id,evaluation_run_id,evaluation_run_id)).fetchone()
+    if independent:
+        if independent['rating']==0: details.pop('position',None)
+        else: details['position']={'suggested_text':independent['suggested_text'] or '',
+                                  'suggested_motif_key':independent['suggested_motif_key'] or ''}
+    return details
 
 
 # Retain all historical explanation votes as feedback on the solving line.
 # Failed continuations use root UCI as a stable per-position key across visits.
-CONTINUATION_KEY = re.compile(r'^[a-h][1-8][a-h][1-8][qrbn]?$')
+CONTINUATION_KEY = re.compile(r'^(?:game:)?[a-h][1-8][a-h][1-8][qrbn]?$')
 
 
-def continuation_votes(conn, position_id):
-    return {row['continuation_key']: row['rating'] for row in conn.execute(
-        'SELECT continuation_key, rating FROM continuation_explanation_feedback WHERE position_id=?',
-        (position_id,))}
+def continuation_votes(conn, position_id, evaluation_run_id=None):
+    row=conn.execute('SELECT coaching_version FROM training_positions WHERE id=?',
+                     (position_id,)).fetchone()
+    if not row: return {}
+    return {r['continuation_key']:r['rating'] for r in current_feedback(
+        conn,position_id,version=row['coaching_version'],evaluation_run_id=evaluation_run_id)
+        if r['feedback_type']=='explanation' and r['continuation_key'] not in (None,'solving')}
 
 
-def continuation_feedback_details(conn, position_id):
-    return {row['continuation_key']: {'suggested_text': row['suggested_text'] or ''}
-            for row in conn.execute('''SELECT continuation_key, suggested_text
-                FROM continuation_explanation_feedback WHERE position_id=?''', (position_id,))}
+def continuation_feedback_details(conn, position_id, evaluation_run_id=None):
+    row=conn.execute('SELECT coaching_version FROM training_positions WHERE id=?',
+                     (position_id,)).fetchone()
+    if not row: return {}
+    return {r['continuation_key']:{'suggested_text':r['suggested_text'] or ''}
+            for r in current_feedback(conn,position_id,version=row['coaching_version'],evaluation_run_id=evaluation_run_id)
+            if r['feedback_type']=='explanation' and r['continuation_key'] not in (None,'solving')}
 
 
 def record_continuation_vote(conn, position_id, continuation_key, rating, *,
-                             lesson_key='', text='', suggested_text=None):
+                             lesson_key='', text='', suggested_text=None, evaluation_run_id=None):
     if not isinstance(continuation_key, str) or not CONTINUATION_KEY.fullmatch(continuation_key):
         raise ValueError('A verified attempted move is required for continuation feedback')
     if rating not in (-1, 0, 1):
@@ -61,17 +100,30 @@ def record_continuation_vote(conn, position_id, continuation_key, rating, *,
         WHERE tp.id=?''', (position_id,)).fetchone()
     if row is None:
         raise LookupError('Position not found')
-    if not row['learned']:
+    if not row['learned'] and not evaluation_run_id:
         raise PermissionError('Solve the position before submitting feedback')
+    game_feedback = continuation_key.startswith('game:')
+    root_key = continuation_key[5:] if game_feedback else continuation_key
     attempt = conn.execute('''SELECT 1 FROM coach_board_attempts
         WHERE position_id=? AND move_uci=? AND correct=0 LIMIT 1''',
-        (position_id, continuation_key)).fetchone()
+        (position_id, root_key)).fetchone()
     original_game_move = conn.execute('''SELECT 1 FROM training_positions
-        WHERE id=? AND played_move_uci=? AND played_move_uci<>best_move_uci
-        AND explanatory_lines_json IS NOT NULL''',
-        (position_id, continuation_key)).fetchone()
-    if not attempt and not original_game_move:
+        WHERE id=? AND played_move_uci=? AND explanatory_lines_json IS NOT NULL''',
+        (position_id, root_key)).fetchone()
+    if (game_feedback and not original_game_move) or (not game_feedback and not attempt and not original_game_move):
         raise ValueError('Continuation was not a verified attempt or saved game move')
+    if evaluation_run_id:
+        # An evaluation vote belongs exclusively to this run. Historical
+        # compatibility projections are for ordinary training and must not
+        # be overwritten by a benchmark rating.
+        append_feedback(conn,position_id,'explanation',rating,
+            continuation=continuation_key,lesson_key=lesson_key,
+            content_snapshot=str(text or '')[:6000],
+            coaching_version=row['coaching_version'],
+            suggested_text=suggested_text if rating==-1 else None,
+            evaluation_run_id=evaluation_run_id)
+        conn.commit()
+        return continuation_votes(conn,position_id,evaluation_run_id)
     if rating == 0:
         conn.execute('''DELETE FROM continuation_explanation_feedback
             WHERE position_id=? AND continuation_key=?''', (position_id, continuation_key))
@@ -90,14 +142,23 @@ def record_continuation_vote(conn, position_id, continuation_key, rating, *,
                 suggested_text=CASE
                   WHEN excluded.rating=1 THEN NULL
                   WHEN excluded.suggested_text IS NOT NULL THEN excluded.suggested_text
-                  WHEN continuation_explanation_feedback.rating=-1 THEN continuation_explanation_feedback.suggested_text
+                  WHEN continuation_explanation_feedback.rating=-1
+                       AND continuation_explanation_feedback.coaching_version IS excluded.coaching_version
+                  THEN continuation_explanation_feedback.suggested_text
                   ELSE NULL END,
                 updated_at=CURRENT_TIMESTAMP''',
             (position_id, continuation_key, row['account_id'], rating, lesson,
              str(text or '')[:6000], row['coaching_version'],
              None if rating == 1 else suggested_text))
+    stored=conn.execute('''SELECT suggested_text FROM continuation_explanation_feedback
+        WHERE position_id=? AND continuation_key=?''',(position_id,continuation_key)).fetchone()
+    append_feedback(conn, position_id, 'explanation', rating,
+        continuation=continuation_key, lesson_key=lesson_key,
+        content_snapshot=str(text or '')[:6000], coaching_version=row['coaching_version'],
+        suggested_text=stored['suggested_text'] if stored else None,
+        evaluation_run_id=evaluation_run_id)
     conn.commit()
-    return continuation_votes(conn, position_id)
+    return continuation_votes(conn, position_id, evaluation_run_id)
 
 
 def motif_feedback_options(conn, position_id=None):
@@ -114,7 +175,7 @@ def motif_feedback_options(conn, position_id=None):
 
 
 def record_position_vote(conn, position_id, category, rating, lesson_key='', text='',
-                         suggested_text=None, suggested_motif_key=None):
+                         suggested_text=None, suggested_motif_key=None, evaluation_run_id=None):
     if category not in POSITION_KINDS or rating not in (-1, 0, 1):
         raise ValueError('Invalid feedback category or rating')
     if suggested_text is not None:
@@ -144,15 +205,35 @@ def record_position_vote(conn, position_id, category, rating, lesson_key='', tex
     ''', (position_id,)).fetchone()
     if row is None:
         raise LookupError('Position not found')
-    if not row['learned']:
+    if not row['learned'] and not evaluation_run_id:
         raise PermissionError('Solve the position before submitting feedback')
+    if evaluation_run_id:
+        # Never mutate the ordinary learning thumbs projection for benchmark
+        # feedback. Its immutable event carries the original displayed text.
+        snapshot = (str(text or row['coach_explanation'] or '').strip()[:6000]
+                    if category=='explanation' else
+                    (row['primary_concept_name'] or '') if category=='motif' else '')
+        append_feedback(conn,position_id,category,rating,
+            continuation='solving' if category=='explanation' else None,
+            lesson_key=lesson_key,content_snapshot=snapshot,
+            coaching_version=row['coaching_version'],
+            classifier_version=row['classifier_version_at_vote'],
+            suggested_text=suggested_text if rating==-1 else None,
+            suggested_motif_key=suggested_motif_key if rating==-1 else None,
+            evaluation_run_id=evaluation_run_id)
+        conn.commit()
+        return position_votes(conn,position_id,evaluation_run_id)
     if rating == 0:
         # Unchecking a selected thumb withdraws both the vote and its correction.
         # A withdrawn rating must not appear in aggregates or regression exports.
         conn.execute('DELETE FROM position_feedback WHERE position_id = ? AND category = ?',
                      (position_id, category))
+        append_feedback(conn, position_id, category, 0,
+            continuation='solving' if category=='explanation' else None,
+            coaching_version=row['coaching_version'],
+            classifier_version=row['classifier_version_at_vote'],evaluation_run_id=evaluation_run_id)
         conn.commit()
-        return position_votes(conn, position_id)
+        return position_votes(conn, position_id, evaluation_run_id)
     # Persist the actual displayed explanation for longitudinal QA. The browser
     # may have shown a legal near-optimal alternative instead of the default.
     snapshot = str(text or row['coach_explanation'] or '').strip()[:6000] if category == 'explanation' else (row['primary_concept_name'] or '') if category == 'motif' else ''
@@ -174,19 +255,33 @@ def record_position_vote(conn, position_id, category, rating, lesson_key='', tex
             suggested_text = CASE
                 WHEN excluded.rating = 1 THEN NULL
                 WHEN excluded.suggested_text IS NOT NULL THEN excluded.suggested_text
-                WHEN position_feedback.rating = -1 THEN position_feedback.suggested_text
+                WHEN position_feedback.rating = -1
+                    AND position_feedback.coaching_version IS excluded.coaching_version
+                THEN position_feedback.suggested_text
                 ELSE NULL END,
             suggested_motif_key = CASE
                 WHEN excluded.rating = 1 THEN NULL
                 WHEN excluded.suggested_motif_key IS NOT NULL THEN excluded.suggested_motif_key
-                WHEN position_feedback.rating = -1 THEN position_feedback.suggested_motif_key
+                WHEN position_feedback.rating = -1
+                    AND position_feedback.coaching_version IS excluded.coaching_version
+                THEN position_feedback.suggested_motif_key
                 ELSE NULL END,
             updated_at = CURRENT_TIMESTAMP
     ''', (position_id, row['account_id'], category, rating, lesson,
           row['primary_concept_key'], snapshot, row['coaching_version'],
           row['classifier_version_at_vote'], suggested_text, suggested_motif_key))
+    stored=conn.execute('''SELECT suggested_text,suggested_motif_key FROM position_feedback
+         WHERE position_id=? AND category=?''',(position_id,category)).fetchone()
+    append_feedback(conn, position_id, category, rating,
+        continuation='solving' if category=='explanation' else None,
+        lesson_key=lesson, content_snapshot=snapshot,
+        coaching_version=row['coaching_version'],
+        classifier_version=row['classifier_version_at_vote'],
+        suggested_text=stored['suggested_text'], suggested_motif_key=stored['suggested_motif_key'],
+        model_key=row['primary_concept_key'] if category=='motif' else None,
+        evaluation_run_id=evaluation_run_id)
     conn.commit()
-    return position_votes(conn, position_id)
+    return position_votes(conn, position_id, evaluation_run_id)
 
 
 
@@ -201,10 +296,12 @@ def taxonomy_feedback_options(conn):
     return [dict(r) for r in rows if r['key'] in CANONICAL_KEYS]
 
 
-def taxonomy_feedback_choices(conn, position_id):
-    selected = {r['field_key']: r['selected_key'] for r in conn.execute(
-        'SELECT field_key,selected_key FROM position_taxonomy_feedback WHERE position_id=?',
-        (position_id,))}
+def taxonomy_feedback_choices(conn, position_id, evaluation_run_id=None):
+    current=conn.execute('SELECT coaching_version FROM training_positions WHERE id=?',
+                         (position_id,)).fetchone()
+    active=current_feedback(conn,position_id,version=current['coaching_version'],evaluation_run_id=evaluation_run_id) if current else []
+    selected={r['feedback_type'][9:]:r['selected_key'] for r in active
+              if r['feedback_type'].startswith('taxonomy_') and r['selected_key']}
     tax = conn.execute("""SELECT context_key,move_type_key,motif_key,taxonomy_version
                          FROM position_motif_taxonomy WHERE position_id=?""", (position_id,)).fetchone()
     return {'selected': selected,
@@ -217,7 +314,7 @@ def taxonomy_feedback_choices(conn, position_id):
                         'motif': taxonomy_feedback_options(conn)}}
 
 
-def save_taxonomy_feedback(conn, position_id, field, selected_key):
+def save_taxonomy_feedback(conn, position_id, field, selected_key, evaluation_run_id=None):
     """Overwrite one dropdown judgment; an empty value withdraws just that field.
 
     The model snapshot is captured only when the user makes a selection, and
@@ -235,7 +332,7 @@ def save_taxonomy_feedback(conn, position_id, field, selected_key):
                           WHERE tp.id=?""", (position_id,)).fetchone()
     if row is None:
         raise LookupError('Position not found')
-    if not row['learned']:
+    if not row['learned'] and not evaluation_run_id:
         raise PermissionError('Solve the position before submitting feedback')
     if not row['motif_key']:
         raise ValueError('This position has no classified learning motif yet')
@@ -244,12 +341,23 @@ def save_taxonomy_feedback(conn, position_id, field, selected_key):
              'motif': {o['key'] for o in taxonomy_feedback_options(conn)}}[field]
     if selected_key and selected_key not in valid:
         raise ValueError('Choose a valid canonical taxonomy label')
+    original = {'context': row['context_key'], 'move_type': row['move_type_key'] or 'none',
+                'motif': row['motif_key']}[field]
+    if evaluation_run_id:
+        # The model's taxonomy stays fixed and the legacy global selection
+        # remains untouched by the independent evaluation.
+        append_feedback(conn,position_id,'taxonomy_'+field,
+            0 if not selected_key else (1 if selected_key==original else -1),
+            content_snapshot=original,coaching_version=row['coaching_version'],
+            classifier_version=row['taxonomy_version'],taxonomy_version=row['taxonomy_version'],
+            model_key=original,selected_key=selected_key,
+            evaluation_run_id=evaluation_run_id)
+        conn.commit()
+        return taxonomy_feedback_choices(conn,position_id,evaluation_run_id)
     if not selected_key:
         conn.execute("""DELETE FROM position_taxonomy_feedback
                         WHERE position_id=? AND field_key=?""", (position_id,field))
     else:
-        original = {'context': row['context_key'], 'move_type': row['move_type_key'] or 'none',
-                    'motif': row['motif_key']}[field]
         conn.execute("""INSERT INTO position_taxonomy_feedback
             (position_id,account_id,field_key,selected_key,model_key_at_vote,
              taxonomy_version_at_vote,coaching_version_at_vote)
@@ -261,8 +369,13 @@ def save_taxonomy_feedback(conn, position_id, field, selected_key):
                 updated_at=CURRENT_TIMESTAMP""",
             (position_id,row['account_id'],field,selected_key,original,
              row['taxonomy_version'],row['coaching_version']))
+    append_feedback(conn,position_id,'taxonomy_'+field,
+        0 if not selected_key else (1 if selected_key==original else -1),
+        content_snapshot=original, coaching_version=row['coaching_version'],
+        classifier_version=row['taxonomy_version'],taxonomy_version=row['taxonomy_version'],
+        model_key=original, selected_key=selected_key,evaluation_run_id=evaluation_run_id)
     conn.commit()
-    return taxonomy_feedback_choices(conn, position_id)
+    return taxonomy_feedback_choices(conn, position_id, evaluation_run_id)
 
 # A single record model across the three position votes and chat ratings.
 # The lesson is the selected lesson when provided, otherwise the primary motif.
@@ -375,6 +488,107 @@ LEFT JOIN learning_concepts lesson ON lesson.key = COALESCE(NULLIF(v.lesson_key,
 LEFT JOIN learning_concepts voted_motif ON voted_motif.key = v.voted_motif_key
 LEFT JOIN learning_concepts suggested_motif ON suggested_motif.key = v.suggested_motif_key
 '''
+
+HISTORY_REPORT_SQL = '''
+WITH primary_motifs AS (
+  SELECT pc.position_id, pc.concept_key AS key, lc.name, pc.confidence, pc.evidence, pc.classifier_version
+  FROM position_concepts pc
+  LEFT JOIN learning_concepts lc ON lc.key = pc.concept_key
+  WHERE pc.is_primary = 1
+), votes AS (
+  SELECT e.source_position_id AS position_id,e.source_message_id AS message_id,
+         e.feedback_type,e.rating,e.lesson_key,
+         CASE WHEN e.feedback_type='motif' THEN e.model_key ELSE NULL END AS voted_motif_key,
+         e.content_snapshot,e.coaching_version,e.classifier_version AS classifier_version_at_vote,
+         e.suggested_text,e.suggested_motif_key,e.chat_user_message,e.chat_structured_json,
+         e.created_at,e.created_at AS updated_at,fc.move_key AS continuation_key,
+         e.id AS feedback_event_id,e.position_key,e.continuation_id,
+         e.selected_key AS feedback_selected_key
+  FROM feedback_events e LEFT JOIN feedback_continuations fc
+    ON fc.continuation_id=e.continuation_id
+  WHERE e.rating <> 0
+    AND ( ? = 1 OR e.id = (
+      SELECT MAX(e2.id) FROM feedback_events e2
+      WHERE e2.position_key=e.position_key AND e2.feedback_type=e.feedback_type
+        AND e2.coaching_version IS e.coaching_version
+        AND e2.continuation_id IS e.continuation_id
+        AND e2.source_message_id IS e.source_message_id ))
+    AND NOT EXISTS ( SELECT 1 FROM feedback_events withdrawn
+       WHERE withdrawn.id > e.id AND withdrawn.position_key=e.position_key
+         AND withdrawn.feedback_type=e.feedback_type
+         AND withdrawn.coaching_version IS e.coaching_version
+         AND withdrawn.continuation_id IS e.continuation_id
+         AND withdrawn.source_message_id IS e.source_message_id
+         AND withdrawn.rating=0 AND ?=0)
+
+)
+SELECT v.feedback_type, v.rating, v.created_at, v.updated_at,
+       v.position_id, v.message_id, v.continuation_key, v.content_snapshot, v.coaching_version,
+       v.feedback_event_id, v.position_key, v.continuation_id,
+       COALESCE(NULLIF(v.coaching_version,''), tp.coaching_version) AS report_coaching_version,
+       CASE WHEN NULLIF(v.coaching_version,'') IS NOT NULL THEN 'feedback_snapshot'
+            ELSE 'current_position_fallback' END AS coaching_version_source,
+       v.classifier_version_at_vote, v.chat_user_message, v.chat_structured_json,
+       v.suggested_text, v.suggested_motif_key, suggested_motif.name AS suggested_motif_name,
+       tx.context_key AS current_context_key,
+       CASE tx.context_key WHEN 'attack' THEN 'Attacking Plans' WHEN 'defend' THEN 'Defensive Resources' END AS current_context_name,
+       tx.move_type_key AS current_move_type_key,
+       CASE tx.move_type_key WHEN 'tactical' THEN 'Tactical Calculation' WHEN 'strategic' THEN 'Strategic Comprehension' END AS current_move_type_name,
+       tx.motif_key AS current_taxonomy_motif_key, tx.taxonomy_version AS current_taxonomy_version,
+       CASE WHEN v.feedback_type='taxonomy_context' THEN v.content_snapshot END AS context_at_feedback,
+       CASE WHEN v.feedback_type='taxonomy_move_type' THEN v.content_snapshot END AS move_type_at_feedback,
+       CASE WHEN v.feedback_type='taxonomy_motif' THEN v.content_snapshot END AS taxonomy_motif_at_feedback,
+       CASE WHEN v.feedback_type='taxonomy_motif' THEN
+         (SELECT lc.name FROM learning_concepts lc WHERE lc.key=v.content_snapshot)
+       END AS model_taxonomy_name_at_feedback,
+       CASE WHEN v.feedback_type LIKE 'taxonomy_%' THEN v.feedback_selected_key END AS selected_taxonomy_key,
+       CASE v.feedback_type
+         WHEN 'taxonomy_context' THEN CASE v.feedback_selected_key WHEN 'attack' THEN 'Attacking Plans' WHEN 'defend' THEN 'Defensive Resources' END
+         WHEN 'taxonomy_move_type' THEN CASE v.feedback_selected_key WHEN 'none' THEN 'No move type' WHEN 'tactical' THEN 'Tactical Calculation' WHEN 'strategic' THEN 'Strategic Comprehension' END
+         WHEN 'taxonomy_motif' THEN COALESCE((SELECT name FROM learning_concepts WHERE key=v.feedback_selected_key),v.feedback_selected_key)
+       END AS selected_taxonomy_name,
+       tp.coaching_version AS current_coaching_version,
+       tp.coach_prompt, tp.coach_explanation AS current_explanation,
+       COALESCE(tp.fen,fp.fen) AS fen, tp.previous_fen,
+       COALESCE(tp.user_color,fp.user_color) AS user_color,
+       tp.opponent_move_uci, tp.opponent_move_san,
+       tp.played_move_uci, tp.played_move_san,
+       tp.best_move_uci, tp.best_move_san,
+       tp.eval_before_cp, tp.eval_after_cp, tp.centipawn_loss,
+       tp.mate_before, tp.mate_after,
+       tp.best_pv_uci, tp.played_pv_uci, tp.alternative_pvs_json,
+       tp.critical_events_json, tp.explanatory_lines_json, tp.proactive_coach_json,
+       tp.difficulty_score, tp.difficulty_version,
+       tp.analysis_pass, tp.analysis_screen_depth, tp.analysis_deep_depth,
+       tp.attempts, tp.correct_attempts, tp.created_at AS position_created_at,
+       pm.key AS current_primary_motif_key,
+       pm.name AS current_primary_motif_name,
+       pm.confidence AS current_primary_motif_confidence,
+       pm.evidence AS current_primary_motif_evidence,
+       pm.classifier_version AS current_classifier_version,
+       v.voted_motif_key AS motif_at_vote_key,
+       COALESCE(tp.job_id,fp.source_job_id) AS job_id,
+       COALESCE(tp.game_id,fp.game_id) AS game_id, tp.game_date, tp.opponent,
+       tp.learning_mode, tp.category AS position_category, tp.move_number,
+       tp.opening_key, tp.opening_name, tp.opening_variation, tp.opening_eco,
+       tp.estimated_rating, tp.learned, j.date_range, j.source_type, j.source_username,
+       COALESCE(a.username,fp.username) AS username,
+       COALESCE(a.provider,fp.provider) AS provider,
+       COALESCE(NULLIF(v.lesson_key, ''), v.voted_motif_key, pm.key, '') AS lesson_key,
+       COALESCE(lesson.name, '') AS lesson_name,
+       COALESCE(v.voted_motif_key, pm.key, '') AS primary_motif_key,
+       COALESCE(voted_motif.name, pm.name, '') AS primary_motif_name
+FROM votes v
+JOIN feedback_positions fp ON fp.position_key = v.position_key
+LEFT JOIN training_positions tp ON tp.id = v.position_id
+LEFT JOIN analysis_jobs j ON j.id = COALESCE(tp.job_id,fp.source_job_id)
+LEFT JOIN accounts a ON a.id = fp.account_id
+LEFT JOIN primary_motifs pm ON pm.position_id = tp.id
+LEFT JOIN position_motif_taxonomy tx ON tx.position_id = tp.id
+LEFT JOIN learning_concepts lesson ON lesson.key = COALESCE(NULLIF(v.lesson_key, ''), v.voted_motif_key, pm.key)
+LEFT JOIN learning_concepts voted_motif ON voted_motif.key = v.voted_motif_key
+LEFT JOIN learning_concepts suggested_motif ON suggested_motif.key = v.suggested_motif_key
+'''
 FILTERS = ('job_id', 'lesson_key', 'opening_key', 'primary_motif_key', 'learning_mode', 'feedback_type', 'rating', 'coaching_version', 'position_category',
            'current_context_key', 'current_move_type_key', 'continuation_key')
 
@@ -411,11 +625,17 @@ def report_rows(conn, filters=None):
     if continuation_scope == 'solving':
         clauses.append("voted.continuation_key = 'solving'")
     elif continuation_scope == 'attempted':
-        clauses.append("voted.continuation_key IS NOT NULL AND voted.continuation_key != 'solving'")
-    sql = 'SELECT * FROM (' + REPORT_SQL + ') AS voted'
+        clauses.append("voted.continuation_key IS NOT NULL AND voted.continuation_key != 'solving' AND voted.continuation_key NOT LIKE 'game:%'")
+    elif continuation_scope == 'game':
+        clauses.append("voted.continuation_key LIKE 'game:%'")
+    ledger = conn.execute('SELECT 1 FROM feedback_events LIMIT 1').fetchone() is not None
+    sql = 'SELECT * FROM (' + (HISTORY_REPORT_SQL if ledger else REPORT_SQL) + ') AS voted'
     if clauses:
         sql += ' WHERE ' + ' AND '.join(clauses)
     sql += ' ORDER BY voted.updated_at DESC, voted.position_id DESC, voted.message_id DESC'
+    if ledger:
+        all_events = str(filters.get('history') or '').lower() == 'all'
+        params = [int(all_events),int(all_events)] + params
     return [dict(row) for row in conn.execute(sql, params).fetchall()]
 
 
@@ -449,6 +669,7 @@ def report_facets(conn):
             UNION SELECT coaching_version FROM continuation_explanation_feedback
             UNION SELECT coaching_version_at_vote FROM position_taxonomy_feedback
             UNION SELECT coaching_version_at_vote FROM coach_message_feedback
+            UNION SELECT coaching_version FROM feedback_events
         ) WHERE value IS NOT NULL AND value != '' ORDER BY value DESC
     ''')]
     return {'game_lists': jobs, 'lessons': lessons, 'openings': openings,
@@ -514,6 +735,7 @@ def solved_taxonomy_rows(conn, filters=None):
     LEFT JOIN position_motif_taxonomy tx ON tx.position_id = tp.id
     LEFT JOIN position_concepts pc ON pc.position_id = tp.id AND pc.is_primary = 1
     LEFT JOIN position_taxonomy_feedback tf ON tf.position_id = tp.id
+        AND tf.coaching_version_at_vote IS tp.coaching_version
     LEFT JOIN learning_concepts lc ON lc.key = pc.concept_key
     LEFT JOIN learning_concepts tx_motif ON tx_motif.key = tx.motif_key
     LEFT JOIN analysis_jobs j ON j.id = tp.job_id
@@ -544,6 +766,30 @@ def taxonomy_change_rates(conn, filters=None):
         }
     return result
 
+
+
+
+def effective_feedback_rows(conn, position_ids, *, collapse_versions=False):
+    """Latest rating per entity, area, continuation/message and model version.
+
+    Re-votes never inflate denominators, and a withdrawn event is uncounted.
+    """
+    if not position_ids: return []
+    rows=[]
+    for start in range(0,len(position_ids),700):
+        subset=position_ids[start:start+700]
+        slots=','.join('?' for _ in subset)
+        rows.extend(dict(r) for r in conn.execute(f"""WITH ranked AS (
+          SELECT e.source_position_id AS position_id,e.feedback_type AS area,
+            e.rating,e.coaching_version AS version,fc.move_key AS continuation_key,
+            ROW_NUMBER() OVER (PARTITION BY e.position_key,e.feedback_type,
+               {'' if collapse_versions else 'e.coaching_version,'}
+               e.continuation_id,e.source_message_id ORDER BY e.id DESC) AS rn
+          FROM feedback_events e LEFT JOIN feedback_continuations fc
+            ON fc.continuation_id=e.continuation_id
+          WHERE e.source_position_id IN ({slots})
+        ) SELECT * FROM ranked WHERE rn=1 AND rating <> 0""",subset))
+    return rows
 
 
 # A consolidated, parameterized Coach comparison. Group membership and both
@@ -650,30 +896,29 @@ def coaching_comparison(conn, filters=None, group_by='opening',
     # used by the full regression export. Enforce SQLite's parameter limit.
     votes_by_position = {}
     ids = list(position_by_id)
-    for start in range(0, len(ids), 700):
-        batch = ids[start:start + 700]
-        slots = ','.join('?' for _ in batch)
-        if approval_area in ('any', 'position', 'explanation'):
-            for r in conn.execute(f"""SELECT position_id, category AS area, rating, coaching_version
-                FROM position_feedback
-                WHERE category IN ('position','explanation')
-                  AND position_id IN ({slots})""", batch):
-                votes_by_position.setdefault(r['position_id'], []).append(
-                    (r['area'], r['rating'], r['coaching_version']))
-            if approval_area in ('any', 'explanation'):
-                for r in conn.execute(f"""SELECT position_id, rating, coaching_version
-                    FROM continuation_explanation_feedback
-                    WHERE position_id IN ({slots})""", batch):
-                    votes_by_position.setdefault(r['position_id'], []).append(
-                        ('explanation', r['rating'], r['coaching_version']))
-        if approval_area in ('any', 'coaching'):
-            for r in conn.execute(f"""SELECT cf.position_id, cf.rating,
-                   COALESCE(NULLIF(cf.coaching_version_at_vote,''), tp.coaching_version) AS version
-                FROM coach_message_feedback cf
-                JOIN training_positions tp ON tp.id=cf.position_id
-                WHERE cf.position_id IN ({slots})""", batch):
-                votes_by_position.setdefault(r['position_id'], []).append(
-                    ('coaching', r['rating'], r['version']))
+    if conn.execute('SELECT 1 FROM feedback_events LIMIT 1').fetchone():
+        for r in effective_feedback_rows(conn,ids,
+                collapse_versions=(group_by!='version' and not selected_version)):
+            area=r['area']
+            if area not in ('position','explanation','coaching'):
+                continue
+            if approval_area != 'any' and area != approval_area:
+                continue
+            votes_by_position.setdefault(r['position_id'],[]).append(
+                (area,r['rating'],r['version']))
+    else:
+        for start in range(0,len(ids),700):
+            batch=ids[start:start+700];slots=','.join('?' for _ in batch)
+            for r in conn.execute(f"""SELECT position_id,category AS area,rating,coaching_version AS version
+                 FROM position_feedback WHERE category IN ('position','explanation')
+                 AND position_id IN ({slots})""",batch):
+                votes_by_position.setdefault(r['position_id'],[]).append((r['area'],r['rating'],r['version']))
+            for r in conn.execute(f"""SELECT position_id,'explanation' AS area,rating,coaching_version AS version
+                 FROM continuation_explanation_feedback WHERE position_id IN ({slots})""",batch):
+                votes_by_position.setdefault(r['position_id'],[]).append((r['area'],r['rating'],r['version']))
+            for r in conn.execute(f"""SELECT cf.position_id,'coaching' AS area,cf.rating,cf.coaching_version_at_vote AS version
+                 FROM coach_message_feedback cf WHERE cf.position_id IN ({slots})""",batch):
+                votes_by_position.setdefault(r['position_id'],[]).append((r['area'],r['rating'],r['version']))
 
     for position_id, votes in votes_by_position.items():
         included = [(area, rating, str(version or position_by_id[position_id]['coaching_version'] or ''))
@@ -762,6 +1007,41 @@ def coaching_metric_chart(conn, filters=None, metric='changes', group_by=None, m
                 sum(taxonomy_field_changed(r, field) for r in positions), len(positions)))
         return {'metric': metric, 'group_by': group_by, 'rows': rows,
                 'groups_count': len(rows), 'historical_version_note': bool(selected_version)}
+
+    if group_by == 'continuation_kind' and conn.execute('SELECT 1 FROM feedback_events LIMIT 1').fetchone():
+        positions=solved_taxonomy_rows(conn,{k:v for k,v in filters.items() if k!='coaching_version'})
+        counts={k:[0,0] for k in ('solving','attempted','game','chat')}
+        for r in effective_feedback_rows(conn,[int(p['position_id']) for p in positions],
+                collapse_versions=not selected_version):
+            if selected_version and str(r['version'] or '') != selected_version: continue
+            if r['area']=='coaching': key='chat'
+            elif r['area']=='explanation':
+                key = ('solving' if r['continuation_key']=='solving' else
+                       'game' if str(r['continuation_key'] or '').startswith('game:') else 'attempted')
+            else: continue
+            counts[key][1]+=1
+            if r['rating']==1: counts[key][0]+=1
+        names={'solving':'Solving continuations','attempted':'Learning · attempted moves',
+               'game':'Your game · original moves','chat':'Other coach messages'}
+        rows=[as_row(k,names[k],*counts[k]) for k in counts]
+        return {'metric':metric,'group_by':group_by,'rows':rows,'groups_count':len(rows),
+                'historical_version_note':bool(selected_version),'approval_denominator':'rated individual continuation or coach messages'}
+
+    if group_by == 'feedback_area' and conn.execute('SELECT 1 FROM feedback_events LIMIT 1').fetchone():
+        positions=solved_taxonomy_rows(conn,{k:v for k,v in filters.items() if k!='coaching_version'})
+        rated={k:set() for k in ('position','explanation','coaching')}
+        approved={k:set() for k in rated}
+        for r in effective_feedback_rows(conn,[int(p['position_id']) for p in positions],
+                collapse_versions=not selected_version):
+            if selected_version and str(r['version'] or '')!=selected_version: continue
+            area=r['area']
+            if area not in rated: continue
+            rated[area].add(r['position_id'])
+            if r['rating']==1: approved[area].add(r['position_id'])
+        names={'position':'Training positions','explanation':'Explanations','coaching':'Chat coaching'}
+        rows=[as_row(k,names[k],len(approved[k]),len(rated[k])) for k in names]
+        return {'metric':metric,'group_by':group_by,'rows':rows,'groups_count':len(rows),
+                'historical_version_note':bool(selected_version)}
 
     if group_by == 'continuation_kind':
         # This approval breakdown uses the MESSAGE/CONTINUATION as its unit,
@@ -939,7 +1219,7 @@ EXPORT_COLUMNS = [
     'current_taxonomy_model_key', 'current_taxonomy_change_status',
     'legacy_suggested_motif_canonical_key', 'legacy_motif_at_vote_canonical_key',
     'regression_case_id', 'regression_candidate', 'review_status',
-    'created_at', 'updated_at', 'position_id', 'message_id',
+    'created_at', 'updated_at', 'feedback_event_id', 'position_key', 'continuation_id', 'position_id', 'message_id',
     'position_url', 'job_id', 'username', 'provider', 'date_range',
     'source_type', 'source_username', 'game_id', 'game_date', 'opponent',
     'learning_mode', 'position_category', 'move_number', 'user_color',

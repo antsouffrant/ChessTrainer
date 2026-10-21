@@ -3041,3 +3041,113 @@ body.theme-wood .mini-square.dark { background: #7b4d2e; }
 }
 .coach-position-review { align-self: flex-start; width: 88%; max-width: 88%; }
 .coach-position-review .explanation-feedback-area { box-sizing: border-box; }
+
+/* v84: solving explanation takes only the height of its text and controls.
+   The other continuation cards keep the same responsive 88% chat width. */
+.coach-chat > .coach-position-review {
+  display: block;
+  flex: 0 0 auto;
+  height: fit-content;
+  min-height: 0;
+  align-self: flex-start;
+}
+.coach-position-review > .coach-message-label { margin-bottom: 5px; }
+.coach-position-review .explanation-feedback-area {
+  display: block;
+  height: auto;
+  min-height: 0;
+  padding: 9px 10px;
+}
+.coach-position-review .coach-solution-comment { display: block; min-height: 0; }
+.coach-position-review .coach-solution-comment .coach-text {
+  margin: 4px 0 0;
+  padding: 0;
+  background: none;
+  border: 0;
+  border-radius: 0;
+}
+.coach-position-review .inline-feedback-votes {
+  min-height: 0;
+  margin-top: 5px;
+  padding-top: 5px;
+}
+
+/* v87: learning, solution and original-game explanations are distinct. */
+.coach-message.assistant.coach-continuation-message.coach-game-message .coach-message-body {
+  background:linear-gradient(145deg,rgba(116,110,154,.19),rgba(79,73,118,.17));
+  border:1px solid rgba(178,166,223,.38);
+  color:#eeebfb;
+}
+.coach-game-message .coach-message-label { color:#d5c7f3; }
+.coach-learning-message .coach-message-label { color:#b0d8f5; }
+.illegal-move-alert { display:inline-flex; align-items:center; color:#f6b5ae;
+  font-size:.72rem; font-weight:650; line-height:1.2; max-width:185px;
+  transition:opacity .2s; }
+.illegal-move-alert.hidden { display:none!important; }
+.board-column .history-controls .board-footer-actions { flex-wrap:wrap; }
+@media(max-width:640px) { .illegal-move-alert { max-width:140px; font-size:.66rem; } }
+
+/* Temporarily overlay the illegal-move status to the right of Stockfish;
+   neither the centered controls nor coach feedback cards are displaced. */
+.board-column .history-controls .board-footer-actions { position:relative; }
+.board-column .history-controls .board-footer-actions .illegal-move-alert {
+  position:absolute; left:calc(50% + 140px); top:50%; transform:translateY(-50%);
+  z-index:4; width:190px; pointer-events:none;
+  padding:5px 8px; border-radius:7px; background:rgba(48,25,29,.92);
+  border:1px solid rgba(230,133,122,.25);
+}
+@media(max-width:850px) {
+  .board-column .history-controls .board-footer-actions .illegal-move-alert {
+    left:auto; right:0; top:100%; transform:none; width:min(180px,55%);
+  }
+}
+
+
+/* v88: all three coach cards share one shrink-to-content vertical layout.
+   The solution formerly used a different grid/block path and accumulated
+   implicit grid track stretching as the thread grew. */
+.coach-chat > .coach-position-review,
+.coach-attempt-comments > .coach-continuation-message {
+  display: flex !important;
+  flex-direction: column;
+  justify-content: flex-start;
+  flex-grow: 0 !important;
+  flex-shrink: 0 !important;
+  height: auto !important;
+  min-height: 0 !important;
+  align-self: flex-start;
+}
+.coach-chat > .coach-position-review { width: 88%; max-width: 88%; }
+.coach-position-review > .explanation-feedback-area,
+.coach-continuation-message > .coach-message-body {
+  display: flex !important;
+  flex-direction: column;
+  flex: none !important;
+  justify-content: flex-start;
+  height: auto !important;
+  min-height: 0 !important;
+  box-sizing: border-box;
+}
+.coach-position-review .coach-solution-comment { flex: none; }
+.coach-position-review .coach-solution-comment .coach-text { min-height: 0 !important; }
+
+/* v88 process fixed-cohort summary */
+.process-benchmark { display:flex; flex-wrap:wrap; align-items:center; gap:8px 14px;
+  margin-top:12px; padding:11px 14px; border:1px solid rgba(255,255,255,.1);
+  border-radius:12px; background:rgba(255,255,255,.03); }
+.process-benchmark strong { font-size:.8rem; }
+.process-benchmark > span { font-size:.72rem; color:var(--muted); }
+.process-benchmark > a { margin-left:auto; padding:7px 10px; font-size:.73rem; }
+
+/* v92: evaluation is a deliberate feedback task. Do not hide voting actions
+   behind desktop hover; keep existing selected-state styling intact. */
+.evaluation-feedback-mode .trainer-main .rate-hover-zone .inline-feedback-votes:not(.hidden) {
+  opacity: 1;
+  pointer-events: auto;
+}
+.evaluation-feedback-mode .trainer-main .inline-feedback-votes .inline-rating-button {
+  opacity: 1;
+}
+.inline-rating-status { font-size: .67rem; color: #a8d9bf; margin-left: 7px; }
+.inline-rating-status.error { color: #ffc6b9; }
+.inline-rating-status.hidden { display: none !important; }

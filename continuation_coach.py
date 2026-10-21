@@ -158,14 +158,122 @@ def _root_board_fact(row, move_uci):
         return None
 
 
-def explain_attempt(row, attempt, best_san, *, saved_explanation=''):
-    """Render the learner's *one* attempted continuation from typed evidence.
+def _root_claim(san, primary, subsequent_moves=()):
+    """Only the root sentence from proactive coaching may enter this branch.
 
-    Proactive coaching owns the root explanation for the saved best move.
-    The reply interpreter owns only *new* observed opponent/follow-up effects.
-    They do not separately narrate the root, and a bare legal reply without an
-    explanatory consequence is not worth a sentence. This is the only place
-    that composes the post-solve move commentary; no Stockfish calls occur.
+    Comparisons, PV claims and captures belonging to later plies are produced
+    exclusively by the verified chronological event renderer below.
+    """
+    if not primary: return ''
+    lead = re.split(r'(?<=[.!?])\s+', str(primary).strip(), maxsplit=1)[0]
+    if any(other and str(other).rstrip('+#') != str(san).rstrip('+#')
+           and _move_mentioned(lead, other) for other in subsequent_moves):
+        return ''  # This sentence crosses ply boundaries.
+    return lead if _move_mentioned(lead, san) else ''
+
+
+def _sequential_event(plies, index):
+    """Favor concrete ply effects, with explicit capture/recapture detection."""
+    ply = plies[index]
+    effects = _effects(ply)
+    if not effects: return None
+    if index and any(e['kind']=='capture' for e in effects):
+        last = plies[index-1]
+        uci = str(ply.get('uci') or '')
+        prior_uci = str(last.get('uci') or '')
+        prior_capture = any(e['kind'] in ('capture','recapture') for e in _effects(last))
+        if (prior_capture and len(uci)>=4 and len(prior_uci)>=4
+                and uci[2:4] == prior_uci[2:4]):
+            capture = next(e for e in effects if e['kind']=='capture')
+            return dict(capture, kind='recapture',
+                        text=f"{ply.get('san', '')} recaptures on {uci[2:4]}")
+    preferred = ('checkmate', 'recapture', 'promotion', 'discovered_check',
+                 'fork', 'discovered_attack', 'trapped_piece', 'capture',
+                 'check_evasion', 'mate_threat', 'pin', 'threat_neutralized', 'attack_loose_piece',
+                 'check', 'passed_pawn')
+    for kind in preferred:
+        hit = next((event for event in effects if event['kind'] == kind), None)
+        if hit: return hit
+    return None
+
+
+def _sentence_for_ply(fact, san, ply_idx):
+    if fact.get('kind') == 'check_evasion':
+        phrase = 'moves the king out of check' if san.startswith('K') else 'gets out of check'
+    else:
+        phrase = _phrase(fact)
+    if not phrase: return ''
+    if ply_idx and phrase.startswith(san):
+        phrase = phrase[len(san):].lstrip(' ,').rstrip('.')
+    if not ply_idx:
+        return phrase.rstrip('.') + '.'
+    if ply_idx % 2:
+        phrase = _reply_from_opponents_perspective(phrase)
+        return f'Your opponent can respond with {san}' + (f', which {phrase}' if phrase else '') + '.'
+    return f'You can then play {san}' + (f', which {phrase}' if phrase else '') + '.'
+
+
+def _checking_cycle(branch):
+    """Classify observed recurring checks; never infer a forced perpetual.
+
+    Threefold uses exact side/castling/en-passant board identities. The
+    initial position counts, but hypothetical future Stockfish lines do not.
+    Older evidence without per-ply board identities is not proof of a cycle.
+    """
+    if not isinstance(branch, dict): return None
+    plies = branch.get('plies') or []
+    start = branch.get('start_fen')
+    if not start or len(plies) < 5: return None
+    key = lambda fen: tuple(str(fen).split()[:4]) if fen else ()
+    seen = {key(start):1}
+    checks = [0, 0]
+    repeats = False
+    threefold = False
+    for i, ply in enumerate(plies):
+        # Board-event check markers are mover-relative and verified by replay.
+        if any(e.get('kind') in ('check','discovered_check')
+               for e in _effects(ply)):
+            checks[i % 2] += 1
+        position = key(ply.get('fen_after'))
+        if len(position) != 4: return None
+        seen[position] = seen.get(position, 0) + 1
+        if seen[position] >= 2: repeats = True
+        if seen[position] >= 3: threefold = True
+    if max(checks) < 3: return None
+    if threefold:
+        return ('The saved continuation repeats a position three times during '
+                'a series of checks; a draw by threefold repetition can be claimed.')
+    if repeats:
+        return ('The checking sequence returns to an earlier position, '
+                'suggesting a perpetual-check possibility; this saved line '
+                'does not establish a forced draw.')
+    return ('This line contains a sequence of checks, but no repeated position '
+            'has been verified; perpetual check is not established.')
+
+
+def _missed_immediate_mate(row, uci, san):
+    """Only call it a missed mate when the best *single move* is mate."""
+    if uci == _val(row, 'best_move_uci'): return ''
+    best = _val(row, 'best_move_uci')
+    try:
+        import chess
+        board = chess.Board(row['fen'])
+        move = chess.Move.from_uci(best)
+        if move in board.legal_moves:
+            after = board.copy(stack=False); after.push(move)
+            if after.is_checkmate():
+                return f'{san} overlooks immediate checkmate with {board.san(move)}.'
+    except (ImportError, KeyError, ValueError, TypeError, AttributeError):
+        pass
+    return ''
+
+
+def explain_attempt(row, attempt, best_san, *, saved_explanation=''):
+    """Compose only ONE root-locked PV in chronological ply order.
+
+    Correct lines explain demonstrated value. Wrong lines teach the concrete
+    refutation first, with an honest generic fallback only if evidence is
+    genuinely insufficient. Never attach an invented reply or later effect.
     """
     san = _val(attempt, 'move_san') or _val(attempt, 'move_uci') or 'Move'
     uci = _val(attempt, 'move_uci')
@@ -173,81 +281,60 @@ def explain_attempt(row, attempt, best_san, *, saved_explanation=''):
     is_best = uci == _val(row, 'best_move_uci')
     branch = branch_evidence(row, uci, attempt)
     plies = branch.get('plies', []) if branch else []
-    reply_san = (plies[1].get('san') if len(plies) > 1 else None) or _val(attempt, 'best_reply_san')
-    root_fact = _main_fact(plies[0]) if plies else None
-    opponent_fact = _main_fact(plies[1], omit=('check_evasion', 'exchange')) if len(plies) > 1 else None
-    followup_fact = _main_fact(plies[2], omit=('check_evasion', 'exchange')) if len(plies) > 2 else None
-    followup_san = plies[2].get('san') if len(plies) > 2 else None
-
-    # A proactive explanation can compare the saved *game* line to the best
-    # move; that comparison cannot be transplanted into a different root.
-    primary = ''
-    if correct and is_best and saved_explanation:
-        played_san = _val(row, 'played_move_san')
-        lower = saved_explanation.lower()
-        mentions_other = ('in the game you played' in lower or
-                          ('instead of ' in lower and played_san and played_san != san) or
-                          (played_san and played_san != san and
-                           _move_mentioned(saved_explanation, played_san)))
-        if not mentions_other:
-            primary = saved_explanation.strip()
-        else:
-            # A saved proactive paragraph can contain *multiple* roots:
-            # "Nxd7 takes a rook. Rxh4 misses it. After Ra7, ...".
-            # That comparative history cannot share a card with a Bc7 reply
-            # observed only on Nxd7's continuation. Keep just an independent
-            # opening claim explicitly identifying this root; the wrong branch
-            # gets its own message from its own verified evidence below.
-            lead = re.split(r'(?<=[.!?])\s+', saved_explanation.strip(), maxsplit=1)[0]
-            if _move_mentioned(lead, san) and not _move_mentioned(lead, played_san):
-                primary = lead
-
+    check_cycle = _checking_cycle(branch)
+    # Saved proactive prose may contain an out-of-order narrative. Extract
+    # ONLY its immediate first sentence. Subsequent claims come from PV plies.
+    lead = _root_claim(san, saved_explanation, [p.get('san') for p in plies[1:]]) if correct and is_best else ''
+    root_fact = _sequential_event(plies, 0) if plies else None
     sentences = []
-    # Single ownership: either the saved *complete* proactive lead, OR one
-    # observed immediate root fact, never both. Semantic synonyms such as
-    # 'moves the king out of check'/'legally answers the check' cannot repeat.
-    if primary:
-        sentences.append(primary)
+    missed_mate = _missed_immediate_mate(row, uci, san) if not correct else ''
+    if missed_mate: sentences.append(missed_mate)
+    if not correct and root_fact and root_fact.get('kind') in {'attack_loose_piece', 'passed_pawn', 'pin'} and len(plies)>1:
+        # A quiet surface feature distracts from a demonstrated reply.
+        if _sequential_event(plies, 1): root_fact = None
+    if lead:
+        sentences.append(lead)
     elif root_fact:
         if root_fact.get('kind') == 'check_evasion':
-            # Prefer an instructive legal check response when the board is
-            # accessible; never narrate the tautology 'legally answers'.
             root = _root_board_fact(row, uci)
             sentences.append((root or f'{san} resolves the check').rstrip('.') + '.')
         else:
-            sentences.append(_phrase(root_fact) + '.')
+            sentences.append(_sentence_for_ply(root_fact, san, 0))
     else:
         root = _root_board_fact(row, uci)
-        if root:
-            sentences.append(root.rstrip('.') + '.')
+        if root: sentences.append(root.rstrip('.') + '.')
 
-    # A reply must have something demonstrable to teach. 'After Kh1, Kh8' by
-    # itself is a PV listing, not coaching. Likewise, ignore a reply already
-    # explained by the proactive paragraph, which may phrase it differently.
-    if reply_san and opponent_fact and not _move_mentioned(primary, reply_san):
-        reply_comment = _opponent_consequence(opponent_fact, reply_san)
-        if reply_comment:
-            sentences.append(reply_comment)
-
-    # A solver's third-ply action may demonstrate the tactical payoff. Do not
-    # attribute it to the opponent or reproduce a line already explained.
-    if followup_fact and followup_san and not _move_mentioned(primary, followup_san):
-        if followup_fact.get('kind') in {
-                'checkmate', 'promotion', 'fork', 'discovered_attack',
-                'discovered_check', 'capture', 'mate_threat', 'trapped_piece'}:
-            outcome = _phrase(followup_fact)
-            if outcome.startswith(followup_san):
-                outcome = outcome[len(followup_san):].lstrip(' ,').rstrip('.')
-            if outcome:
-                sentences.append(f'You can then continue with {followup_san}, which {outcome}.')
-
+    # The answer to a failed move should foreground the opponent's refutation.
+    # Show up to four *chronological* plies. An immediate recapture (especially
+    # on the solver's next turn) is always worth mentioning.
+    root_was_capture = any(event['kind'] in ('capture', 'recapture') for event in _effects(plies[0])) if plies else False
+    for i in range(1, min(len(plies), 5)):
+        fact = _sequential_event(plies, i)
+        if not fact:
+            continue
+        if check_cycle and fact.get('kind') == 'check':
+            continue  # Replace repetitive standalone check facts with one finding.
+        if i == 1 and root_was_capture and fact['kind'] == 'recapture':
+            pass  # Already prioritized by _sequential_event.
+        message = _sentence_for_ply(fact, plies[i].get('san') or '', i)
+        if message and not sentences and i == 1:
+            message = f'After {san}, ' + message[0].lower() + message[1:]
+        if message and not any(message == old for old in sentences):
+            sentences.append(message)
+    if check_cycle:
+        sentences.append(check_cycle)
+    # If a saved line is absent, a verified but uncategorized response should
+    # never be marketed as a forced tactical refutation.
     if not sentences:
-        # Honest evidence gap without narrating the puzzle-grading threshold or
-        # claiming that a merely sampled opponent reply is a refutation.
-        sentences.append(f'The saved analysis of {san} does not establish a specific tactical or positional consequence.')
-    return {'move_san': san, 'move_uci': uci, 'correct': correct,
-            'cached': bool(branch) or bool(_val(attempt, 'from_saved_line')),
-            'source': 'saved_solution' if primary else
-                      ('saved_analysis' if branch or _val(attempt, 'from_saved_line') else 'verified_attempt'),
-            'reply_san': reply_san, 'text': ' '.join(sentences),
-            'evidence_role': branch.get('role') if branch else None}
+        if correct:
+            sentences.append(f'{san} is the solving move, but the saved analysis does not establish a specific tactical reason.')
+        else:
+            sentences.append(f'{san} falls short of the solving continuation; the saved analysis does not establish a specific tactical refutation.')
+    return {'move_san':san, 'move_uci':uci, 'correct':correct,
+            'purpose':'explanation' if correct else 'learning',
+            'cached':bool(branch) or bool(_val(attempt,'from_saved_line')),
+            'source':'saved_solution' if lead else
+                     ('saved_analysis' if branch or _val(attempt,'from_saved_line') else 'verified_attempt'),
+            'reply_san':plies[1].get('san') if len(plies)>1 else _val(attempt,'best_reply_san'),
+            'text':' '.join(sentences),
+            'evidence_role':branch.get('role') if branch else None}

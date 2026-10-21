@@ -11,6 +11,10 @@ const trainerRatingMax = Number(window.TRAINER_RATING_MAX || 0) || null;
 const trainingStateKey = `pct-training-${jobId}`;
 const trainingPlaylistKey = `${trainingStateKey}-playlist`;
 const initialQuery = new URLSearchParams(location.search);
+const benchmarkQueue = initialQuery.get('benchmark') === '1';
+const evaluationRunId = Number(window.TRAINER_EVALUATION_RUN_ID || 0) || null;
+// Evaluation feedback must remain visible; hover-only thumbs can look disabled.
+if (evaluationRunId) document.documentElement.classList.add('evaluation-feedback-mode');
 const forceNewPlaylist = initialQuery.get('new_playlist') === '1';
 const trainerContextFilter = initialQuery.get('context') || '';
 const trainerMoveTypeFilter = initialQuery.get('move_type') || '';
@@ -47,7 +51,7 @@ function reconcilePlaylistLearnedState(positionId, learned, affectedPositionIds 
 }
 
 // An explicit lesson or position link wins over the saved session.
-const hasExplicitTrainingTarget = Boolean(conceptKey || openingKey || openingVariation || requestedPositionId || trainerLearningMode || trainerListingScope || trainerRatingMin || trainerRatingMax || trainerContextFilter || trainerMoveTypeFilter || new URLSearchParams(location.search).has('sort'));
+const hasExplicitTrainingTarget = Boolean(conceptKey || openingKey || openingVariation || requestedPositionId || trainerLearningMode || trainerListingScope || trainerRatingMin || trainerRatingMax || trainerContextFilter || trainerMoveTypeFilter || benchmarkQueue || new URLSearchParams(location.search).has('sort'));
 let savedTraining = null;
 try { savedTraining = JSON.parse(localStorage.getItem(`${trainingStateKey}-state`) || 'null'); } catch (_) {}
 if (!hasExplicitTrainingTarget && savedTraining?.url?.startsWith(`/trainer/${jobId}`) && savedTraining.url !== `${location.pathname}${location.search}`) {
@@ -146,6 +150,11 @@ function setPlayerTrackingEnabled(enabled) {
   updatePlayerTrackingUI();
 }
 updatePlayerTrackingUI();
+if (evaluationRunId && playerTrackingToggleEl) {
+  playerTrackingToggleEl.disabled = true;
+  const trackingLabel = document.getElementById('player-tracking-label');
+  if (trackingLabel) trackingLabel.textContent = 'Evaluation · separate from Player stats';
+}
 playerTrackingToggleEl?.addEventListener('change', () => setPlayerTrackingEnabled(playerTrackingToggleEl.checked));
 if (typeof document.addEventListener === 'function') {
   document.addEventListener('visibilitychange', () => {
@@ -192,6 +201,26 @@ let solutionBestMoveSan = null;
 const boardEl = document.getElementById('chessboard');
 const feedbackEl = document.getElementById('feedback');
 const feedbackMessageEl = document.getElementById('feedback-message');
+const illegalMoveAlertEl = document.getElementById('illegal-move-alert');
+let illegalMoveAlertTimeout = null;
+function showIllegalMoveAlert(message = 'That move is not legal. Try another move.') {
+  if (!illegalMoveAlertEl) return;
+  illegalMoveAlertEl.textContent = message;
+  illegalMoveAlertEl.classList.remove('hidden');
+  if (illegalMoveAlertTimeout) clearTimeout(illegalMoveAlertTimeout);
+  illegalMoveAlertTimeout = setTimeout(() => {
+    illegalMoveAlertEl.classList.add('hidden');
+    illegalMoveAlertEl.textContent = '';
+    illegalMoveAlertTimeout = null;
+  }, 2500);
+}
+function hideIllegalMoveAlert() {
+  if (illegalMoveAlertTimeout) clearTimeout(illegalMoveAlertTimeout);
+  illegalMoveAlertTimeout = null;
+  illegalMoveAlertEl?.classList.add('hidden');
+  if (illegalMoveAlertEl) illegalMoveAlertEl.textContent = '';
+}
+
 const solutionEl = document.getElementById('solution');
 const learnedCheckbox = document.getElementById('learned-checkbox');
 const learnedToggleWrapEl = document.getElementById('learned-toggle-wrap');
@@ -254,18 +283,16 @@ function coachSolveSessionKey(positionId) {
     const token = (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function')
       ? crypto.randomUUID().replaceAll('-', '')
       : `${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}`;
-    coachSolveSessionKeys.set(id, token);
+    coachSolveSessionKeys.set(id, evaluationRunId ? `eval_${evaluationRunId}_${token}` : token);
   }
   return coachSolveSessionKeys.get(id);
 }
 function preserveCoachReviewInThread() {
   if (!coachChatEl) return;
-  // Both components are distinct chat messages; attempted moves precede the
-  // solving continuation, even after chat history is reloaded.
-  if (coachPositionReviewEl && coachPositionReviewEl.parentElement !== coachChatEl)
-    coachChatEl.prepend(coachPositionReviewEl);
-  if (coachAttemptCommentsEl && coachAttemptCommentsEl.parentElement !== coachChatEl)
-    coachChatEl.prepend(coachAttemptCommentsEl);
+  // Chronological teaching order is solution -> attempts -> original game.
+  // prepend in reverse order because the thread is already populated.
+  if (coachAttemptCommentsEl) coachChatEl.prepend(coachAttemptCommentsEl);
+  if (coachPositionReviewEl) coachChatEl.prepend(coachPositionReviewEl);
 }
 function attemptNotesFromRecap(structured) {
   if (!structured || structured.kind !== 'solved_attempt_recap') return [];
@@ -298,7 +325,7 @@ function renderCoachAttemptComments(recap, positionId = null) {
   }
   const notes = attemptNotesFromRecap(structured);
   coachAttemptCommentsEl.replaceChildren();
-  const solutionNote = [...notes].reverse().find(note => note.correct);
+  const solutionNote = notes.find(note => note.origin === 'solving') || notes.find(note => note.correct && note.origin !== 'game');
   if (coachSolutionLabelEl) {
     coachSolutionLabelEl.textContent = solutionNote
       ? `Solution · ${solutionNote.move_san || solutionNote.move_uci}` : 'Solution';
@@ -307,16 +334,24 @@ function renderCoachAttemptComments(recap, positionId = null) {
   // A move attempted twice in the same session is the same continuation, not
   // two independently judged chess claims. The last verified note wins.
   const attempts = new Map();
-  for (const note of notes.filter(entry => !entry.correct)) {
+  for (const note of notes.filter(entry => entry.origin !== 'solving' && entry.origin !== 'game' && !entry.correct)) {
     if (note.move_uci) attempts.set(note.move_uci, note);
   }
-  for (const [key, note] of attempts) {
+  // Legacy stored recaps may contain duplicates. Prefer an attempted learning
+  // message, even if that move also appears as the original game move.
+  const nonGames = [...attempts.values()];
+  const attemptedRoots = new Set(nonGames.map(note => note.move_uci));
+  const game = notes.find(entry => entry.origin === 'game' &&
+    !attemptedRoots.has(entry.move_uci) && entry.move_uci !== solutionNote?.move_uci);
+  for (const note of [...nonGames, ...(game ? [game] : [])]) {
+    const key = note.move_uci;
     const section = document.createElement('div');
-    section.className = 'coach-message assistant coach-continuation-message';
+    section.className = 'coach-message assistant coach-continuation-message' + (note.origin === 'game' ? ' coach-game-message' : ' coach-learning-message');
     const title = document.createElement('div');
     title.className = 'coach-message-label';
+    const purpose = note.origin === 'game' ? (note.purpose || (note.correct ? 'explanation' : 'learning')) : 'learning';
     title.textContent = `Coach · ${note.origin === 'game' ? 'Your game' :
-      note.origin === 'previous_session' ? 'Previously tried' : 'Earlier attempt'} · ${note.move_san || key}`;
+      note.origin === 'previous_session' ? 'Previously tried' : 'Attempted move'} · ${note.move_san || key} · ${purpose === 'learning' ? 'Learning' : 'Explanation'}`;
     const bubble = document.createElement('div');
     bubble.className = 'coach-message-body rate-hover-zone explanation-feedback-area';
     const copy = document.createElement('p');
@@ -325,7 +360,7 @@ function renderCoachAttemptComments(recap, positionId = null) {
     const votes = document.createElement('div');
     votes.className = 'inline-feedback-votes';
     votes.dataset.feedbackCategory = 'continuation';
-    votes.dataset.continuationKey = key;
+    votes.dataset.continuationKey = note.origin === 'game' ? `game:${key}` : key;
     votes.setAttribute('role', 'group');
     votes.setAttribute('aria-label', `Was the coaching for ${note.move_san || key} helpful?`);
     votes.innerHTML = `<span class="rating-prompt">Helpful explanation?</span>
@@ -361,7 +396,7 @@ async function publishPostSolveCoach(position) {
   try {
     const response = await fetch(`/api/positions/${positionId}/coach/solve-recap`, {
       method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({session_key: sessionKey})
+      body: JSON.stringify({session_key: sessionKey, evaluation_run_id: evaluationRunId})
     });
     if (!response.ok) return;
     const result = await response.json();
@@ -510,7 +545,7 @@ correctionForm?.addEventListener('submit', async event => {
   try {
     const chat = category === 'coaching';
     const url = chat ? `/api/coach/messages/${targetId}/feedback` : `/api/positions/${targetId}/feedback`;
-    const payload = {rating: -1, lesson_key: new URLSearchParams(location.search).get('concept') || ''};
+    const payload = {rating: -1, evaluation_run_id:evaluationRunId, lesson_key: new URLSearchParams(location.search).get('concept') || ''};
     if (!chat) {
       payload.category = category;
       payload.content_snapshot = snapshot;
@@ -540,7 +575,34 @@ let ratingRequestSerial = 0;
 let explainedPositionId = null;
 function positionSolvedForRating() {
   const p = currentPosition();
-  return Boolean(p && (solved || Number(p.learned) === 1));
+  // Benchmark completion belongs to the evaluation run, never global learning.
+  return Boolean(p && (evaluationRunId ? solved : (solved || Number(p.learned) === 1)));
+}
+function solvingExplanationReadyForRating() {
+  const p = currentPosition();
+  if (!p || !positionSolvedForRating() || Number(displayedPositionId) !== Number(p.id)) return false;
+  if (coachPositionReviewEl?.classList.contains('hidden')) return false;
+  const text = explanationPackageSnapshot();
+  // The old explainedPositionId marker can become stale when the coach thread
+  // is replaced asynchronously (or a run-scoped recap loads after the solve).
+  // Judge the *currently displayed* post-solve text instead.
+  return Boolean(text && !/^Watch the last move[,\s]/i.test(text) &&
+    !/^Find a strong move\.?$/i.test(text));
+}
+function setRatingFeedbackStatus(group, message, isError = false) {
+  if (!group) return;
+  let status = group.querySelector('.inline-rating-status');
+  if (!status && message) {
+    status = document.createElement('span');
+    status.className = 'inline-rating-status';
+    status.setAttribute('role', 'status');
+    status.setAttribute('aria-live', 'polite');
+    group.append(status);
+  }
+  if (!status) return;
+  status.textContent = message || '';
+  status.classList.toggle('error', Boolean(isError));
+  status.classList.toggle('hidden', !message);
 }
 // A taxonomy pill is a native select with a visible pill label.  A native menu
 // provides keyboard/touch support, while the pill always displays the coach's
@@ -644,7 +706,7 @@ async function updateTaxonomyFeedbackChoice(select) {
   const save = async () => {
     const response = await fetch(`/api/positions/${id}/taxonomy-feedback`, {
       method:'POST', headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({field,selected_key:selectedKey})
+      body:JSON.stringify({field,selected_key:selectedKey,evaluation_run_id:evaluationRunId})
     });
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || 'Could not save taxonomy feedback');
@@ -683,7 +745,7 @@ function updatePositionRatingUI() {
       ? Number((continuationRatings.get(Number(p?.id)) || {})[key] || 0)
       : Number(ratings[category] || 0);
     const eligible = ready &&
-      (category !== 'explanation' || explainedPositionId === Number(p?.id));
+      (category !== 'explanation' || solvingExplanationReadyForRating());
     group.classList.toggle('hidden', !eligible);
     group.querySelectorAll('[data-rating]').forEach(button => {
       const selected = eligible && voted === Number(button.dataset.rating);
@@ -700,7 +762,7 @@ async function loadPositionRatings(positionId) {
   if (!id) return;
   const serial = ++ratingRequestSerial;
   try {
-    const response = await fetch(`/api/positions/${id}/feedback`);
+    const response = await fetch(`/api/positions/${id}/feedback${evaluationRunId ? `?evaluation_run_id=${evaluationRunId}` : ""}`);
     if (!response.ok) return;
     const data = await response.json();
     if (serial !== ratingRequestSerial) return; // An earlier read must not erase a newly saved vote.
@@ -731,11 +793,12 @@ async function ratePositionFeedback(button) {
   const buttons = [...group.querySelectorAll('[data-rating]')];
   ++ratingRequestSerial; // Invalidate any in-flight GET from an earlier render.
   buttons.forEach(item => item.disabled = true);
+  setRatingFeedbackStatus(group, '');
   try {
     const response = await fetch(`/api/positions/${id}/feedback`, {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({
-        category, rating, lesson_key: new URLSearchParams(location.search).get('concept') || '',
+        category, rating, evaluation_run_id:evaluationRunId, lesson_key: new URLSearchParams(location.search).get('concept') || '',
         content_snapshot: category === 'explanation' ? explanationPackageSnapshot()
           : category === 'continuation' ? group.closest('.coach-message')?.querySelector('.coach-text')?.textContent || '' : '',
         continuation_key: category === 'continuation' ? key : undefined
@@ -752,6 +815,9 @@ async function ratePositionFeedback(button) {
     if (Number(currentPosition()?.id) === id) updatePositionRatingUI();
     group.title = rating === 0 ? 'Rating removed.' : rating === 1
       ? 'Helpful rating saved; any correction was removed.' : 'Rating saved — you can suggest an improvement.';
+    // Explicit confirmation is useful when the thumbs are always visible in a
+    // benchmark; it also distinguishes a saved vote from a failed request.
+    setRatingFeedbackStatus(group, rating === 0 ? 'Rating withdrawn' : 'Rating saved');
     if (rating === -1) openCorrectionDialog(category, id,
       category === 'continuation' ? (continuationCorrections.get(id) || {})[key] || {}
         : positionCorrections.get(id)?.[category] || {},
@@ -760,7 +826,11 @@ async function ratePositionFeedback(button) {
     else if (correctionTarget?.targetId === id && correctionTarget?.category === category &&
              (category !== 'continuation' || correctionTarget.continuationKey === key)) closeCorrectionDialog();
   } catch (err) {
-    group.title = err.message || 'Could not save rating';
+    const message = err.message || 'Could not save rating';
+    group.title = message;
+    setRatingFeedbackStatus(group, message, true);
+    // A failed request never changes the selected vote state.
+    if (Number(currentPosition()?.id) === id) updatePositionRatingUI();
   } finally {
     buttons.forEach(item => item.disabled = false);
   }
@@ -1096,7 +1166,7 @@ async function maybeOfferBrilliantCoach(position) {
 }
 
 function maybeOfferProactiveCoach(position) {
-  if (!position || !coachChatEl || !solved || !position.learned) return Promise.resolve();
+  if (!position || !coachChatEl || !solved || !position.learned || evaluationRunId) return Promise.resolve();
   if (proactiveCoachRequests.has(position.id)) return proactiveCoachRequests.get(position.id);
   const promise = maybeOfferHistoricalCoach(position).then(shown => {
     if (!shown && displayedPositionId === position.id) return maybeOfferBrilliantCoach(position);
@@ -1123,7 +1193,7 @@ async function loadCoachThread(position) {
   coachChatEl.innerHTML = '<div class="coach-empty">Loading coaching thread…</div>';
   let lastRecap = null;
   try {
-    const response = await fetch(`/api/positions/${position.id}/coach`);
+    const response = await fetch(`/api/positions/${position.id}/coach${evaluationRunId ? `?run_id=${evaluationRunId}` : ""}`);
     const result = await response.json();
     if (!response.ok) throw new Error(result.error || 'Could not load coach');
     if (displayedPositionId !== position.id) return;
@@ -1687,11 +1757,9 @@ function handleSquareClick(squareName, board) {
 
   const legalMove = resolveBoardMove(selectedSquare, squareName);
   if (!legalMove) {
-    feedbackEl.className = 'feedback neutral';
-  feedbackEl.classList.remove('hidden');
-    feedbackMessageEl.textContent = analysisModeActive()
+    showIllegalMoveAlert(analysisModeActive()
       ? 'That move is not legal in this analysis position.'
-      : 'That move is not legal. Keep looking.';
+      : 'That move is not legal. Keep looking.');
     paintSelection();
     return;
   }
@@ -1868,6 +1936,7 @@ async function refreshEngineEvaluation() {
 
 async function playAnalysisMove(from, to, legalMove) {
   if (!analysisModeActive() || !legalMove) return;
+  hideIllegalMoveAlert();
   const position = currentPosition();
   const startingFen = currentDisplayedFen();
   prepareAnalysisBranch();
@@ -1897,9 +1966,7 @@ async function playAnalysisMove(from, to, legalMove) {
     // Unlearning/resetting or otherwise leaving analysis intentionally cancels
     // the move. Do not replace the board with a stale error message.
     if (actionToken !== analysisActionToken || displayedPositionId !== position.id || !analysisModeActive()) return;
-    feedbackEl.className = 'feedback bad';
-  feedbackEl.classList.remove('hidden');
-    feedbackMessageEl.textContent = 'That move is not legal, or could not be played. Try another move.';
+    showIllegalMoveAlert('That move is not legal, or could not be played. Try another move.');
     // The board must remain usable even if the first post-solve move was
     // illegal or the server was temporarily unavailable.
     renderBoard(position, startingFen, true);
@@ -1996,7 +2063,7 @@ function renderSolvedDetails(result) {
 
 async function loadSolvedDetails(position) {
   try {
-    const response = await fetch(`/api/positions/${position.id}/solution`);
+    const response = await fetch(`/api/positions/${position.id}/solution${evaluationRunId ? `?evaluation_run_id=${evaluationRunId}` : ""}`);
     if (!response.ok) return;
     const result = await response.json();
     if (displayedPositionId === position.id && solved) {
@@ -2021,12 +2088,13 @@ async function attemptMove(from, to, legalMove = null) {
   const moveUci = legalMove || resolveLegalMove(from, to);
   if (!moveUci) return;
 
+  hideIllegalMoveAlert();
   inputLocked = true;
   selectedSquare = null;
   clearHighlights();
   boardInteractive = false;
   const animationPromise = new Promise(resolve => animateMove(position, from, to, resolve, false));
-  const trackLearning = learningTrackingEnabled;
+  const trackLearning = learningTrackingEnabled && !evaluationRunId;
   const startNewLearningSession = trackLearning && restartTrackedSession;
   const activeSecondsDelta = trackLearning ? learningClockSnapshot() : null;
 
@@ -2042,7 +2110,8 @@ async function attemptMove(from, to, legalMove = null) {
       body: JSON.stringify({move: moveUci, opening_key:openingKey, lesson_key:conceptKey,
         track_learning:trackLearning, start_new_learning_session:startNewLearningSession,
         active_seconds_delta:activeSecondsDelta,
-        coach_session_key:coachChatEl ? coachSolveSessionKey(position.id) : null})
+        coach_session_key:coachChatEl ? coachSolveSessionKey(position.id) : null,
+        evaluation_run_id:evaluationRunId})
     });
     result = await response.json();
   } catch (_) {
@@ -2071,9 +2140,7 @@ async function attemptMove(from, to, legalMove = null) {
     learningClockResume();
     inputLocked = false;
     renderBoard(position, position.fen, true);
-    feedbackEl.className = 'feedback neutral';
-  feedbackEl.classList.remove('hidden');
-    feedbackMessageEl.textContent = 'That move is not legal. Keep looking.';
+    showIllegalMoveAlert('That move is not legal. Keep looking.');
     return;
   }
 
@@ -2141,8 +2208,8 @@ async function attemptMove(from, to, legalMove = null) {
     feedbackEl.className = 'feedback good';
   feedbackEl.classList.remove('hidden');
     feedbackMessageEl.textContent = result.accepted_alternative
-      ? 'Strong move — accepted as near-optimal and position marked learned.'
-      : 'Correct — position marked learned.';
+      ? (evaluationRunId ? 'Strong move — accepted for this evaluation.' : 'Strong move — accepted as near-optimal and position marked learned.')
+      : (evaluationRunId ? 'Correct — recorded for this evaluation.' : 'Correct — position marked learned.');
 
     position.estimated_rating = result.estimated_rating ?? position.estimated_rating;
     position.difficulty_score = result.difficulty_score ?? position.difficulty_score;
@@ -2154,14 +2221,14 @@ async function attemptMove(from, to, legalMove = null) {
     engineToggleEl.disabled = false;
     if (engineToggleWrapEl) engineToggleWrapEl.classList.remove('hidden');
     solvedPositionControlsEl?.classList.remove('hidden');
-    if (learnedToggleWrapEl) learnedToggleWrapEl.classList.remove('hidden');
+    if (learnedToggleWrapEl && !evaluationRunId) learnedToggleWrapEl.classList.remove('hidden');
     updateNavigationMeta();
 }
 
 
 async function refreshCurrentPosition() {
   const position = currentPosition();
-  if (!position || !refreshPositionEl) return;
+  if (!position || !refreshPositionEl || evaluationRunId) return;
   refreshPositionEl.disabled = true;
   const originalLabel = refreshPositionEl.textContent;
   refreshPositionEl.textContent = 'Resetting…';
@@ -2212,11 +2279,12 @@ async function rateCoachResponse(button) {
   const rating = nextFeedbackRating(priorRating, chosenRating);
   const buttons = [...container.querySelectorAll('.coach-feedback-button')];
   buttons.forEach(item => item.disabled = true);
+  setRatingFeedbackStatus(container, '');
   try {
     const response = await fetch(`/api/coach/messages/${messageId}/feedback`, {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({rating, lesson_key: new URLSearchParams(location.search).get('concept') || ''})
+      body: JSON.stringify({rating, evaluation_run_id:evaluationRunId, lesson_key: new URLSearchParams(location.search).get('concept') || ''})
     });
     const result = await response.json();
     if (!response.ok) throw new Error(result.error || 'Could not save feedback');
@@ -2231,10 +2299,12 @@ async function rateCoachResponse(button) {
     container.querySelector('.feedback-edit-correction')?.classList.toggle('hidden', rating !== -1);
     container.title = rating === 0 ? 'Rating removed.' : rating === 1
       ? 'Helpful rating saved; correction cleared.' : 'Unhelpful rating saved.';
+    setRatingFeedbackStatus(container, rating === 0 ? 'Rating withdrawn' : 'Rating saved');
     if (rating === -1) openCorrectionDialog('coaching', messageId, {suggested_text: container.dataset.suggestedText});
     else if (correctionTarget?.category === 'coaching' && correctionTarget?.targetId === messageId) closeCorrectionDialog();
-  } catch (_) {
+  } catch (error) {
     container.classList.add('error');
+    setRatingFeedbackStatus(container, error.message || 'Could not save coaching feedback', true);
   } finally {
     buttons.forEach(item => item.disabled = false);
   }
@@ -2270,7 +2340,7 @@ async function hydratePositionChunk(index) {
       if (!ids.length) return;
       const response = await fetch(`/api/jobs/${jobId}/positions/playlist`, {
         method: 'POST', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({position_ids: ids, opening_key: openingKey})
+        body: JSON.stringify({position_ids: ids, opening_key: openingKey, evaluation_run_id: typeof evaluationRunId !== 'undefined' ? evaluationRunId : null})
       });
       if (!response.ok) throw new Error('Could not load this group of training positions');
       const hydrated = await response.json();
@@ -2377,7 +2447,7 @@ async function showPosition(index) {
   document.getElementById('puzzle-rating').textContent = '—';
   feedbackEl.className = solved ? 'feedback good' : 'feedback neutral';
   feedbackEl.classList.remove('hidden');
-  feedbackMessageEl.textContent = solved ? 'Already learned. Review the game or move to another puzzle.' : '';
+  feedbackMessageEl.textContent = solved ? (evaluationRunId ? 'Already solved in this evaluation run.' : 'Already learned. Review the game or move to another puzzle.') : '';
   feedbackEl.classList.toggle('hidden', !solved);
   solutionEl.classList.add('hidden');
   coachThreadReadyPositionId = null;
@@ -2385,6 +2455,7 @@ async function showPosition(index) {
   updatePositionRatingUI();
   loadPositionRatings(p.id);
   learnedCheckbox.checked = Boolean(p.learned);
+  if (evaluationRunId) { learnedCheckbox.disabled = true; } 
   if (learnedToggleWrapEl) learnedToggleWrapEl.classList.add('hidden');
   solvedPositionControlsEl?.classList.add('hidden');
   pgnMovesEl.innerHTML = '<span class="muted">Loading game history…</span>';
@@ -2431,7 +2502,7 @@ async function showPosition(index) {
     engineToggleEl.disabled = false;
     engineToggleWrapEl?.classList.remove('hidden');
     solvedPositionControlsEl?.classList.remove('hidden');
-    learnedToggleWrapEl?.classList.remove('hidden');
+    if (!evaluationRunId) learnedToggleWrapEl?.classList.remove('hidden');
     // Hydrated playlist cards already contain the persisted explanation. Show
     // it immediately on Last/Next navigation, before the solution endpoint
     // returns, so a slow or failed request cannot strand a learned card with
@@ -2458,8 +2529,8 @@ async function showPosition(index) {
     return;
   }
 
+  hideIllegalMoveAlert();
   feedbackEl.className = 'feedback neutral';
-  feedbackEl.classList.remove('hidden');
   feedbackMessageEl.textContent = '';
   feedbackEl.classList.add('hidden');
   previewOpponentMove(p, false);
@@ -2472,7 +2543,7 @@ async function loadPositions(preservePosition = true) {
   positionsRequestPending = true;
   try {
     let fresh;
-    if (savedPlaylist?.ids?.length) {
+    if (!benchmarkQueue && savedPlaylist?.ids?.length) {
       if (savedPlaylist.solvedMoves) sessionSolvedMoves = savedPlaylist.solvedMoves;
       const response = await fetch(`/api/jobs/${jobId}/positions/manifest`, {
         method:'POST', headers:{'Content-Type':'application/json'},
@@ -2497,6 +2568,7 @@ async function loadPositions(preservePosition = true) {
       if (trainerRatingMin !== null) params.set('rating_min', String(trainerRatingMin));
       if (trainerRatingMax !== null) params.set('rating_max', String(trainerRatingMax));
       if (requestedPositionPending) params.set('position_id', requestedPositionPending);
+      if (benchmarkQueue) {params.set('benchmark','1'); if (evaluationRunId) params.set('run_id',String(evaluationRunId));}
       const query = params.toString() ? `?${params.toString()}` : '';
       const response = await fetch(`/api/jobs/${jobId}/positions/manifest${query}`);
       if (!response.ok) throw new Error('Could not load training positions');
@@ -2749,7 +2821,7 @@ learnedCheckbox.addEventListener('change', async () => {
 
     // Checking a solved card retains the accepted move and review state.
     solved = true;
-    learnedToggleWrapEl?.classList.remove('hidden');
+    if (!evaluationRunId) learnedToggleWrapEl?.classList.remove('hidden');
     solvedPositionControlsEl?.classList.remove('hidden');
     engineToggleEl.disabled = false;
     engineToggleWrapEl?.classList.remove('hidden');

@@ -8,3 +8,5 @@ data/chess_trainer.sqlite3-wal
 stockfish/
 tests/
 data/batches/
+data/archive/
+archive/

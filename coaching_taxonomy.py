@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 
-TAXONOMY_VERSION = '3.1-blocking-distinct-motifs'
+TAXONOMY_VERSION = '3.4-verified-perpetual-check'
 CONTEXTS = {'attack': 'Attacking Plans', 'defend': 'Defensive Resources'}
 MOVE_TYPES = {'tactical': 'Tactical Calculation', 'strategic': 'Strategic Comprehension'}
 
@@ -18,12 +18,12 @@ ATTACK_GENERAL = frozenset({
     'piece_activity', 'pawn_break', 'initiative', 'mate_threat', 'missed_capture',
 })
 DEFEND_GENERAL = frozenset({
-    'dont_hang_pieces', 'loose_piece_awareness', 'mate_defense',
+    'dont_hang_pieces', 'loose_piece_awareness', 'perpetual_check', 'mate_defense',
     'lost_material', 'counterattack', 'threat_awareness',
 })
 TACTICAL = frozenset({
-    'mating_net', 'fork', 'pin', 'skewer', 'discovered_attack', 'deflection',
-    'removal_of_defender', 'trapped_piece', 'material_sacrifice',
+    'mating_net', 'perpetual_check', 'fork', 'pin', 'skewer', 'discovered_attack', 'deflection',
+    'removal_of_defender', 'trapped_piece', 'material_sacrifice', 'recapture',
     'promotion_tactic', 'overloaded_defender', 'blocking',
 })
 STRATEGIC = frozenset({
@@ -108,7 +108,8 @@ class CanonicalLearningLabel:
     is_primary: bool = False
 
 
-def normalize_learning_labels(labels, row):
+def normalize_learning_labels(labels, row, *, is_in_check=False,
+                              best_is_king_evasion=False):
     """Merge legacy motifs, search *all* supported tactics/strategies.
 
     Evidence supplied by the existing causal classifier is required. Broad
@@ -147,6 +148,19 @@ def normalize_learning_labels(labels, row):
                 best_general = max(concrete_general, key=lambda x: (x.confidence, x.key))
                 if primary is None or best_general.confidence >= primary.confidence + .07:
                     primary = best_general
+    if is_in_check and best_is_king_evasion and (
+            primary is None or primary.key not in {
+                'mate_defense', 'king_activity', 'king_safety'}):
+        # This priority is rooted in the *legal best move itself*. A remote
+        # double attack in the inferior game line is not the reason that
+        # moving the king is necessary while under check.
+        priority = CanonicalLearningLabel(
+            'king_safety', .86,
+            'The chosen king move is a legal noncapturing evasion of check.', True)
+        prior = normalized.get('king_safety')
+        if prior is None or prior.confidence < priority.confidence:
+            normalized['king_safety'] = priority
+        primary = normalized['king_safety']
     if primary is None:
         key = evaluation_outcome_key(row)
         primary = CanonicalLearningLabel(key, .55, 'Saved Stockfish evaluation change; no sufficiently supported motif.')

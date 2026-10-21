@@ -10,7 +10,7 @@ import json
 from collections import OrderedDict
 
 from critical_moments import critical_decision_evidence
-from explanatory_evidence import explanation_variations, decode_variations
+from explanatory_evidence import explanation_variations
 
 import chess
 import chess.pgn
@@ -20,6 +20,7 @@ from analysis import (
     estimate_puzzle_difficulty,
 )
 from openings import classify_pgn, historical_for_position
+from coaching_copy_refresh import rebuild_coaching_copy, preserve_previous_coaching_copy
 
 
 def _game_context(pgn):
@@ -144,19 +145,28 @@ def refresh_metadata_batch(conn, job_id, after_id=0, batch_size=25, probes=None,
                 SET difficulty_score = ?, estimated_rating = ?, difficulty_version = ?
                 WHERE id = ?''', (score, rating, DIFFICULTY_VERSION, position_id))
 
+            # Capture old copy before replacing any versioned evidence/labels.
+            preserve_previous_coaching_copy(conn, position_id)
+
             # Engine-based causal probing is performed by the refresh worker
             # outside this transaction. A JSON record is kept separately from
             # deep Analyze scores and PVs so later feedback can be audited.
             if position_id in probes:
                 conn.execute('''UPDATE training_positions SET proactive_coach_json = ?
                     WHERE id = ?''', (json.dumps(probes[position_id]), position_id))
+            else:
+                # A failed/missing current probe must never make the classifier
+                # read stale proactive evidence from a previous rule version.
+                conn.execute('''UPDATE training_positions SET proactive_coach_json = NULL
+                    WHERE id = ?''', (position_id,))
 
             # Reconstruct root analysis evidence and attach the tested replies.
             try:
                 played = chess.Move.from_uci(row['played_move_uci'])
-                existing_lines = decode_variations(row['explanatory_lines_json'])
-                probe = next((line for line in existing_lines['lines']
-                              if line.get('role') == 'tested_reply'), None) if existing_lines else None
+                # Never pull a 'tested_reply' out of an older model's
+                # explanatory_lines_json: it may have been assembled from a
+                # different coaching probe and would pollute this refresh.
+                probe = None
                 lines = explanation_variations(
                     board, best_move, played, row['best_pv_uci'], row['played_pv_uci'],
                     row['eval_before_cp'], row['eval_after_cp'], row['mate_before'],
@@ -175,7 +185,10 @@ def refresh_metadata_batch(conn, job_id, after_id=0, batch_size=25, probes=None,
             # Refresh labels from the newest stored PGN context, PVs, and
             # unchanged engine evaluations; coaching uses those updated labels.
             current = conn.execute('SELECT * FROM training_positions WHERE id = ?', (position_id,)).fetchone()
-            _refresh_position_labels(conn, position_id, current)
+            _refresh_position_labels(conn, position_id, current, regenerate_copy=False)
+            # Model-versioned explanation is regenerated from the *updated*
+            # labels and saved PV evidence in this same refresh transaction.
+            rebuild_coaching_copy(conn, position_id)
             refreshed += 1
         except (ValueError, TypeError, KeyError, UnicodeError):
             failed += 1

@@ -1,4 +1,6 @@
-# Chess Trainer: coaching and evidence architecture (v54)
+# Chess Trainer: coaching and evidence architecture (v85 maintenance review)
+
+The original architecture was introduced in v54. This remains a living evidence-standard reference; the continuation-owned v83 model, v84 explanation checks, and v85 coaching-only invalidation supersede older persistence/reset details. The current operational contract is in `README.md` and `docs/MAINTENANCE_AUDIT_V85.md`.
 
 ## Source of truth
 
@@ -35,10 +37,11 @@ The classifier now distinguishes **the source of the vulnerability**, not merely
 | Pause / resume | Continues last checkpoint | Preserved | Preserved | Preserved |
 | Analyze again | Adds a deeper pass | Preserved and enriched | Preserved | Preserved |
 | Refresh Metadata | New Stockfish coaching probes; **deep root scores preserved** | Same IDs and evaluations; regenerated labels/text | Preserved | Preserved |
+| **Clear coaching cache** | Deep root evaluation/PVs preserved; targeted coaching probes rerun on refresh | Training position IDs preserved; explanations and classifications invalidated | Learned progress, Player attempts, and all durable position/continuation/taxonomy/chat feedback events preserved; coach conversations and disposable live chat-thumb rows deleted | Preserved |
 | **Restart Analysis** | Recomputed from game one with current settings | **Deleted and regenerated** | **Deleted for that list** | **Preserved** |
 | **Coach → Reset feedback** | Not rerun | Preserved | **Thumbs ratings removed** (selected list or all) | Preserved |
 
-Restart is an irreversible clean-iteration operation. Export Coach CSV first to archive the old coaching assessment. Only the selected list is cleared; other lists are untouched. Reset waits until analysis and any in-flight metadata refresh worker have stopped before deleting records. Coach reset requires a confirmation phrase, and deletes only position/explanation/motif/chat *ratings*, not the conversations themselves.
+Restart is an irreversible clean-iteration operation. Export Coach CSV first to archive the old coaching assessment. Only the selected list is cleared; other lists are untouched. A coaching-cache clear is blocked while any analysis/retrieval/coaching worker is active and requires a confirmation. It invalidates the current derived explanation version, and startup backfills skip this list until an explicit Coaching refresh. Restart Analysis drains active workers before resetting their checkpoints. Coach reset requires a confirmation phrase, and deletes only position/explanation/motif/chat *ratings*, not the conversations themselves.
 
 ## Validation
 

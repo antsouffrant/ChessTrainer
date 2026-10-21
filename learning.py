@@ -16,8 +16,9 @@ from motif_relevance import select_relevant_primary
 from motif_hierarchy import choose_specific, validate_ontology
 from coaching_taxonomy import validate_taxonomy
 from pv_reasoning import fork_evidence, legal_pv, comparative_insight
+from check_repetition import verified_check_repetition
 
-CLASSIFIER_VERSION = '3.1-blocking-distinct-motifs'
+CLASSIFIER_VERSION = '3.4-verified-perpetual-check'
 
 # A deliberately compact curriculum: these are common, teachable amateur
 # failure modes that we can identify with reasonably explainable board rules.
@@ -38,6 +39,8 @@ CONCEPT_CATALOG = [
     {'key': 'trapped_piece', 'name': 'Trap a Piece', 'family': 'Tactics', 'description': 'Restrict a valuable piece until it has no safe escape.', 'priority': 86},
     {'key': 'material_sacrifice', 'name': 'Sacrifice Material', 'family': 'Tactics', 'description': 'Intentionally concede material for a verified tactical or positional opportunity.', 'priority': 93},
     {'key': 'exchange_sacrifice', 'name': 'Exchange Sacrifice', 'family': 'Tactics', 'description': 'Give a rook for a bishop or knight to gain compensation.', 'priority': 94},
+    {'key': 'perpetual_check', 'name': 'Perpetual Check', 'family': 'Tactics', 'description': 'Recognize repeated checks and a verified threefold repetition in the solving line; a sampled line does not prove an unavoidable draw.', 'priority': 97},
+    {'key': 'recapture', 'name': 'Recapture', 'family': 'Tactics', 'description': 'Take back a piece that the opponent has just captured on the same square, using the actual move sequence.', 'priority': 95},
     {'key': 'exchange', 'name': 'Piece Exchange', 'family': 'Tactics', 'description': 'Recognize captures and recaptures, and distinguish favorable trades from winning a free piece.', 'priority': 82},
     {'key': 'hanging_piece', 'name': 'Attack Loose Pieces', 'family': 'Tactics', 'description': 'Create a new threat against enemy material and realize it in a near-term continuation.', 'priority': 84},
     {'key': 'capture_loose_piece', 'name': 'Capture Hanging Pieces', 'family': 'Tactics', 'description': 'Notice and capture an already-undefended enemy piece in the training position.', 'priority': 88},
@@ -242,6 +245,7 @@ def classify_learning_concepts(
     context = inspect_response(board, best_move, played_move, previous_fen, opponent_move_uci)
     root_evidence = immediate_decision(board, best_move, played_move, context)
     line = legal_pv(board, best_pv_uci, first_move=best_move)
+    best_repeats_with_checks = verified_check_repetition(board, line)
     fork = fork_evidence(board, best_move, best_pv_uci)
     variation = comparative_insight(board, best_move, played_move, best_pv_uci, played_pv_uci)
     decision = decision_facts(board, best_move, played_move, best_pv_uci, played_pv_uci)
@@ -271,6 +275,20 @@ def classify_learning_concepts(
         and after.is_capture(line[1]) and line[1].to_square == best_move.to_square)
     balanced_exchange = bool(exchanged_at_root and best_piece and captured_piece
         and abs(_piece_value(best_piece) - _piece_value(captured_piece)) <= 1)
+    # A recapture requires a legal enemy capture immediately before this
+    # decision, onto the precise square we are now capturing back.
+    root_recapture = False
+    if previous_fen and opponent_move_uci and best_is_capture:
+        try:
+            previous_board = chess.Board(previous_fen)
+            opponent_move = chess.Move.from_uci(opponent_move_uci)
+            if opponent_move in previous_board.legal_moves and previous_board.is_capture(opponent_move):
+                previous_board.push(opponent_move)
+                root_recapture = (opponent_move.to_square == best_move.to_square
+                                  and previous_board.board_fen() == board.board_fen()
+                                  and previous_board.turn == board.turn)
+        except (ValueError, TypeError):
+            pass
     moved_piece = after.piece_at(best_move.to_square)
     opponent_king = after.king(opponent)
 
@@ -701,6 +719,10 @@ def classify_learning_concepts(
             chosen = 'calculation'
             add(chosen, 0.64, 'Compare immediate checks, captures, and replies.')
 
+    if root_recapture:
+        add('recapture', 0.99,
+            f'{best_san} recaptures the enemy piece that just captured on '
+            f'{chess.square_name(best_move.to_square)}.')
     # Root facts that distinguish these two actual moves are higher-confidence
     # learning material than a tactical pattern appearing many plies later.
     # Verified mate and check defense remain higher-priority forced obligations.
@@ -924,6 +946,32 @@ def classify_learning_concepts(
                 min(0.99, 0.76 + 0.07 * leading_cause.confidence),
                 leading_cause.assessment)
             chosen = leading_cause.motif
+    if best_repeats_with_checks and not forced_primary and chosen != 'endgame_precision':
+        # This belongs to the SOLVING line, not a checking sequence in a
+        # refuted alternative. The PV proves the *sampled* repetition only.
+        add('perpetual_check', .97, 'The recommended line reaches a claimable threefold repetition after repeated checks; the line does not prove every defense draws.')
+        chosen = 'perpetual_check'
+    # Primary label is owned by the SOLVING move. A fork/discovery/skewer/pin
+    # appearing in a losing game variation belongs in learning commentary,
+    # unless the best move itself demonstrably creates that mechanism.
+    if chosen in {'fork', 'discovered_attack', 'skewer', 'pin'}:
+        owned = {'fork': bool(fork and fork.get('strong') and not exchanged_at_root),
+                 'discovered_attack': bool(discovered_verified and not exchanged_at_root),
+                 'skewer': bool('skewer' in labels and after.is_check()),
+                 'pin': bool(pin_refutations or relevant_pins)}
+        if not owned[chosen]:
+            substitute = next((key for key in (
+                'blocking' if blocking else None,
+                check_evasion['motif'] if check_evasion else None,
+                root_primary, concrete_primary, immediate_primary,
+                'defensive_resource', 'king_safety', 'exchange', 'calculation')
+                if key and key in labels and key not in {'fork', 'discovered_attack', 'skewer', 'pin'}), None)
+            if substitute:
+                chosen = substitute
+    if root_recapture and not forced_primary and not check_evasion:
+        # The move's immediate concrete purpose should beat tactical
+        # speculation about a separate losing continuation.
+        chosen = 'recapture'
     ordered = sorted(labels.values(), key=lambda label: (
         label.key != chosen, -relevance_scores.get(label.key, 0.0),
         -label.confidence, -CONCEPTS[label.key]['priority']))

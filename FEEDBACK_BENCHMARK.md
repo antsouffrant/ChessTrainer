@@ -230,3 +230,6 @@ independently.
 ## v73: Historical coaching versions in feedback
 
 The Coach version facet and version-filtered CSV now include historic `position_feedback.coaching_version` snapshots, even after `training_positions.coaching_version` is overwritten by a refresh. New chat ratings and taxonomy selections also store `coaching_version_at_vote`. All four feedback sources share `report_coaching_version`; `coaching_version_source` explains whether it was an actual snapshot or the mutable current-position fallback for pre-v73 legacy rows. The filter never recreates votes superseded by a later rating or taxonomy selection. Taxonomy change rates remain calculated against *current* solved-position classifications and do not imply historical per-version results.
+
+
+**v86 update:** The latest-per-item storage described in older sections is superseded by `docs/FEEDBACK_HISTORY_V86.md`. Report and CSV records are backed by durable, model-versioned, append-only feedback events. Coaching refresh never deletes these events; current approvals deduplicate to the latest vote on each rated item.

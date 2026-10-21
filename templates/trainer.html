@@ -6,7 +6,7 @@
   <div class="lesson-training-progress glass" id="lesson-training-progress" aria-label="Current playlist learning progress">
     <div class="lesson-training-progress-heading">
       <div class="lesson-training-progress-title">
-        <span class="lesson-progress-eyebrow" id="lesson-progress-heading">{{ 'Opening progress' if opening else 'Lesson progress' if lesson else 'Playlist progress' }}</span>
+        <span class="lesson-progress-eyebrow" id="lesson-progress-heading">{{ 'Evaluation progress' if evaluation_run_id else 'Opening progress' if opening else 'Lesson progress' if lesson else 'Playlist progress' }}</span>
         {% if lesson %}<span class="lesson-progress-name">{{ lesson.name }}</span>{% elif opening %}<span class="lesson-progress-name">{{ opening.name }}</span>{% endif %}
       </div>
       <div class="lesson-training-progress-summary" aria-live="polite">
@@ -59,6 +59,7 @@
             <span>Stockfish</span>
             <strong id="engine-eval">—</strong>
           </label>
+          <span id="illegal-move-alert" class="illegal-move-alert hidden" role="status" aria-live="polite"></span>
         </div>
         <button id="history-forward" class="history-button" type="button" title="Next move">→</button>
       </div>
@@ -155,7 +156,6 @@
       <p class="coach-panel-intro">Ask why a move works, test a continuation, or explore a learning motif. Stockfish and the same explanation engine used by the puzzle will help compare the possibilities. After solving, the coach may suggest a relevant classic or a strong move from your own games.</p>
       <div id="coach-concept-event" class="coach-concept-event hidden"></div>
       <div id="coach-chat" class="coach-chat" aria-live="polite">
-        <div id="coach-attempt-comments" class="coach-attempt-comments hidden" aria-label="Your attempted continuations"></div>
         <div id="coach-position-review" class="coach-message assistant coach-position-review hidden">
           <div class="coach-message-label">Coach · Solving continuation</div>
           <div id="explanation-feedback-area" class="rate-hover-zone explanation-feedback-area coach-message-body">
@@ -169,6 +169,7 @@
             </div>
           </div>
         </div>
+        <div id="coach-attempt-comments" class="coach-attempt-comments hidden" aria-label="Your attempted continuations"></div>
         <div class="coach-empty">Try: <em>“What about d6?”</em>, <em>“What if the knight blocks?”</em>, or <em>“I thought taking that pawn gives my king f2.”</em></div>
       </div>
       <form id="coach-form" class="coach-form coach-form-primary">
@@ -218,6 +219,7 @@
 </dialog>
 <script>
 window.TRAINER_JOB_ID = {{ job_id }};
+window.TRAINER_EVALUATION_RUN_ID = {{ evaluation_run_id|tojson }};
 window.TRAINER_CONCEPT = {{ concept_key|tojson }};
 window.TRAINER_OPENING = {{ opening_key|tojson }};
 window.TRAINER_VARIATION = {{ opening_variation|tojson }};

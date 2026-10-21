@@ -154,13 +154,28 @@ def describe_variation(board, raw, role, eval_cp=None, mate=None, depth=None,
     for i, move in enumerate(moves):
         san = replay.san(move)
         facts = board_events(replay, move, moves[i:])
-        plies.append({'ply': i, 'uci': move.uci(), 'san': san,
-                      'by_solver': replay.turn == board.turn,
-                      'effects': facts})
+        # A recapture is observable only relative to the PRECEDING ply. Do
+        # not call a capture a recapture merely because the target is guarded.
+        if (i and replay.is_capture(move) and move.to_square == moves[i-1].to_square
+                and any(event['kind'] in ('capture', 'recapture')
+                        for event in plies[-1]['effects'])):
+            victim = replay.piece_at(move.to_square)
+            if victim is not None:
+                facts = [event for event in facts if event['kind'] != 'capture']
+                facts.append({'kind': 'recapture', 'text':
+                    f'{san} recaptures the {chess.piece_name(victim.piece_type)} on '
+                    f'{chess.square_name(move.to_square)}', 'motif':'exchange',
+                    'piece':chess.piece_name(victim.piece_type), 'weight': 112})
         replay.push(move)
+        # Preserve board identity for checked repetitions. Repeated checks
+        # alone never justify claiming perpetual check or a drawn position.
+        plies.append({'ply': i, 'uci': move.uci(), 'san': san,
+                      'by_solver': replay.turn != board.turn,
+                      'effects': facts, 'fen_after': replay.fen(),
+                      'threefold_claimable': replay.can_claim_threefold_repetition()})
     return {'role': role, 'source': source, 'eval_cp': eval_cp, 'mate': mate,
             'depth': depth, 'root_uci': moves[0].uci() if moves else None,
-            'pv_uci': [m.uci() for m in moves], 'plies': plies}
+            'start_fen': board.fen(), 'pv_uci': [m.uci() for m in moves], 'plies': plies}
 
 
 

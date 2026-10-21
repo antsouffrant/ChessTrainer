@@ -431,6 +431,148 @@ CREATE INDEX IF NOT EXISTS idx_continuation_feedback_account
 ON continuation_explanation_feedback(account_id, rating, updated_at);
 
 
+-- v86 durable feedback dictionaries: never cascade from ephemeral coach data.
+CREATE TABLE IF NOT EXISTS feedback_positions (
+    position_key TEXT PRIMARY KEY,
+    account_id INTEGER NOT NULL,
+    provider TEXT NOT NULL,
+    username TEXT NOT NULL,
+    game_id TEXT NOT NULL,
+    source_job_id INTEGER,
+    ply INTEGER,
+    fen TEXT,
+    board_identity TEXT NOT NULL,
+    user_color TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS feedback_position_sources (
+    position_id INTEGER PRIMARY KEY,
+    position_key TEXT NOT NULL REFERENCES feedback_positions(position_key)
+);
+CREATE INDEX IF NOT EXISTS idx_feedback_position_sources_key ON feedback_position_sources(position_key);
+CREATE TABLE IF NOT EXISTS feedback_continuations (
+    continuation_id TEXT PRIMARY KEY,
+    position_key TEXT NOT NULL REFERENCES feedback_positions(position_key),
+    move_key TEXT NOT NULL,
+    UNIQUE(position_key, move_key)
+);
+-- A fact table independent of coach_messages and training_positions deletion.
+-- 0 is an explicit withdrawal event, not an unrated position.
+CREATE TABLE IF NOT EXISTS feedback_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    position_key TEXT NOT NULL REFERENCES feedback_positions(position_key),
+    continuation_id TEXT REFERENCES feedback_continuations(continuation_id),
+    source_position_id INTEGER NOT NULL,
+    account_id INTEGER NOT NULL,
+    feedback_type TEXT NOT NULL,
+    evaluation_run_id INTEGER REFERENCES evaluation_runs(id) ON DELETE SET NULL,
+    rating INTEGER NOT NULL CHECK(rating IN (-1,0,1)),
+    lesson_key TEXT,
+    content_snapshot TEXT,
+    coaching_version TEXT,
+    classifier_version TEXT,
+    taxonomy_version TEXT,
+    suggested_text TEXT,
+    suggested_motif_key TEXT,
+    model_key TEXT,
+    selected_key TEXT,
+    source_message_id INTEGER,
+    chat_user_message TEXT,
+    chat_structured_json TEXT,
+    source TEXT NOT NULL DEFAULT 'vote',
+    source_reference TEXT UNIQUE,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_feedback_events_position ON feedback_events(position_key,id DESC);
+CREATE INDEX IF NOT EXISTS idx_feedback_events_version ON feedback_events(coaching_version,feedback_type,rating);
+CREATE INDEX IF NOT EXISTS idx_feedback_events_source ON feedback_events(source_position_id,id DESC);
+
+
+-- Frozen apples-to-apples coaching cohort: never redraw on a refresh.
+CREATE TABLE IF NOT EXISTS coach_benchmark_cohorts (
+    job_id INTEGER PRIMARY KEY REFERENCES analysis_jobs(id) ON DELETE CASCADE,
+    selection_version TEXT NOT NULL DEFAULT 'v1-stratified-hash',
+    source_count INTEGER NOT NULL,
+    sample_size INTEGER NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS coach_benchmark_positions (
+    job_id INTEGER NOT NULL REFERENCES coach_benchmark_cohorts(job_id) ON DELETE CASCADE,
+    position_id INTEGER NOT NULL,
+    ordinal INTEGER NOT NULL,
+    fen TEXT NOT NULL,
+    category TEXT NOT NULL,
+    learning_mode TEXT NOT NULL,
+    PRIMARY KEY(job_id,position_id), UNIQUE(job_id,ordinal)
+);
+-- Version-scoped, evidence-fingerprinted coaching text cache. This table is
+-- derived and disposable; feedback_events and benchmark snapshots are not.
+CREATE TABLE IF NOT EXISTS coaching_explanation_cache (
+    position_id INTEGER NOT NULL REFERENCES training_positions(id) ON DELETE CASCADE,
+    coaching_version TEXT NOT NULL,
+    evidence_fingerprint TEXT NOT NULL,
+    coach_prompt TEXT NOT NULL,
+    coach_explanation TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY(position_id, coaching_version, evidence_fingerprint)
+);
+CREATE INDEX IF NOT EXISTS idx_coaching_explanation_cache_version
+    ON coaching_explanation_cache(coaching_version);
+
+CREATE TABLE IF NOT EXISTS coach_benchmark_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id INTEGER NOT NULL REFERENCES coach_benchmark_cohorts(job_id) ON DELETE CASCADE,
+    coaching_version TEXT NOT NULL,
+    taxonomy_version TEXT NOT NULL,
+    expected_positions INTEGER NOT NULL,
+    captured_positions INTEGER NOT NULL,
+    completed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(job_id,coaching_version)
+);
+CREATE TABLE IF NOT EXISTS coach_benchmark_snapshots (
+    run_id INTEGER NOT NULL REFERENCES coach_benchmark_runs(id) ON DELETE CASCADE,
+    position_id INTEGER NOT NULL,
+    explanation TEXT,
+    coach_prompt TEXT,
+    motif_key TEXT,
+    context_key TEXT,
+    move_type_key TEXT,
+    PRIMARY KEY(run_id,position_id)
+);
+CREATE INDEX IF NOT EXISTS idx_coach_benchmark_positions_order
+    ON coach_benchmark_positions(job_id,ordinal);
+
+-- Independent evaluation sessions. Neither global training_positions.learned
+-- nor coach cache deletion determines the status of an evaluation position.
+CREATE TABLE IF NOT EXISTS evaluation_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id INTEGER NOT NULL REFERENCES analysis_jobs(id) ON DELETE CASCADE,
+    benchmark_run_id INTEGER NOT NULL REFERENCES coach_benchmark_runs(id) ON DELETE CASCADE,
+    coaching_version TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    completed_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_evaluation_runs_job ON evaluation_runs(job_id,id);
+CREATE TABLE IF NOT EXISTS evaluation_run_positions (
+    run_id INTEGER NOT NULL REFERENCES evaluation_runs(id) ON DELETE CASCADE,
+    position_id INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    solved_at TEXT,
+    PRIMARY KEY(run_id,position_id)
+);
+CREATE TABLE IF NOT EXISTS evaluation_attempts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id INTEGER NOT NULL REFERENCES evaluation_runs(id) ON DELETE CASCADE,
+    position_id INTEGER NOT NULL,
+    move_uci TEXT NOT NULL,
+    correct INTEGER NOT NULL CHECK(correct IN (0,1)),
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(run_id,position_id) REFERENCES evaluation_run_positions(run_id,position_id)
+);
+CREATE INDEX IF NOT EXISTS idx_evaluation_attempts_run ON evaluation_attempts(run_id,position_id);
+
 -- Activity history is append-only across manual puzzle resets. The first
 -- legal training attempt creates a session; merely showing a puzzle does not.
 CREATE TABLE IF NOT EXISTS player_solve_sessions (
@@ -543,6 +685,9 @@ def init_db():
     with connect() as conn:
         conn.executescript(SCHEMA)
 
+        if 'evaluation_run_id' not in _columns(conn, 'feedback_events'):
+            conn.execute('ALTER TABLE feedback_events ADD COLUMN evaluation_run_id INTEGER')
+
         # Store the Stockfish PV already computed when verifying an attempted move.
         # This is a lightweight additive migration; no deep reanalysis.
         if 'verified_pv_json' not in _columns(conn, 'coach_board_attempts'):
@@ -557,6 +702,16 @@ def init_db():
             conn.execute('ALTER TABLE coach_message_feedback ADD COLUMN coaching_version_at_vote TEXT')
         if 'coaching_version_at_vote' not in _columns(conn, 'position_taxonomy_feedback'):
             conn.execute('ALTER TABLE position_taxonomy_feedback ADD COLUMN coaching_version_at_vote TEXT')
+        # Defensive additive migration for incomplete experimental ledgers or
+        # databases built from historical schemas. Never drop event records.
+        for table, columns in {
+            'feedback_events': ('suggested_text', 'suggested_motif_key', 'lesson_key',
+                                'chat_user_message', 'chat_structured_json'),
+        }.items():
+            known = _columns(conn, table)
+            for column in columns:
+                if column not in known:
+                    conn.execute(f'ALTER TABLE {table} ADD COLUMN {column} TEXT')
 
         if 'perf_json' not in _columns(conn, 'retrieval_processes'):
             conn.execute('ALTER TABLE retrieval_processes ADD COLUMN perf_json TEXT')
@@ -743,4 +898,12 @@ def init_db():
             GROUP BY j.account_id, tp.game_id
         ''')
 
+        # One-time v85 -> v86 migration. Never reimport the mutable compatibility
+        # projections on later starts: doing so would invent duplicate votes.
+        migrated = conn.execute("SELECT 1 FROM app_settings WHERE key='feedback_ledger_v86_migrated'").fetchone()
+        if not migrated:
+            from feedback_history import migrate_legacy_feedback
+            migrate_legacy_feedback(conn)
+            conn.execute("""INSERT INTO app_settings(key,value) VALUES
+                ('feedback_ledger_v86_migrated','1')""")
         conn.commit()

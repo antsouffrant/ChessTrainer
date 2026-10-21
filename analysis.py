@@ -784,7 +784,7 @@ def copy_cached_positions(conn, account_id, game_id, source_job_id, target_job_i
     return copied
 
 
-def _refresh_position_labels(conn, position_id, row_or_values):
+def _refresh_position_labels(conn, position_id, row_or_values, *, regenerate_copy=True):
     """Replace labels and coaching text for one position using current rules."""
     try:
         fen = row_or_values['fen']
@@ -864,7 +864,13 @@ def _refresh_position_labels(conn, position_id, row_or_values):
         pass
 
     from coaching_taxonomy import normalize_learning_labels
-    labels = normalize_learning_labels(labels, row_or_values)
+    king_evasion = (board.is_check() and best in board.legal_moves
+                    and board.piece_at(best.from_square) is not None
+                    and board.piece_at(best.from_square).piece_type == chess.KING
+                    and not board.is_capture(best))
+    labels = normalize_learning_labels(labels, row_or_values,
+                                       is_in_check=board.is_check(),
+                                       best_is_king_evasion=king_evasion)
 
     conn.execute('DELETE FROM position_concepts WHERE position_id = ?', (position_id,))
     for label in labels:
@@ -911,6 +917,9 @@ def _refresh_position_labels(conn, position_id, row_or_values):
         apply_adaptive_concepts_to_position(conn, position_id)
     except Exception:
         pass
+
+    if not regenerate_copy:
+        return
 
     try:
         prompt, explanation = generate_coaching_text(

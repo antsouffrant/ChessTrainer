@@ -14,6 +14,21 @@
       <a class="primary-button analytics-download" id="analytics-export" href="/api/analytics/feedback.csv" download="chess_coaching_feedback.csv"><i class="fa-solid fa-download" aria-hidden="true"></i> Download CSV</a>
     </div>
   </header>
+  <section class="glass coach-benchmark-panel" id="model-benchmark-panel" aria-label="Fixed-cohort coaching model comparisons">
+    <div class="coach-benchmark-heading">
+      <div><span class="eyebrow">FIXED-POSITION BENCHMARK</span><h2>Coaching model comparison</h2>
+        <p class="muted">Compare explanation, motif, context and move-type changes on identical saved positions. Approval is shown separately on identically rated continuations.</p></div>
+      <a class="secondary-button" href="/processes">Manage evaluations →</a>
+    </div>
+    <div class="coach-benchmark-controls">
+      <label>Game list<select id="benchmark-job" aria-label="Benchmark game list"><option value="">Choose a game list</option></select></label>
+      <label>Model A · Baseline<select id="benchmark-model-a" aria-label="Baseline coaching model"></select></label>
+      <label>Compare against<select id="benchmark-model-b" aria-label="Comparison coaching model"><option value="all">All other models</option></select></label>
+    </div>
+    <div id="benchmark-chart-note" class="muted" role="status">Loading fixed benchmarks…</div>
+    <div id="benchmark-model-chart" role="region" aria-live="polite" aria-label="Model comparison chart"></div>
+    <p class="muted coach-benchmark-footnote">Explanation and motif <strong>change rates</strong> measure differences between stored model outputs, not user-reported errors. A changed explanation is not necessarily an improvement. Approval uses only explicitly rated, matched position–continuation pairs. Unrated positions are excluded from approval denominators, never treated as negative feedback.</p>
+  </section>
   <form id="analytics-filters" class="analytics-filters glass" aria-label="Feedback data filters">
     <div class="analytics-filter-heading"><h2>Explore feedback</h2><button type="reset" class="secondary-button">Clear filters</button></div>
     <div class="analytics-filter-grid">
@@ -36,14 +51,15 @@
       <label>Explanation continuation<select name="continuation_scope">
         <option value="">All records / continuations</option>
         <option value="solving">Solving continuation</option>
-        <option value="attempted">Earlier attempts and game moves</option>
+        <option value="attempted">Attempted moves</option>
+        <option value="game">Original-game moves</option>
       </select></label>
       <label>Feedback records<select name="rating"><option value="">All records</option><option value="1">Thumbs up / selected original</option><option value="-1">Thumbs down / selected alternative</option></select></label>
       <label>Coach version (rated or current)<select name="coaching_version"><option value="">All versions</option></select></label>
       <label>Position category<select name="position_category"><option value="">All categories</option></select></label>
     </div>
   </form>
-  <p id="coach-reset-note" class="muted" role="status">Reset feedback clears thumbs and taxonomy selections. Restart Analysis also deletes feedback for that game list. Export your regression candidates before either reset.</p>
+  <p id="coach-reset-note" class="muted" role="status">Reset feedback explicitly deletes both current thumbs and the immutable feedback history, including earlier model versions. Clearing the coaching cache does not delete feedback. Export your feedback before using Reset feedback.</p>
   <p id="analytics-error" class="analytics-error hidden" role="alert"></p>
   <div id="analytics-loading" class="muted" role="status">Loading saved feedback…</div>
   <div id="analytics-results" class="hidden">
@@ -107,4 +123,5 @@
   </div>
 </section>
 <script src="{{ url_for('static', filename='analytics.js') }}"></script>
+<script src="{{ url_for('static', filename='benchmark_chart.js') }}"></script>
 {% endblock %}

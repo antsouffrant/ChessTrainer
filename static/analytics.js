@@ -172,7 +172,7 @@
       loadedFacets = false;
       await update();
       document.getElementById('coach-reset-note').textContent =
-        `Feedback reset: ${fmt(body.deleted.position_explanation_motif + (body.deleted.continuation_explanations || 0) + body.deleted.chat_coaching + (body.deleted.taxonomy_selections || 0))} records deleted. Analysis and positions were kept.`;
+        `Feedback reset: ${fmt(body.deleted.feedback_history_events ?? (body.deleted.position_explanation_motif + (body.deleted.continuation_explanations || 0) + body.deleted.chat_coaching + (body.deleted.taxonomy_selections || 0)))} records deleted. Analysis and positions were kept.`;
     } catch (err) {
       error.textContent = err.message;
       error.classList.remove('hidden');

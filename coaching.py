@@ -15,7 +15,7 @@ from pv_reasoning import comparative_insight, fork_evidence, legal_pv
 from narrative_editor import mate_explanation, polish_comparison, concise
 from semantic_coaching import causal_coaching
 
-COACHING_VERSION = 'rules-v30-clean-taxonomy-outcomes'
+COACHING_VERSION = 'rules-v34-version-scoped-cache'
 
 PIECE_NAMES = {
     chess.PAWN: 'pawn',
