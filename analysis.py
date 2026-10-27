@@ -18,12 +18,13 @@ import requests
 
 from db import connect
 from app_settings import DEFAULT_SETTINGS, analysis_signature, settings_from_snapshot
-from coaching import COACHING_VERSION, generate_coaching_text
+from coaching.narrative_composition.coaching import COACHING_VERSION
+from coaching.narrative_composition import explain_position as generate_coaching_text
 from learning import CLASSIFIER_VERSION, LearningLabel, classify_learning_concepts
-from adaptive_coach import apply_adaptive_concepts_to_position
-from pv_reasoning import encode_pv
-from critical_moments import critical_decision_evidence
-from explanatory_evidence import explanation_variations
+from coaching.narrative_composition.adaptive_coach import apply_adaptive_concepts_to_position
+from coaching.board_context.pv_reasoning import encode_pv
+from coaching.conceptual_understanding.critical_moments import critical_decision_evidence
+from coaching.board_context.explanatory_evidence import explanation_variations
 
 # Compatibility aliases for older imports. Runtime analysis uses the persisted
 # settings snapshot attached to each analysis job.
@@ -816,7 +817,7 @@ def _refresh_position_labels(conn, position_id, row_or_values, *, regenerate_cop
     # incidental later geometry (e.g. Qxd4 also happens to fork two targets).
     try:
         from learning import LearningLabel
-        from critical_moments import decode_critical_evidence
+        from coaching.conceptual_understanding.critical_moments import decode_critical_evidence
         evidence = decode_critical_evidence(row_or_values['critical_events_json'])
         if (evidence and evidence.get('kind')
                 and evidence.get('critical_ply') is not None
@@ -829,7 +830,7 @@ def _refresh_position_labels(conn, position_id, row_or_values, *, regenerate_cop
             new_key = evidence.get('motif')
             from learning import CONCEPTS
             if new_key in CONCEPTS:
-                from motif_hierarchy import BROAD_FALLBACKS, ancestors
+                from coaching.motif_selection.motif_hierarchy import BROAD_FALLBACKS, ancestors
                 current_primary = next((x.key for x in labels if x.is_primary), None)
                 # Do not undo the hierarchy-selected, concrete primary motif
                 # just because a generic material loss is annotated later.
@@ -841,7 +842,7 @@ def _refresh_position_labels(conn, position_id, row_or_values, *, regenerate_cop
             if new_key in CONCEPTS:
                 current = next((label for label in labels if label.key == new_key), None)
                 if current is None:
-                    from coaching_language import game_continuation
+                    from coaching.narrative_composition.coaching_language import game_continuation
                     wording = (game_continuation(evidence.get('played_move'),
                                evidence.get('critical_move'), 'win material',
                                ply=evidence.get('critical_ply') or 2)
@@ -856,14 +857,14 @@ def _refresh_position_labels(conn, position_id, row_or_values, *, regenerate_cop
     # The same evidence-selection policy is applied by the offline benchmark
     # and the live proactive coaching pass.
     try:
-        from proactive_coaching import prefer_evidenced_primary
+        from coaching.board_context.proactive_coaching import prefer_evidenced_primary
         probe_json = (row_or_values['proactive_coach_json']
                       if 'proactive_coach_json' in row_or_values.keys() else None)
         labels = prefer_evidenced_primary(board, labels, probe_json)
     except (TypeError, ValueError, KeyError, AttributeError):
         pass
 
-    from coaching_taxonomy import normalize_learning_labels
+    from coaching.motif_selection.coaching_taxonomy import normalize_learning_labels
     king_evasion = (board.is_check() and best in board.legal_moves
                     and board.piece_at(best.from_square) is not None
                     and board.piece_at(best.from_square).piece_type == chess.KING
@@ -887,9 +888,9 @@ def _refresh_position_labels(conn, position_id, row_or_values, *, regenerate_cop
     # Store the teaching hierarchy separately from the flat detector labels.
     # The primary lesson key stays stable for Coach votes, progress and tiles.
     try:
-        from coaching_taxonomy import save_taxonomy
-        from decision_context import decision_facts
-        from loose_piece_provenance import confirmed_differential_loss
+        from coaching.motif_selection.coaching_taxonomy import save_taxonomy
+        from coaching.conceptual_understanding.decision_context import decision_facts
+        from coaching.board_context.loose_piece_provenance import confirmed_differential_loss
         # The context can be defensive even when the *move itself* attacks:
         # a fork may be the correct counterattack to avert a material loss.
         differential = decision_facts(
@@ -1530,7 +1531,7 @@ def _run_analysis_job(job_id: int):
                     if confirmed:
                         for candidate in choose_distinct_positions(confirmed, settings):
                             if settings.get('coaching_probe_enabled', True):
-                                from proactive_coaching import probe_training_position
+                                from coaching.board_context.proactive_coaching import probe_training_position
                                 root = candidate['board']
                                 before = candidate['before']
                                 comparison = candidate['played_move']

@@ -22,7 +22,8 @@ def _safe_seconds(value):
 
 
 def record_attempt(conn, row, *, move_uci, correct, elapsed_seconds=None,
-                   lesson_key=None, opening_key=None, max_solve_seconds=300):
+                   lesson_key=None, opening_key=None, max_solve_seconds=300,
+                   evaluation_run_id=None):
     """Append a legal attempt and update the current session atomically.
 
     Call within the same transaction as training_positions.attempts updates.
@@ -31,8 +32,9 @@ def record_attempt(conn, row, *, move_uci, correct, elapsed_seconds=None,
     position_id = int(row['id'])
     session = conn.execute('''
         SELECT * FROM player_solve_sessions
-        WHERE position_id=? AND solved_at IS NULL AND abandoned_at IS NULL ORDER BY id DESC LIMIT 1
-    ''', (position_id,)).fetchone()
+        WHERE position_id=? AND evaluation_run_id IS ?
+          AND solved_at IS NULL AND abandoned_at IS NULL ORDER BY id DESC LIMIT 1
+    ''', (position_id, evaluation_run_id)).fetchone()
     if session is None:
         motif = conn.execute('''
             SELECT concept_key FROM position_concepts
@@ -41,13 +43,14 @@ def record_attempt(conn, row, *, move_uci, correct, elapsed_seconds=None,
         cur = conn.execute('''
             INSERT INTO player_solve_sessions (
                 position_id, account_id, job_id, game_id, opening_key,
-                opening_name, primary_motif_key, learning_mode, lesson_key, attempts,
-                max_solve_seconds
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
+                opening_name, primary_motif_key, learning_mode, lesson_key,
+                evaluation_run_id, attempts, max_solve_seconds
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
         ''', (position_id, row['account_id'], row['job_id'], row['game_id'],
               opening_key or row['opening_key'], row['opening_name'],
               motif['concept_key'] if motif else None, row['learning_mode'],
-              (lesson_key or '').strip() or None, float(max_solve_seconds)))
+              (lesson_key or '').strip() or None, evaluation_run_id,
+              float(max_solve_seconds)))
         session_id = cur.lastrowid
         previous_attempts = 0
         previous_seconds = 0.0
@@ -88,12 +91,13 @@ def record_attempt(conn, row, *, move_uci, correct, elapsed_seconds=None,
             'first_try_solved': bool(correct and attempt_number == 1)}
 
 
-def abandon_session(conn, position_id):
+def abandon_session(conn, position_id, evaluation_run_id=None):
     """Explicitly reset/retire an incomplete attempt cycle, preserving history."""
     conn.execute(
         "UPDATE player_solve_sessions SET abandoned_at=CURRENT_TIMESTAMP "
-        "WHERE position_id=? AND solved_at IS NULL AND abandoned_at IS NULL",
-        (int(position_id),),
+        "WHERE position_id=? AND evaluation_run_id IS ? "
+        "AND solved_at IS NULL AND abandoned_at IS NULL",
+        (int(position_id), evaluation_run_id),
     )
 
 
@@ -124,17 +128,15 @@ def _filters(args):
         ('job_id', 'tp.job_id'), ('position_id', 'tp.id'), ('opening_key', 'tp.opening_key'),
         ('primary_motif_key', 'pc.concept_key'), ('learning_mode', 'tp.learning_mode'),
     ):
-        value = str(args.get(key, '') or '').strip()
-        if not value:
+        raw = args.getlist(key) if hasattr(args, 'getlist') else args.get(key, [])
+        values = raw if isinstance(raw, (list, tuple)) else [raw]
+        values = list(dict.fromkeys(str(v).strip() for v in values if v is not None and str(v).strip()))[:100]
+        if key in ('job_id','position_id'):
+            values = [int(v) for v in values if v.isdecimal() and int(v)>0]
+        if not values:
             continue
-        if key in ('job_id', 'position_id'):
-            try:
-                value = int(value)
-                if value <= 0: continue
-            except ValueError:
-                continue
-        clauses.append(f'{expr}=?')
-        params.append(value)
+        clauses.append(f"{expr} IN ({','.join('?' for _ in values)})")
+        params.extend(values)
     return (' AND '.join(clauses) if clauses else '1=1'), params
 
 

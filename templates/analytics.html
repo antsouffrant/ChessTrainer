@@ -5,41 +5,28 @@
 <section id="feedback-analytics" class="analytics-hub" aria-label="Coaching feedback analytics">
   <header class="analytics-hero glass">
     <div><span class="eyebrow">COACH · LEARNING QUALITY</span><h1>Coaching feedback</h1>
-      <p class="muted">Review position and explanation approval, taxonomy changes, and retained chat ratings, together with editable context, move-type and learning-motif selections. All three taxonomy selections are saved independently; corrections become regression candidates; unchanged solved positions are counted in change-rate denominators even without dropdown feedback.</p>
+      <p class="muted">Review position and explanation approval, taxonomy changes, and retained chat ratings, together with editable context, move-type and learning-motif selections. All three taxonomy selections are saved independently; corrections become regression candidates; ordinary learned positions and current authoritative evaluation positions contribute to change-rate denominators even without dropdown feedback.</p>
     </div>
     <div class="coach-actions">
+      <a class="secondary-button" href="{{ url_for('coach_benchmark_view') }}"><i class="fa-solid fa-chart-column" aria-hidden="true"></i> Model comparisons →</a>
       <button type="button" id="coach-reset-feedback" class="secondary-button coach-reset-feedback"><i class="fa-solid fa-trash-can" aria-hidden="true"></i> Reset feedback</button>
       <a class="secondary-button analytics-download" id="coach-regression-export" href="/api/coach/regression.csv" download="chess_regression_candidates.csv"><i class="fa-solid fa-flask" aria-hidden="true"></i> Regression candidates</a>
       <a class="secondary-button analytics-download" id="coach-taxonomy-export" href="/api/coach/taxonomy.csv" download="chess_coaching_taxonomy.csv"><i class="fa-solid fa-table" aria-hidden="true"></i> Taxonomy CSV</a>
       <a class="primary-button analytics-download" id="analytics-export" href="/api/analytics/feedback.csv" download="chess_coaching_feedback.csv"><i class="fa-solid fa-download" aria-hidden="true"></i> Download CSV</a>
     </div>
   </header>
-  <section class="glass coach-benchmark-panel" id="model-benchmark-panel" aria-label="Fixed-cohort coaching model comparisons">
-    <div class="coach-benchmark-heading">
-      <div><span class="eyebrow">FIXED-POSITION BENCHMARK</span><h2>Coaching model comparison</h2>
-        <p class="muted">Compare explanation, motif, context and move-type changes on identical saved positions. Approval is shown separately on identically rated continuations.</p></div>
-      <a class="secondary-button" href="/processes">Manage evaluations →</a>
-    </div>
-    <div class="coach-benchmark-controls">
-      <label>Game list<select id="benchmark-job" aria-label="Benchmark game list"><option value="">Choose a game list</option></select></label>
-      <label>Model A · Baseline<select id="benchmark-model-a" aria-label="Baseline coaching model"></select></label>
-      <label>Compare against<select id="benchmark-model-b" aria-label="Comparison coaching model"><option value="all">All other models</option></select></label>
-    </div>
-    <div id="benchmark-chart-note" class="muted" role="status">Loading fixed benchmarks…</div>
-    <div id="benchmark-model-chart" role="region" aria-live="polite" aria-label="Model comparison chart"></div>
-    <p class="muted coach-benchmark-footnote">Explanation and motif <strong>change rates</strong> measure differences between stored model outputs, not user-reported errors. A changed explanation is not necessarily an improvement. Approval uses only explicitly rated, matched position–continuation pairs. Unrated positions are excluded from approval denominators, never treated as negative feedback.</p>
-  </section>
+
   <form id="analytics-filters" class="analytics-filters glass" aria-label="Feedback data filters">
     <div class="analytics-filter-heading"><h2>Explore feedback</h2><button type="reset" class="secondary-button">Clear filters</button></div>
     <div class="analytics-filter-grid">
-      <label>Game list<select name="job_id"><option value="">All game lists</option></select></label>
-      <label>Lesson<select name="lesson_key"><option value="">All lessons</option></select></label>
-      <label>Opening<select name="opening_key"><option value="">All openings</option></select></label>
-      <label>Primary learning motif<select name="primary_motif_key"><option value="">All motifs</option></select></label>
-      <label>Position context<select name="current_context_key"><option value="">All contexts</option></select></label>
-      <label>Move type<select name="current_move_type_key"><option value="">All move types</option></select></label>
-      <label>Learning mode<select name="learning_mode"><option value="">All modes</option></select></label>
-      <label>Feedback record type<select name="feedback_type">
+      <label>Game list<select name="job_id" data-multiselect><option value="">All game lists</option></select></label>
+      <label>Lesson<select name="lesson_key" data-multiselect><option value="">All lessons</option></select></label>
+      <label>Opening<select name="opening_key" data-multiselect><option value="">All openings</option></select></label>
+      <label>Primary learning motif<select name="primary_motif_key" data-multiselect><option value="">All motifs</option></select></label>
+      <label>Position context<select name="current_context_key" data-multiselect><option value="">All contexts</option></select></label>
+      <label>Move type<select name="current_move_type_key" data-multiselect><option value="">All move types</option></select></label>
+      <label>Learning mode<select name="learning_mode" data-multiselect><option value="">All modes</option></select></label>
+      <label>Feedback record type<select name="feedback_type" data-multiselect>
         <option value="">All feedback areas</option>
         <option value="position">Training positions</option>
         <option value="explanation">Explanations</option>
@@ -48,15 +35,15 @@
         <option value="taxonomy_motif">Learning motif selections</option>
         <option value="coaching">Chat coaching</option>
       </select></label>
-      <label>Explanation continuation<select name="continuation_scope">
+      <label>Explanation continuation<select name="continuation_scope" data-multiselect>
         <option value="">All records / continuations</option>
         <option value="solving">Solving continuation</option>
         <option value="attempted">Attempted moves</option>
         <option value="game">Original-game moves</option>
       </select></label>
-      <label>Feedback records<select name="rating"><option value="">All records</option><option value="1">Thumbs up / selected original</option><option value="-1">Thumbs down / selected alternative</option></select></label>
-      <label>Coach version (rated or current)<select name="coaching_version"><option value="">All versions</option></select></label>
-      <label>Position category<select name="position_category"><option value="">All categories</option></select></label>
+      <label>Feedback records<select name="rating" data-multiselect><option value="">All records</option><option value="1">Thumbs up / selected original</option><option value="-1">Thumbs down / selected alternative</option></select></label>
+      <label>Coach version (rated or current)<select name="coaching_version" data-multiselect><option value="">All versions</option></select></label>
+      <label>Position category<select name="position_category" data-multiselect><option value="">All categories</option></select></label>
     </div>
   </form>
   <p id="coach-reset-note" class="muted" role="status">Reset feedback explicitly deletes both current thumbs and the immutable feedback history, including earlier model versions. Clearing the coaching cache does not delete feedback. Export your feedback before using Reset feedback.</p>
@@ -71,10 +58,10 @@
       <article class="analytics-score glass" data-score="taxonomy_move_type"><span>Move type · change rate</span><strong>—</strong><small>0 of 0 solved positions changed</small><div class="analytics-score-track"><span></span></div></article>
       <article class="analytics-score glass" data-score="taxonomy_motif"><span>Learning motif · change rate</span><strong>—</strong><small>0 of 0 solved positions changed</small><div class="analytics-score-track"><span></span></div></article>
     </section>
-    <p class="analytics-summary-note muted">Headline approval rates are rating-based; most category approval charts count distinct rated positions. The continuation/message breakdown instead counts individually rated messages, so the solving line and each attempted move remain independent. Historical-version filters apply to feedback recorded under that version; the three taxonomy change-rate cards always describe the current solved-position classifications, not historical reconstructed predictions. Taxonomy change rate = solved positions whose current selected label differs from the current coach label ÷ all solved positions in the selected game-list/position filters. Untouched positions and selections changed back to the coach label count as unchanged. Approval rate = thumbs-up ratings ÷ all thumbs ratings in that area. Taxonomy change is a separate current-position metric; neither rate implies the other. Feedback-type and rating filters do not change the solved-position denominator.</p>
+    <p class="analytics-summary-note muted">Headline approval rates are rating-based; most category approval charts count distinct rated positions. The continuation/message breakdown instead counts individually rated messages, so the solving line and each attempted move remain independent. Historical-version filters use saved evaluation snapshots for evaluations and current classifications for ordinary training. The three taxonomy change-rate cards include evaluation corrections, which are stored separately from ordinary training choices. Taxonomy change rate = solved positions whose current selected label differs from the current coach label ÷ all solved ordinary-training or authoritative-evaluation position/model observations in the selected filters. Untouched positions and selections changed back to the coach label count as unchanged. Approval rate = thumbs-up ratings ÷ all thumbs ratings in that area. Taxonomy change is a separate current-position metric; neither rate implies the other. Feedback-type and rating filters do not change the solved-position denominator.</p>
     <section class="glass analytics-table-panel coach-metric-panel" aria-label="Taxonomy change rates by category">
       <div class="coach-metric-heading">
-        <div><h2>Changes · Change rate</h2><p class="muted">Percentage of solved positions with any context, move-type, or learning-motif correction. Each position counts once.</p></div>
+        <div><h2>Changes · Change rate</h2><p class="muted">Percentage of solved positions with any context, move-type, or learning-motif correction. Each position/model judgment counts once; an ordinary solve and evaluation under the same model are not double-counted.</p></div>
         <label class="coach-chart-category">Group by
           <select id="coach-changes-group" aria-label="Group taxonomy changes by">
             <option value="motif">Primary learning motif</option>
@@ -122,6 +109,7 @@
     <section class="glass analytics-table-panel analytics-records-panel"><div class="analytics-records-heading"><div><h2>Recent feedback</h2><p class="muted">Up to 80 recent ratings. CSV exports every matching rating, its original feedback snapshot, current coaching text, FEN, Stockfish lines, evaluation, motifs, and version metadata for reproducible review.</p></div><span id="analytics-record-count" class="eyebrow"></span></div><div class="analytics-table-scroll"><table class="analytics-table" id="analytics-records"><thead><tr><th>Type</th><th>Feedback</th><th>Selected label / correction</th><th>Game list</th><th>Lesson / motif</th><th>Opening</th><th>Position</th><th>Updated</th></tr></thead><tbody></tbody></table></div></section>
   </div>
 </section>
+<script src="{{ url_for('static', filename='multiselect.js') }}"></script>
 <script src="{{ url_for('static', filename='analytics.js') }}"></script>
-<script src="{{ url_for('static', filename='benchmark_chart.js') }}"></script>
+
 {% endblock %}

@@ -62,19 +62,6 @@ function renderLessons(lessons) {
   });
 }
 
-async function toggleLessonAnalysis() {
-  const button = document.getElementById('lesson-pause-button');
-  if (!button) return;
-  const action = button.dataset.action || 'pause';
-  button.disabled = true;
-  try {
-    const response = await fetch(`/api/jobs/${lessonJobId}/${action}`, {method:'POST'});
-    const result = await response.json();
-    if (!response.ok) throw new Error(result.error || `Could not ${action} analysis`);
-    await refreshLessonPage();
-  } catch (error) { window.alert(error.message || 'Could not update analysis state.'); }
-  finally { button.disabled = false; }
-}
 
 async function refreshLessonPage() {
   const [jobResponse, lessonResponse] = await Promise.all([
@@ -84,8 +71,8 @@ async function refreshLessonPage() {
   const lessons = await lessonResponse.json();
 
   document.getElementById('lesson-total').textContent = fmtCount(job.games_retrieved ?? 0);
-  document.getElementById('lesson-screened').textContent = fmtCount(job.games_screened ?? 0);
-  document.getElementById('lesson-analyzed').textContent = fmtCount(job.positions_analyzed ?? 0);
+  document.getElementById('lesson-lessons').textContent = fmtCount(lessons.length);
+  document.getElementById('lesson-mistake-pct').textContent = `${job.mistake_pct ?? 0}%`;
   document.getElementById('lesson-training').textContent = fmtCount(job.training_positions ?? 0);
   document.getElementById('lesson-learned').textContent = fmtCount(job.learned_positions ?? 0);
   document.getElementById('lesson-learned-pct').textContent = `${job.learned_pct ?? 0}%`;

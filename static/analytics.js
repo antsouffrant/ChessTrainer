@@ -22,11 +22,14 @@
   function fillFacet(name, items) {
     const select = form.elements[name];
     if (!select) return;
-    const prior = select.value;
+    const prior = new Set([...select.selectedOptions].map(o => o.value).filter(Boolean));
     const first = select.options[0]?.textContent || 'All';
     select.replaceChildren(new Option(first, ''));
-    for (const item of items || []) select.add(new Option(item.label, String(item.value)));
-    if ([...select.options].some(o => o.value === prior)) select.value = prior;
+    for (const item of items || []) {
+      const option = new Option(item.label, String(item.value));
+      option.selected = prior.has(option.value);
+      select.add(option);
+    }
   }
   const chartGroupNames = {opening:'opening',motif:'primary learning motif',lesson:'lesson',version:'coach version',
     context:'position context',move_type:'move type',learning_mode:'learning mode',game_list:'game list',
@@ -40,10 +43,10 @@
     const help = document.getElementById(isChange ? 'coach-changes-help' : 'coach-approval-help');
     const groupName = chartGroupNames[chart.group_by] || 'category';
     const caveat = chart.historical_version_note
-      ? (isChange ? ' Changes use current classifications only; historic rates cannot be reconstructed.'
+      ? (isChange ? ' Evaluation changes use their frozen model snapshots; ordinary training uses current classifications.'
         : ' Historical approvals use versions saved at feedback time.') : '';
     help.textContent = isChange
-      ? `Change rate by ${groupName}: positions with any corrected taxonomy label / all solved positions in each category. A position counts once.${caveat}`
+      ? `Change rate by ${groupName}: positions with a corrected taxonomy label / all solved training and authoritative evaluation observations in each category. The same position/model counts once.${caveat}`
       : chart.group_by === 'continuation_kind'
         ? `Approval rate by ${groupName}: independently approved continuations or coach messages / individually rated continuations or coach messages. Unrated messages are excluded.${caveat}`
         : `Approval rate by ${groupName}: positions with any thumbs-up / positions with thumbs feedback in each category. Unrated positions are excluded.${caveat}`;
@@ -51,20 +54,30 @@
       target.innerHTML = '<p class="analytics-empty">No solved positions or rated feedback match these filters.</p>';
       return;
     }
-    target.innerHTML = chart.rows.map(row => {
+    const visibleLimit = 10;
+    target.innerHTML = chart.rows.map((row, index) => {
       const value = row.rate == null ? null : Math.max(0, Math.min(100, Number(row.rate)));
       const count = `${fmt(row.numerator)} / ${fmt(row.denominator)}`;
       const segments = value == null
         ? '<span class="comparison-unrated"></span>'
         : `<span class="comparison-segment comparison-${isChange ? 'change' : 'approval'}" style="width:${value}%"></span><span class="comparison-remaining" style="width:${100 - value}%"></span>`;
-      return `<div class="coach-metric-row">
+      return `<div class="coach-metric-row" ${index >= visibleLimit ? 'hidden data-chart-extra' : ''}>
         <div class="coach-metric-category">${escape(row.name)}</div>
         <div class="comparison-bar" role="img" aria-label="${label} for ${escape(row.name)}: ${percent(value)}, ${count}">${segments}</div>
         <strong class="coach-metric-value">${percent(value)}</strong>
         <small class="coach-metric-count">${count}</small>
       </div>`;
-    }).join('') + (chart.groups_count > chart.rows.length
-      ? `<p class="analytics-empty">Showing ${chart.rows.length} of ${fmt(chart.groups_count)} groups. Narrow the filters to see others.</p>` : '');
+    }).join('') + (chart.rows.length > visibleLimit
+      ? `<button type="button" class="secondary-button coach-chart-more" aria-expanded="false">Show all ${chart.rows.length} categories</button>` : '')
+      + (chart.groups_count > chart.rows.length
+      ? `<p class="analytics-empty">Showing the top ${chart.rows.length} of ${fmt(chart.groups_count)} categories. Narrow the filters to see others.</p>` : '');
+    const more = target.querySelector('.coach-chart-more');
+    more?.addEventListener('click', () => {
+      const expanded = more.getAttribute('aria-expanded') !== 'true';
+      target.querySelectorAll('[data-chart-extra]').forEach(row => { row.hidden = !expanded; });
+      more.setAttribute('aria-expanded', String(expanded));
+      more.textContent = expanded ? 'Show fewer categories' : `Show all ${chart.rows.length} categories`;
+    });
   }
   function draw(data) {
     document.getElementById('analytics-total').textContent = fmt(data.overall.total);
@@ -153,7 +166,12 @@
   }
   const resetFeedback = document.getElementById('coach-reset-feedback');
   if (resetFeedback) resetFeedback.addEventListener('click', async () => {
-    const selectedJob = form.elements.job_id.value;
+    const jobs = [...form.elements.job_id.selectedOptions].map(o => o.value).filter(Boolean);
+    if (jobs.length > 1) {
+      window.alert('Choose at most one game list before resetting feedback. The filter may contain several, but bulk deletion is disabled for safety.');
+      return;
+    }
+    const selectedJob = jobs[0] || '';
     const scope = selectedJob
       ? `all saved ratings and taxonomy selections for game list #${selectedJob}`
       : 'ALL saved ratings and taxonomy selections across EVERY game list';

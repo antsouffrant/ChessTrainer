@@ -1,0 +1,16 @@
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const ui = fs.readFileSync('templates/trainer.html','utf8');
+const js = fs.readFileSync('static/trainer.js','utf8');
+const coach = fs.readFileSync('templates/analytics.html','utf8');
+const analytics = fs.readFileSync('static/analytics.js','utf8');
+for (const id of ['coaching-correction-dialog','coaching-correction-text','coaching-correction-save','coaching-correction-skip']) assert.ok(ui.includes(`id="${id}"`));
+assert.ok(ui.indexOf('id="coaching-correction-dialog"') < ui.indexOf("filename='trainer.js'"),'modal must be in DOM before trainer.js executes');
+assert.match(js,/if \(rating === -1\) openCorrectionDialog\(category,/);
+assert.match(js,/if \(rating === -1\) openCorrectionDialog\('coaching'/);
+assert.match(js,/payload\.suggested_text = value/);
+assert.doesNotMatch(ui,/id="coaching-correction-motif"/);
+assert.doesNotMatch(js,/payload\.suggested_motif_key = value/);
+assert.match(coach,/coach-regression-export/);
+assert.match(analytics,/api\/coach\/regression\.csv/);
+console.log('v56 feedback correction UI contract passed');

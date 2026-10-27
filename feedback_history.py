@@ -72,7 +72,7 @@ def append_feedback(conn, position_id, feedback_type, rating, *, continuation=No
                     lesson_key='', content_snapshot='', coaching_version=None,
                     classifier_version=None, taxonomy_version=None, suggested_text=None,
                     suggested_motif_key=None, model_key=None, selected_key=None,
-                    message_id=None, chat_user_message=None, chat_structured_json=None,
+                    message_id=None, message_snapshot_id=None, chat_user_message=None, chat_structured_json=None,
                     source='vote', source_reference=None, created_at=None, evaluation_run_id=None):
     """Append a single deliberate rating/withdrawal; caller manages transaction.
 
@@ -92,13 +92,13 @@ def append_feedback(conn, position_id, feedback_type, rating, *, continuation=No
       (position_key,continuation_id,source_position_id,account_id,feedback_type,rating,
        lesson_key,content_snapshot,coaching_version,classifier_version,taxonomy_version,
        suggested_text,suggested_motif_key,model_key,selected_key,source_message_id,
-       chat_user_message,chat_structured_json,source,source_reference,created_at,evaluation_run_id)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,COALESCE(?,CURRENT_TIMESTAMP),?)''',
+       chat_user_message,chat_structured_json,source,source_reference,created_at,evaluation_run_id,message_snapshot_id)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,COALESCE(?,CURRENT_TIMESTAMP),?,?)''',
        (position_key,continuation_id,position_id,account_id,feedback_type,int(rating),
         lesson_key or None,content_snapshot or None,coaching_version,
         classifier_version,taxonomy_version,suggested_text or None,
         suggested_motif_key or None,model_key,selected_key or None,message_id,
-        chat_user_message,chat_structured_json,source,source_reference,created_at,evaluation_run_id))
+        chat_user_message,chat_structured_json,source,source_reference,created_at,evaluation_run_id,message_snapshot_id))
     return cursor.lastrowid
 
 
@@ -108,7 +108,7 @@ def current_feedback(conn, position_id, *, version=None, evaluation_run_id=None)
     return conn.execute('''WITH ordered AS (
       SELECT e.*, fc.move_key AS continuation_key,
              ROW_NUMBER() OVER (PARTITION BY e.feedback_type,
-               COALESCE(fc.move_key,''),COALESCE(e.source_message_id,-1)
+               COALESCE(fc.move_key,''),COALESCE(e.source_message_id,-1),COALESCE(e.message_snapshot_id,-1)
                ORDER BY e.id DESC) AS rn
       FROM feedback_events e LEFT JOIN feedback_continuations fc
         ON fc.continuation_id=e.continuation_id

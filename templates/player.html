@@ -15,10 +15,10 @@
   <form class="player-filters glass" id="player-filters">
     <div class="player-filter-header"><h2>Explore progress</h2><button class="secondary-button" type="reset">Clear filters</button></div>
     <div class="player-filter-grid">
-      <label>Game list<select name="job_id"><option value="">All game lists</option></select></label>
-      <label>Primary motif<select name="primary_motif_key"><option value="">All motifs</option></select></label>
-      <label>Opening<select name="opening_key"><option value="">All openings</option></select></label>
-      <label>Learning mode<select name="learning_mode"><option value="">All learning modes</option></select></label>
+      <label>Game list<select name="job_id" data-multiselect><option value="">All game lists</option></select></label>
+      <label>Primary motif<select name="primary_motif_key" data-multiselect><option value="">All motifs</option></select></label>
+      <label>Opening<select name="opening_key" data-multiselect><option value="">All openings</option></select></label>
+      <label>Learning mode<select name="learning_mode" data-multiselect><option value="">All learning modes</option></select></label>
       <label>Position ID<input name="position_id" inputmode="numeric" type="number" min="1" placeholder="Any position"></label>
     </div>
   </form>
@@ -48,5 +48,6 @@
     <section class="glass player-panel player-data-note"><h2>Learning data</h2><p>Your sessions CSV contains the puzzle, opening, primary motif at first attempt, attempt count, first-try result, and solve timing status. The attempt-events CSV preserves every legal submitted move and its outcome for later extensions. Prior practice statistics cannot be reconstructed precisely from legacy attempt counters; new event tracking begins with this version.</p></section>
   </div>
 </main>
+<script src="{{ url_for('static', filename='multiselect.js') }}"></script>
 <script src="{{ url_for('static', filename='player.js') }}"></script>
 {% endblock %}

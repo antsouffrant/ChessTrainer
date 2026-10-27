@@ -38,6 +38,7 @@
         <a class="secondary-button game-list-training-action" data-ready-href="{{ url_for('openings', job_id=item.id) }}" {% if item.home_state == 'ready' %}href="{{ url_for('openings', job_id=item.id) }}"{% else %}aria-disabled="true" tabindex="-1"{% endif %}>Openings</a>
         <button class="secondary-button" type="button" data-process-start="refresh" data-job-id="{{ item.id }}" {% if item.retrieval_status and item.retrieval_status != 'complete' or item.status in ('queued','running','retrieving','restarting','waiting_for_games') or item.refresh_status in ('queued','running') %}disabled{% endif %}><i class="fa-solid fa-rotate" aria-hidden="true"></i><span>Refresh</span></button>
         <button class="secondary-button" type="button" data-process-start="analyze" data-job-id="{{ item.id }}" {% if item.retrieval_status and item.retrieval_status != 'complete' or item.status in ('queued','running','retrieving','restarting','waiting_for_games') or item.refresh_status in ('queued','running') %}disabled{% endif %}><i class="fa-solid fa-chart-line" aria-hidden="true"></i><span>Analyze</span></button>
+        <button class="secondary-button game-list-delete" type="button" data-delete-job="{{ item.id }}" title="Delete this game list and its analysis">Delete list</button>
       </div>
     </article>
   {% endfor %}
@@ -45,4 +46,5 @@
 </section>
 {% endif %}
 <script src="{{ url_for('static', filename='home_readiness.js') }}"></script>
+<script src="{{ url_for('static', filename='home_delete.js') }}"></script>
 {% endblock %}

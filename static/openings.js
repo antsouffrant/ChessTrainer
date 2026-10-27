@@ -4,8 +4,14 @@ const openingEscape = value => String(value ?? '').replaceAll('&','&amp;').repla
 function renderOpenings(openings) {
   document.getElementById('openings-count').textContent=openingFmt(openings.length);
   document.getElementById('openings-variations').textContent=openingFmt(openings.reduce((s,x)=>s+Number(x.variation_count||0),0));
-  document.getElementById('openings-positions').textContent=openingFmt(openings.reduce((s,x)=>s+Number(x.position_count||0),0));
-  document.getElementById('openings-learned').textContent=openingFmt(openings.reduce((s,x)=>s+Number(x.learned_positions||0),0));
+  document.getElementById('openings-positions').textContent=openingFmt(window.openingJobSnapshot?.training_positions ?? openings.reduce((s,x)=>s+Number(x.position_count||0),0));
+  // Topline position totals are the same job-wide population as Lessons;
+  // summing memberships per opening can double-count shared positions.
+  const job = window.openingJobSnapshot;
+  document.getElementById('openings-total').textContent=openingFmt(job?.games_retrieved ?? 0);
+  document.getElementById('openings-learned').textContent=openingFmt(job?.learned_positions ?? 0);
+  document.getElementById('openings-learned-pct').textContent=`${job?.learned_pct ?? 0}%`;
+  if (job) document.getElementById('openings-positions').textContent=openingFmt(job.training_positions ?? 0);
   const target=document.getElementById('opening-list');
   if(!openings.length){target.innerHTML='<div class="lesson-empty glass"><h2>No opening positions yet</h2><p class="muted">Import or evaluate games first.</p></div>';return;}
   target.innerHTML=openings.map((item,index)=>{
@@ -26,9 +32,13 @@ function renderOpenings(openings) {
   });
 }
 async function refreshOpenings() {
-  const response = await fetch(`/api/jobs/${openingJobId}/openings`);
-  const openings = await response.json();
+  const [response, jobResponse] = await Promise.all([
+    fetch(`/api/jobs/${openingJobId}/openings`), fetch(`/api/jobs/${openingJobId}`)
+  ]);
+  const [openings, job] = await Promise.all([response.json(), jobResponse.json()]);
   if (!response.ok) throw new Error(openings.error || 'Could not load openings');
+  if (!jobResponse.ok) throw new Error(job.error || 'Could not load game-list statistics');
+  window.openingJobSnapshot = job;
   renderOpenings(openings);
   try { sessionStorage.setItem(`pct-opening-tiles-${openingJobId}`, JSON.stringify(openings)); } catch (_) {}
 }

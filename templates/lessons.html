@@ -22,13 +22,45 @@
   </header>
 
 
+
+  {% if evaluation_feature %}
+  <a class="evaluation-feature-card glass" href="{{ evaluation_feature.href }}"
+     aria-label="Featured coaching evaluation: {% if evaluation_feature.ready %}continue{% else %}prepare{% endif %} evaluation">
+    <span class="evaluation-feature-emblem"><i class="fa-solid fa-star" aria-hidden="true"></i></span>
+    <div class="evaluation-feature-copy">
+      <div class="eyebrow">FEATURED · COACHING EVALUATION</div>
+      <h2>Evaluate the current coaching model</h2>
+      <p>{% if evaluation_feature.ready %}Complete your fixed-position evaluation to benchmark feedback against future coaching models.{% else %}Your evaluation is not yet ready. {{ evaluation_feature.reason or 'Open Process to finish preparing the current model.' }}{% endif %}</p>
+      {% if evaluation_feature.total %}
+        <div class="lesson-progress" role="progressbar"
+             aria-label="Evaluation completion" aria-valuemin="0"
+             aria-valuemax="{{ evaluation_feature.total }}"
+             aria-valuenow="{{ evaluation_feature.solved }}">
+          <span style="width:{{ (100 * evaluation_feature.solved / evaluation_feature.total) | round(1) if evaluation_feature.total else 0 }}%"></span>
+        </div>
+      {% endif %}
+    </div>
+    <div class="evaluation-feature-action">
+      {% if evaluation_feature.ready %}
+        <strong>{{ evaluation_feature.solved }}/{{ evaluation_feature.total }}</strong>
+        <small>positions completed</small>
+        <span>Continue evaluation →</span>
+      {% else %}
+        <strong>{{ evaluation_feature.solved }}/{{ evaluation_feature.total }}</strong>
+        <small>positions completed</small>
+        <span>Prepare in Process →</span>
+      {% endif %}
+    </div>
+  </a>
+  {% endif %}
+
   <section class="lesson-status glass" aria-live="polite">
-    <div><span id="lesson-total">0</span><small>Total games</small></div>
-    <div><span id="lesson-screened">0</span><small>Games screened</small></div>
-    <div><span id="lesson-analyzed">0</span><small>Positions analyzed</small></div>
-    <div><span id="lesson-training">0</span><small>Training positions</small></div>
-    <div><span id="lesson-learned">0</span><small>Positions learned</small></div>
-    <div><span id="lesson-learned-pct">0%</span><small>% learned</small></div>
+    <div><span id="lesson-total">0</span><small>Total Games</small></div>
+    <div><span id="lesson-training">0</span><small>Training Positions</small></div>
+    <div><span id="lesson-lessons">0</span><small>Lessons</small></div>
+    <div><span id="lesson-mistake-pct">0%</span><small>% Mistake</small></div>
+    <div><span id="lesson-learned">0</span><small>Positions Learned</small></div>
+    <div><span id="lesson-learned-pct">0%</span><small>% Learned</small></div>
     <div class="lesson-status-text"><span id="lesson-dot" class="hud-dot"></span><strong id="lesson-status-label">Loading…</strong></div>
   </section>
 

@@ -35,3 +35,14 @@
 .player-data-note{margin-top:26px}
 .player-empty{opacity:.75;font-style:italic}
 @media(max-width:640px){.player-hub{padding:15px 12px 55px;gap:16px}.player-hero,.player-filters,.player-panel{padding:19px}.player-metrics{gap:12px}.player-breakdowns,.player-charts{gap:15px}}
+
+/* v110: larger chart labels and a wider Player dashboard. */
+.player-hub{max-width:none;width:100%;padding:24px 0 70px;}
+.player-table{font-size:1rem;}
+.player-bar-row{font-size:1rem;grid-template-columns:minmax(95px,1fr) minmax(45px,2.5fr) minmax(85px,auto);}
+.player-bar-row b{font-size:1.03rem;font-variant-numeric:tabular-nums;}
+.player-metric>span,.player-metric small,.player-filter-grid label{font-size:1rem;}
+.player-note,.player-panel p{font-size:1rem;}
+.player-panel h2{font-size:1.25rem;}
+.player-bar-row small{font-size:.91rem;}
+@media(max-width:640px){.player-hub{padding:15px 0 55px}.player-bar-row{grid-template-columns:minmax(80px,1fr) minmax(45px,1.5fr) minmax(75px,auto);}}

@@ -255,6 +255,7 @@ CREATE TABLE IF NOT EXISTS coach_messages (
     role TEXT NOT NULL,
     content TEXT NOT NULL,
     structured_json TEXT,
+    generation_version TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY(thread_id) REFERENCES coach_threads(id) ON DELETE CASCADE
 );
@@ -458,6 +459,20 @@ CREATE TABLE IF NOT EXISTS feedback_continuations (
 );
 -- A fact table independent of coach_messages and training_positions deletion.
 -- 0 is an explicit withdrawal event, not an unrated position.
+-- Immutable displayed explanation snapshots. Not deleted on coaching refresh.
+-- One position+continuation may have several messages across models or texts.
+CREATE TABLE IF NOT EXISTS feedback_message_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    position_id INTEGER NOT NULL,
+    continuation_key TEXT NOT NULL,
+    generation_version TEXT NOT NULL,
+    content_snapshot TEXT NOT NULL,
+    content_sha256 TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(position_id,continuation_key,generation_version,content_sha256)
+);
+CREATE INDEX IF NOT EXISTS idx_feedback_message_snapshots_position
+ON feedback_message_snapshots(position_id,id);
 CREATE TABLE IF NOT EXISTS feedback_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     position_key TEXT NOT NULL REFERENCES feedback_positions(position_key),
@@ -477,6 +492,7 @@ CREATE TABLE IF NOT EXISTS feedback_events (
     model_key TEXT,
     selected_key TEXT,
     source_message_id INTEGER,
+    message_snapshot_id INTEGER,
     chat_user_message TEXT,
     chat_structured_json TEXT,
     source TEXT NOT NULL DEFAULT 'vote',
@@ -505,19 +521,24 @@ CREATE TABLE IF NOT EXISTS coach_benchmark_positions (
     learning_mode TEXT NOT NULL,
     PRIMARY KEY(job_id,position_id), UNIQUE(job_id,ordinal)
 );
--- Version-scoped, evidence-fingerprinted coaching text cache. This table is
--- derived and disposable; feedback_events and benchmark snapshots are not.
-CREATE TABLE IF NOT EXISTS coaching_explanation_cache (
+-- Only authoritative active cache for generated teaching text. One record
+-- per position, message kind, and continuation. Feedback snapshots are an
+-- immutable archive, and conversational transcripts are not replay caches.
+CREATE TABLE IF NOT EXISTS coaching_message_cache (
     position_id INTEGER NOT NULL REFERENCES training_positions(id) ON DELETE CASCADE,
-    coaching_version TEXT NOT NULL,
-    evidence_fingerprint TEXT NOT NULL,
-    coach_prompt TEXT NOT NULL,
-    coach_explanation TEXT NOT NULL,
+    message_type TEXT NOT NULL CHECK(message_type IN ('best_move','attempted_move','game_move')),
+    continuation_key TEXT NOT NULL,
+    generation_version TEXT NOT NULL,
+    content TEXT NOT NULL,
+    content_sha256 TEXT NOT NULL,
+    evidence_fingerprint TEXT NOT NULL DEFAULT '',
+    coach_prompt TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY(position_id, coaching_version, evidence_fingerprint)
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY(position_id,message_type,continuation_key)
 );
-CREATE INDEX IF NOT EXISTS idx_coaching_explanation_cache_version
-    ON coaching_explanation_cache(coaching_version);
+CREATE INDEX IF NOT EXISTS idx_coaching_message_cache_model
+    ON coaching_message_cache(generation_version,message_type);
 
 CREATE TABLE IF NOT EXISTS coach_benchmark_runs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -586,6 +607,7 @@ CREATE TABLE IF NOT EXISTS player_solve_sessions (
     primary_motif_key TEXT,
     learning_mode TEXT,
     lesson_key TEXT,
+    evaluation_run_id INTEGER,
     attempts INTEGER NOT NULL DEFAULT 0,
     first_try_solved INTEGER NOT NULL DEFAULT 0,
     active_seconds REAL NOT NULL DEFAULT 0,
@@ -599,8 +621,6 @@ CREATE TABLE IF NOT EXISTS player_solve_sessions (
     FOREIGN KEY(job_id) REFERENCES analysis_jobs(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_player_sessions_job ON player_solve_sessions(job_id, position_id);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_player_open_session
- ON player_solve_sessions(position_id) WHERE solved_at IS NULL AND abandoned_at IS NULL;
 CREATE TABLE IF NOT EXISTS player_solve_attempts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id INTEGER NOT NULL,
@@ -685,8 +705,49 @@ def init_db():
     with connect() as conn:
         conn.executescript(SCHEMA)
 
+        # v100 migration: retain only the newest evaluation per game list and
+        # coaching version as authoritative. Older runs, their attempts and
+        # their append-only feedback stay in the database for provenance.
+        conn.execute('''UPDATE evaluation_runs SET status='superseded'
+            WHERE id NOT IN (SELECT MAX(id) FROM evaluation_runs
+                             GROUP BY job_id,coaching_version)''')
+        conn.execute('''CREATE UNIQUE INDEX IF NOT EXISTS idx_evaluation_one_current_model
+            ON evaluation_runs(job_id,coaching_version)
+            WHERE status!='superseded' ''')
+
+        # Player stats use a single opt-in switch in all modes. Evaluation
+        # runs have independent open activity sessions, so they cannot absorb
+        # ordinary attempts or attempts from another benchmark run.
+        if 'evaluation_run_id' not in _columns(conn, 'player_solve_sessions'):
+            conn.execute('ALTER TABLE player_solve_sessions ADD COLUMN evaluation_run_id INTEGER')
+        conn.execute('DROP INDEX IF EXISTS idx_player_open_session')
+        conn.execute('''CREATE UNIQUE INDEX IF NOT EXISTS idx_player_open_regular_session
+            ON player_solve_sessions(position_id)
+            WHERE evaluation_run_id IS NULL AND solved_at IS NULL AND abandoned_at IS NULL''')
+        conn.execute('''CREATE UNIQUE INDEX IF NOT EXISTS idx_player_open_evaluation_session
+            ON player_solve_sessions(position_id, evaluation_run_id)
+            WHERE evaluation_run_id IS NOT NULL AND solved_at IS NULL AND abandoned_at IS NULL''')
+
+        # v112 message-level, generation-time attribution. Legacy votes remain
+        # untouched; snapshots are additive and independent of cache reset.
+        if 'message_snapshot_id' not in _columns(conn, 'feedback_events'):
+            conn.execute('ALTER TABLE feedback_events ADD COLUMN message_snapshot_id INTEGER')
+        if 'generation_version' not in _columns(conn, 'coach_messages'):
+            conn.execute('ALTER TABLE coach_messages ADD COLUMN generation_version TEXT')
+
         if 'evaluation_run_id' not in _columns(conn, 'feedback_events'):
             conn.execute('ALTER TABLE feedback_events ADD COLUMN evaluation_run_id INTEGER')
+
+        # v101 one-time cleanup: the experimental v33 evaluation is not part
+        # of the canonical benchmark series. Preserve all non-evaluation v33
+        # feedback and immutable coaching snapshots.
+        if not conn.execute(
+            "SELECT 1 FROM app_settings WHERE key='v101_v33_evaluation_retired'"
+        ).fetchone():
+            from evaluation_runs import retire_v33_evaluation_feedback
+            retire_v33_evaluation_feedback(conn)
+            conn.execute('''INSERT INTO app_settings(key,value)
+                VALUES ('v101_v33_evaluation_retired','1')''')
 
         # Store the Stockfish PV already computed when verifying an attempted move.
         # This is a lightweight additive migration; no deep reanalysis.
@@ -906,4 +967,52 @@ def init_db():
             migrate_legacy_feedback(conn)
             conn.execute("""INSERT INTO app_settings(key,value) VALUES
                 ('feedback_ledger_v86_migrated','1')""")
+        # Add recoverable message identities to older immutable events using
+        # their own original snapshots, never today's active coaching version.
+        if not conn.execute("SELECT 1 FROM app_settings WHERE key='feedback_messages_v112_attributed'").fetchone():
+            from feedback_messages import backfill_legacy_message_attribution
+            backfill_legacy_message_attribution(conn)
+            conn.execute("INSERT INTO app_settings(key,value) VALUES ('feedback_messages_v112_attributed','1')")
+        # v114 migrates the current best-move projection once. Old-version
+        # rows remain stamped as old and are never exposed as current advice.
+        # Never repopulate the cache after an explicit clear/refresh.
+        if not conn.execute("SELECT 1 FROM app_settings WHERE key='coaching_cache_v114_migrated'").fetchone():
+            from coaching.coaching_refresh.message_cache import cache_message
+            rows = conn.execute('''SELECT tp.id,tp.coaching_version,tp.coach_explanation,tp.coach_prompt
+                FROM training_positions tp LEFT JOIN metadata_processes mp ON mp.job_id=tp.job_id
+                WHERE tp.coaching_version IS NOT NULL AND tp.coach_explanation IS NOT NULL
+                  AND LENGTH(TRIM(tp.coach_explanation))>0
+                  AND COALESCE(mp.status,'')!='needs_refresh' ''').fetchall()
+            for row in rows:
+                cache_message(conn,row['id'],'best_move','position',row['coaching_version'],
+                              row['coach_explanation'],prompt=row['coach_prompt'])
+            # Recover already-generated v35 attempted/game messages from
+            # stamped recap metadata. Do not import older-model recaps just
+            # because the position has since been refreshed to v35.
+            import json as _json
+            from coaching.coaching_refresh.message_cache import note_kind, note_key
+            from coaching.coaching_refresh.version import COACHING_VERSION as _ACTIVE_MODEL
+            recaps = conn.execute('''SELECT cm.structured_json,cm.generation_version,tp.id AS position_id,
+                    tp.coaching_version AS position_version
+                FROM coach_solve_recaps sr
+                JOIN coach_messages cm ON cm.id=sr.message_id
+                JOIN training_positions tp ON tp.id=sr.position_id
+                LEFT JOIN metadata_processes mp ON mp.job_id=tp.job_id
+                WHERE tp.coaching_version=? AND COALESCE(mp.status,'')!='needs_refresh'
+                ORDER BY cm.id ''',(_ACTIVE_MODEL,)).fetchall()
+            for saved in recaps:
+                try: meta=_json.loads(saved['structured_json'] or '{}')
+                except (ValueError,TypeError): continue
+                if not isinstance(meta,dict) or meta.get('kind')!='solved_attempt_recap': continue
+                if meta.get('coaching_version')!=_ACTIVE_MODEL: continue
+                if saved['generation_version'] not in (None,_ACTIVE_MODEL): continue
+                for note in meta.get('attempt_comments') or []:
+                    if not isinstance(note,dict) or not str(note.get('text') or '').strip():continue
+                    if note_kind(note) != 'best_move' and not str(note.get('move_uci') or '').strip():continue
+                    cache_message(conn,saved['position_id'],note_kind(note),note_key(note),
+                                  _ACTIVE_MODEL,note['text'])
+            conn.execute("INSERT INTO app_settings(key,value) VALUES ('coaching_cache_v114_migrated','1')")
+        # The legacy explanation copy had a different lifetime and could
+        # retain v34 after v35. It is no longer read or written; remove it.
+        conn.execute('DROP TABLE IF EXISTS coaching_explanation_cache')
         conn.commit()

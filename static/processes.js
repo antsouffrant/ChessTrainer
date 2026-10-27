@@ -6,6 +6,7 @@
   if (!root || !list) return;
   const selected = Number(root.dataset.selectedJob || 0);
   let busy = false;
+  let evaluationErrorMessage = '';
   const fmt = n => Number(n || 0).toLocaleString();
   const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const active = s => ['queued','running','retrieving','restarting'].includes(s);
@@ -82,7 +83,8 @@
         `${fmt(count)} / ${fmt(total)} positions · ${fmt(j.updated)} updated`;
     const error = analysis ? j.analysis_error : j.refresh_error;
     const databaseBusy = /database (is )?(locked|busy)/i.test(String(error||''));
-    const errorMessage = status === 'error' && error ? `<p class="process-error-history">The previous attempt failed: ${databaseBusy ? 'temporary database contention' : esc(error)}. Select ${analysis ? 'Start analysis' : 'Start refresh'} to retry.</p>` : '';
+    const errorMessage = status === 'error' && error ? `<p class="process-error-history">The previous attempt failed: ${databaseBusy ? 'temporary database contention' : esc(error)}. Select ${analysis ? 'Start analysis' : 'Start refresh'} to retry.</p>`
+      : !retrieval && !analysis && status === 'complete' && error ? `<p class="process-error-history">Evaluation not ready: ${esc(error)}</p>` : '';
     const diagnostic = diagnostics(j, kind);
     const stageTitle = retrieval ? 'Games' : analysis ? 'Positions' : 'Coaching';
     const stageSubtitle = retrieval ? 'Game Retrieval · Lichess' : analysis ? 'Position Evaluation · Stockfish' : 'Coaching Analysis · Stockfish + Coach';
@@ -140,10 +142,17 @@
     const cohort=j.benchmark;
     const benchmarkUi=cohort ? `<div class="process-benchmark" aria-label="Fixed coaching benchmark">
        <strong>Fixed coaching benchmark · ${fmt(cohort.size)} positions</strong>
-       <span>${fmt(cohort.versions?.length||0)} completed model snapshots · ${fmt(cohort.available)} positions available</span>
-       ${j.evaluation_run ? `<a class="secondary-button" href="/trainer/${j.id}?benchmark=1&run_id=${j.evaluation_run.id}">Continue evaluation #${j.evaluation_run.id} · ${fmt(j.evaluation_run.solved)}/${fmt(j.evaluation_run.total)} solved →</a>` : `<span class="process-detail">Complete Coaching refresh to create your first evaluation.</span>`}
-       <button type="button" class="secondary-button" data-process-action="evaluation" data-command="new" data-job-id="${j.id}" ${!j.benchmark?.versions?.length||isRefreshing(j)?'disabled':''}>Start new evaluation</button>
-       <a class="secondary-button" href="/coach?job_id=${j.id}">Compare coaching models →</a>
+       <span>Current model: ${esc(j.current_coaching_model||'unknown')} · ${fmt(cohort.available)} of ${fmt(cohort.size)} benchmark positions available</span>
+       ${(j.frozen_evaluations||[]).map(r=>`<span class="process-detail"><i class="fa-solid fa-lock" aria-hidden="true"></i> Historical ${esc(r.coaching_version)} · ${fmt(r.solved)}/${fmt(r.total)} completed · locked · <a href="/coach/benchmark?job_id=${j.id}">View in Coach</a></span>`).join('')}
+       ${j.evaluation_run
+         ? j.evaluation_run.status === 'completed' || (Number(j.evaluation_run.total) > 0 && Number(j.evaluation_run.solved) >= Number(j.evaluation_run.total))
+           ? `<a class="secondary-button" href="/coach/benchmark?job_id=${j.id}">Evaluation complete · View in Coach →</a>`
+           : `<a class="secondary-button" href="/trainer/${j.id}?benchmark=1&run_id=${j.evaluation_run.id}">Continue evaluation #${j.evaluation_run.id} · ${fmt(j.evaluation_run.solved)}/${fmt(j.evaluation_run.total)} solved →</a>`
+         : `<span class="process-detail">No playable evaluation exists yet for ${esc(j.current_coaching_model||'the current model')}. A historical evaluation or stored snapshot is not a new model evaluation.</span>
+            <button type="button" class="secondary-button" data-process-action="evaluation" data-command="activate" data-job-id="${j.id}" ${isRefreshing(j)?'disabled':''}>Prepare and open current evaluation →</button>
+            ${j.refresh_error ? `<span class="process-error-history">${esc(j.refresh_error)}</span>` : ''}`}
+       ${j.evaluation_run ? `<button type="button" class="secondary-button" data-process-action="evaluation" data-command="new" data-job-id="${j.id}" ${isRefreshing(j)?'disabled':''}>Replace ${esc(j.current_coaching_model||'current model')} evaluation</button>` : ''}
+       <a class="secondary-button" href="/coach/benchmark?job_id=${j.id}">Compare coaching models →</a>
        ${(cohort.versions||[]).map(v=>`<span class="process-detail">${esc(v.coaching_version)} · ${fmt(v.captured)}/${fmt(v.expected)} snapshotted · ${fmt(v.rated_messages)} explanation ratings on ${fmt(v.rated_positions)} positions · ${v.approval_pct===null?'Not yet rated':v.approval_pct+'% approval'} · ${fmt(v.taxonomy_corrected_fields)} taxonomy corrections/${fmt(v.taxonomy_rated_fields)} rated fields</span>`).join('')}
        ${(cohort.comparisons||[]).map(c=>`<span class="process-detail">Matched ${esc(c.from_version)} → ${esc(c.to_version)}: ${fmt(c.paired_messages)} identically rated messages · ${c.before_approval_pct===null?'Awaiting matched ratings':c.before_approval_pct+'% → '+c.after_approval_pct+'% approval'} · ${fmt(c.motif_changes)} motif differences across ${fmt(c.paired_positions_with_snapshots)} shared snapshots</span>`).join('')}
        ${cohort.available!==cohort.size?'<span class="process-error-history">Some fixed benchmark positions are missing after analysis restart; sample membership has not been silently redrawn.</span>':''}
@@ -164,7 +173,12 @@
       const res = await fetch('/api/processes',{cache:'no-store'});
       if (!res.ok) throw new Error(res.status===503?'Status temporarily busy; retrying automatically.':'Could not load processes.');
       const jobs = (await res.json()).processes||[];
-      if (feedback) feedback.classList.add('hidden');
+      if (feedback) {
+        if (evaluationErrorMessage) {
+          feedback.textContent=evaluationErrorMessage;
+          feedback.classList.remove('hidden');
+        } else feedback.classList.add('hidden');
+      }
       list.innerHTML = jobs.length ? jobs.map(renderJob).join('') :
         '<div class="glass process-card">No game lists yet. <a href="/">Import games on Home</a>.</div>';
     } catch(err) { if(feedback) {feedback.textContent=err.message;feedback.classList.remove('hidden');} }
@@ -172,11 +186,29 @@
   list.addEventListener('click',async event=>{
     const button=event.target.closest('[data-process-action]');
     if(!button || button.disabled || busy) return;
+    evaluationErrorMessage='';
     const job=Number(button.dataset.jobId),kind=button.dataset.processAction,command=button.dataset.command;
     let url=`/api/jobs/${job}/process/${kind}`;
     let body='{}';
+    if(command==='activate' && kind==='evaluation') {
+      busy=true;button.disabled=true;
+      if(feedback) feedback.classList.add('hidden');
+      try {
+        // Never POST to /evaluations here: that endpoint replaces a run.
+        const response=await fetch(`/api/jobs/${job}/evaluations/activate`,{
+          method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
+        const data=await response.json();
+        if (!response.ok) throw new Error(data.error||'The evaluation cannot be opened yet.');
+        location.href=data.url;
+      } catch(err) {
+        evaluationErrorMessage=err.message;
+        if(feedback){feedback.textContent=err.message;feedback.classList.remove('hidden');}
+      }
+      finally {busy=false;await update();}
+      return;
+    }
     if(command==='new' && kind==='evaluation') {
-      if (!window.confirm('Start a new evaluation of the same fixed positions? Current evaluation progress and feedback will be retained. The new run starts unanswered.')) return;
+      if (!window.confirm("Replace this coaching model's evaluation? The same fixed positions will start unanswered. Current evaluation progress will be superseded; previous feedback is retained in the historical ledger but excluded from model comparisons.")) return;
       busy=true;
       try {
         const response=await fetch(`/api/jobs/${job}/evaluations`,{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});

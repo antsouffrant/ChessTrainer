@@ -69,8 +69,8 @@ def analyze(rows):
     try:
         import chess
         from learning import classify_learning_concepts
-        from coaching import generate_coaching_text
-        from proactive_coaching import prefer_evidenced_primary
+        from coaching.narrative_composition.coaching import generate_coaching_text
+        from coaching.board_context.proactive_coaching import prefer_evidenced_primary
     except ImportError as exc:
         raise RuntimeError('Install dependencies from requirements.txt before evaluating chess positions') from exc
     outcomes = []

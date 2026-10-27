@@ -5,18 +5,18 @@ from typing import Optional
 
 import chess
 
-from position_context import inspect_response
-from immediate_decision import immediate_decision
-from decision_context import decision_facts
-from semantic_coaching import evidence_findings
-from causal_selection import primary_causal_finding, finding_score
-from loose_piece_provenance import differential_loss_motif, confirmed_differential_loss
-from check_response import blocking_response
-from motif_relevance import select_relevant_primary
-from motif_hierarchy import choose_specific, validate_ontology
-from coaching_taxonomy import validate_taxonomy
-from pv_reasoning import fork_evidence, legal_pv, comparative_insight
-from check_repetition import verified_check_repetition
+from coaching.board_context.position_context import inspect_response
+from coaching.conceptual_understanding.immediate_decision import immediate_decision
+from coaching.conceptual_understanding.decision_context import decision_facts
+from coaching.conceptual_understanding.semantic_coaching import evidence_findings
+from coaching.motif_selection.causal_selection import primary_causal_finding, finding_score
+from coaching.board_context.loose_piece_provenance import differential_loss_motif, confirmed_differential_loss
+from coaching.board_context.check_response import blocking_response
+from coaching.motif_selection.motif_relevance import select_relevant_primary
+from coaching.motif_selection.motif_hierarchy import choose_specific, validate_ontology
+from coaching.motif_selection.coaching_taxonomy import validate_taxonomy
+from coaching.board_context.pv_reasoning import fork_evidence, legal_pv, comparative_insight
+from coaching.board_context.check_repetition import verified_check_repetition
 
 CLASSIFIER_VERSION = '3.4-verified-perpetual-check'
 
@@ -73,7 +73,7 @@ CONCEPT_CATALOG = [
 
 # Public curriculum is canonical; historical detector keys remain as retired
 # catalog rows so user ratings, personal coaching claims and saved exports survive.
-from coaching_taxonomy import EVALUATION_OUTCOMES, RETIRED_KEYS, TACTICAL, STRATEGIC
+from coaching.motif_selection.coaching_taxonomy import EVALUATION_OUTCOMES, RETIRED_KEYS, TACTICAL, STRATEGIC
 for item in CONCEPT_CATALOG:
     item['status'] = 'retired' if item['key'] in RETIRED_KEYS else 'seeded'
     if item['key'] == 'king_activity':
@@ -865,7 +865,7 @@ def classify_learning_concepts(
         if supported:
             chosen = max(supported, key=lambda item: item[1])[0]
     # An exact endgame verdict takes precedence over heuristic motifs.
-    from endgame_evidence import exact_move_contrast
+    from coaching.board_context.endgame_evidence import exact_move_contrast
     exact = exact_move_contrast(board, best_move, played_move) if played_move else None
     if exact:
         add('endgame_precision', 1.0,

@@ -1,0 +1,15 @@
+const assert=require('node:assert/strict');
+const fs=require('node:fs');
+const template=fs.readFileSync('templates/coach_benchmark.html','utf8');
+const script=fs.readFileSync('static/benchmark_chart.js','utf8');
+assert(template.includes('id="benchmark-evaluation-history"'));
+assert(!template.includes('id="benchmark-run-a"'));
+assert(!template.includes('id="benchmark-run-b"'));
+assert(template.includes('Evaluation by coaching model'));
+assert(script.includes('renderHistory(availableRuns)'));
+assert(script.includes('r.feedback_positions'));
+assert(script.includes('r.explanation_approval_pct'));
+assert(!script.includes("params.set('run_a'"));
+assert(!script.includes('different run'));
+assert(script.includes('Continue evaluation'));
+console.log('PASS: one authoritative evaluation per model');

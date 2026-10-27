@@ -14,9 +14,12 @@
   }
   function options(key, values) {
     const control = form.elements[key];
-    const saved = control.value;
-    for (const item of values || []) control.add(new Option(item.label || item.value, String(item.value)));
-    if ([...control.options].some(o => o.value === saved)) control.value = saved;
+    const saved = new Set([...control.selectedOptions].map(o => o.value).filter(Boolean));
+    for (const item of values || []) {
+      const option = new Option(item.label || item.value, String(item.value));
+      option.selected = saved.has(option.value);
+      control.add(option);
+    }
   }
   function value(id, text) { document.getElementById(id).textContent = text; }
   function bars(id, data, nameKey, countKey) {
@@ -86,7 +89,12 @@
   }
   const resetRecords = document.getElementById('player-reset-records');
   if (resetRecords) resetRecords.addEventListener('click', async () => {
-    const selectedJob = form.elements.job_id.value;
+    const jobs = [...form.elements.job_id.selectedOptions].map(o => o.value).filter(Boolean);
+    if (jobs.length > 1) {
+      window.alert('Choose at most one game list before resetting Player history. Multi-select remains available for reporting and CSV exports.');
+      return;
+    }
+    const selectedJob = jobs[0] || '';
     const scope = selectedJob
       ? `ALL Player solve sessions and move attempts in game list #${selectedJob}`
       : 'ALL Player solve sessions and move attempts across EVERY game list';

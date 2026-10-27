@@ -1,0 +1,13 @@
+const fs=require('node:fs');
+const assert=require('node:assert/strict');
+const path=require('node:path');
+const js=fs.readFileSync(path.join(__dirname,'../static/processes.js'),'utf8');
+const app=fs.readFileSync(path.join(__dirname,'../app.py'),'utf8');
+assert.match(js,/Prepare and open current evaluation/);
+assert.match(js,/data-command="activate"/);
+assert.match(js,/\/evaluations\/activate/);
+assert.match(js,/Never POST to \/evaluations here/);
+assert.match(js,/j\.evaluation_run \? `<button/);
+assert.match(app,/@app\.post\('\/api\/jobs\/<int:job_id>\/evaluations\/activate'\)/);
+assert.match(app,/run_id=activation\['run_id'\]/);
+console.log('Process v106: only safe activate used when no current evaluation exists');

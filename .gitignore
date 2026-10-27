@@ -2,11 +2,19 @@ __pycache__/
 *.pyc
 .venv/
 venv/
-data/chess_trainer.sqlite3
-data/chess_trainer.sqlite3-shm
-data/chess_trainer.sqlite3-wal
+data/
 stockfish/
-tests/
-data/batches/
-data/archive/
 archive/
+chess/
+
+
+# Local developer and build output
+.pytest_cache/
+.coverage
+htmlcov/
+.DS_Store
+Thumbs.db
+dist/
+build/
+*.sqlite3-journal
+.env

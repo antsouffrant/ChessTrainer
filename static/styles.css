@@ -266,7 +266,6 @@ legend { margin-bottom: 12px; }
 .number-with-unit span { color: var(--muted); font-size: .86rem; font-weight: 700; }
 
 .trainer-main { align-items: start; }
-.board-column { min-width: 0; }
 .board-wrap { position: relative; }
 .board-feedback-mark {
   position: absolute;
@@ -1091,7 +1090,6 @@ body.theme-wood .piece.black-piece::before {
 /* v2.3: flat yellow annotation and optional coordinates */
 .engine-arrow #engine-arrow-outline {stroke: #f3d735; stroke-width: 15px; opacity: .75; filter: none;}
 .engine-arrow #engine-arrow-line {stroke: #f3d735; stroke-width: 15px; opacity: .75; filter: none;}
-.engine-arrow #engine-arrow-highlight {opacity: 0; filter: none;}
 .engine-arrow #engine-arrow-head {fill: #f3d735; stroke: none; opacity: .75; filter: none;}
 .square-coordinate {display:none; position:absolute; bottom:3px; left:4px; z-index:3; font-size:clamp(9px,1.05vw,13px); font-weight:800; line-height:1; pointer-events:none; font-family:system-ui,sans-serif;}
 .show-coordinates .square-coordinate {display:block;}
@@ -1146,12 +1144,6 @@ body.theme-wood .piece.black-piece::before {
   filter: grayscale(.15);
   border-color: rgba(199,154,43,.48);
   background: rgba(199,154,43,.12);
-}
-.coach-response-feedback.saved::after {
-  content: 'feedback saved';
-  color: #7f8993;
-  font-size: .58rem;
-  margin-left: 3px;
 }
 .coach-response-feedback.error::after {
   content: 'could not save';
@@ -1685,8 +1677,7 @@ body.theme-wood .mini-square.dark { background: #7b4d2e; }
 }
 @media (max-width: 800px) {
   .lesson-page .lesson-status { grid-template-columns: repeat(3, 1fr); }
-  .lesson-page .lesson-status-text { grid-column: 1 / -1; justify-content: flex-start; }
-}
+  }
 @media (max-width: 620px) {
   .lesson-page .lesson-status { grid-template-columns: 1fr; }
   .lesson-page .lesson-status-text { grid-column: auto; }
@@ -2354,7 +2345,6 @@ body.theme-wood .mini-square.dark { background: #7b4d2e; }
 }
 .history-position-info .history-status { white-space: nowrap; flex: 0 0 auto; }
 .history-controls .engine-toggle { grid-column: 3; white-space: nowrap; }
-.history-controls #history-back { grid-column: 1; grid-row: 1; }
 .history-controls #history-forward { grid-column: 4; grid-row: 1; }
 .trainer-position-controls { min-width: 0; }
 @media (min-width: 901px) {
@@ -3002,7 +2992,12 @@ body.theme-wood .mini-square.dark { background: #7b4d2e; }
 .coach-position-review .explanation-feedback-area { width:100%; }
 .coach-position-review .coach-text { margin:0 0 5px; font-size:.85rem; line-height:1.55; }
 .coach-position-review .inline-feedback-votes { margin-top:9px; }
-.solved-opening { margin:4px 0 0; color:#aab7c8; font-size:.77rem; }
+.solved-opening-row strong { color:#e8edf3; text-align:right; overflow-wrap:anywhere; font-weight:650; }
+/* Shared origin squares show both accepted gold and engine-best green. */
+.square.near-optimal.correct {
+  box-shadow: inset 0 0 0 999px rgba(50,190,115,.20);
+  background-image: linear-gradient(135deg, rgba(210,166,54,.46) 0 50%, rgba(50,190,115,.46) 50% 100%);
+}
 
 /* v78: one compact explanation package, with move-by-move comments. */
 .coach-panel { grid-template-rows: auto auto auto minmax(200px, 1fr) auto; }
@@ -3151,3 +3146,229 @@ body.theme-wood .mini-square.dark { background: #7b4d2e; }
 .inline-rating-status { font-size: .67rem; color: #a8d9bf; margin-left: 7px; }
 .inline-rating-status.error { color: #ffc6b9; }
 .inline-rating-status.hidden { display: none !important; }
+
+/* v95: coaching cards take their content height; no stretched grid rows. */
+.coach-panel { display:flex; flex-direction:column; align-items:stretch; min-height:0; gap:12px; }
+.coach-panel .coach-form-primary { order:5; align-self:stretch; flex:none; }
+.coach-panel .coach-chat { order:4; flex:0 1 auto; min-height:0; max-height:min(48vh, 470px);
+  height:max-content; align-self:stretch; align-content:flex-start; justify-content:flex-start;
+  padding:9px; gap:8px; overflow-y:auto; }
+.coach-chat > .coach-message, .coach-attempt-comments > .coach-continuation-message {
+  flex:none !important; flex-grow:0 !important; flex-shrink:0 !important;
+  height:max-content !important; min-height:0 !important; align-self:flex-start;
+  margin-block:0; }
+.coach-chat > .coach-attempt-comments { flex:none !important; height:max-content; }
+.coach-position-review .coach-message-body, .coach-continuation-message .coach-message-body {
+  flex:none !important; height:max-content !important; min-height:0 !important;
+  padding:8px 10px; line-height:1.4; }
+.coach-position-review .inline-feedback-votes,
+.coach-continuation-message .inline-feedback-votes { flex:none !important; padding-top:5px; margin-top:5px; }
+.coach-message .coach-text { line-height:1.42; }
+.coach-chat > .coach-empty { margin:16px auto; }
+/* Selected vote is confirmation; saved text remains accessible to screen readers. */
+.inline-rating-status:not(.error) { position:absolute!important; width:1px!important;
+  height:1px!important; padding:0!important; margin:-1px!important; overflow:hidden!important;
+  clip:rect(0,0,0,0)!important; white-space:nowrap!important; border:0!important; }
+.inline-rating-status.error { display:inline-block; padding:3px 7px; border-radius:6px;
+  background:rgba(180,58,58,.16); font-size:.7rem; }
+.game-list-delete { border-color:rgba(231,116,116,.3); color:#e8b5b5; }
+.game-list-delete:hover { background:rgba(185,66,66,.15); }
+
+.evaluation-progress-note {display:inline-flex;align-items:center;white-space:nowrap;font-size:.75rem;font-weight:600;color:#a8d9bf;line-height:1.2}
+/* Hidden post-solve cards must override earlier forced flex declarations. */
+.coach-chat > .coach-position-review.hidden,
+.coach-chat > .coach-attempt-comments.hidden,
+.coach-attempt-comments > .coach-continuation-message.hidden { display:none !important; }
+
+
+/* v97: pre-solve hints are independent of the hidden Adaptive Coach recap. */
+.task-intro-block .trainer-hint-text {
+  margin: 8px 0 0;
+  padding: 9px 12px;
+  max-width: 100%;
+  border: 1px solid rgba(226, 194, 86, .17);
+  border-radius: 9px;
+  background: rgba(226, 194, 86, .065);
+  color: #e5e9ed;
+  font-size: .82rem;
+  font-weight: 450;
+  line-height: 1.45;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+/* v98: "Evaluation saved" occupies the original Position learned slot.
+   Hide the inactive learned checkbox rather than letting it use a third grid cell. */
+.trainer-main .side-panel > .solved-position-controls.evaluation-controls > #learned-toggle-wrap {
+  display: none !important;
+}
+.trainer-main .side-panel > .solved-position-controls.evaluation-controls > #evaluation-saved-indicator {
+  grid-column: 2;
+  grid-row: 1;
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  min-height: 42px;
+  padding: 9px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(98,221,160,.25);
+  background: rgba(65,184,125,.08);
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+}
+.trainer-main .side-panel > .solved-position-controls.evaluation-controls > #evaluation-saved-indicator.hidden {
+  visibility: hidden;
+}
+
+
+/* Current-model evaluation invitation: visible ahead of normal lesson tiles. */
+.evaluation-feature-card {
+  display: grid;
+  grid-template-columns: 46px minmax(0, 1fr) auto;
+  gap: 18px;
+  align-items: center;
+  margin: 18px 0;
+  padding: 20px 22px;
+  border: 1.5px solid rgba(219, 174, 78, .88);
+  border-radius: 16px;
+  background: linear-gradient(120deg, rgba(189, 143, 47, .13), rgba(24, 29, 35, .90));
+  color: inherit;
+  text-decoration: none;
+  box-shadow: inset 0 0 0 1px rgba(246, 211, 130, .06);
+}
+.evaluation-feature-card:hover,
+.evaluation-feature-card:focus-visible {
+  border-color: #f6d486;
+  box-shadow: 0 0 0 2px rgba(219, 174, 78, .15);
+  text-decoration: none;
+}
+.evaluation-feature-emblem { color: #e0b75d; font-size: 1.65rem; text-align: center; }
+.evaluation-feature-copy h2 { margin: 4px 0 6px; font-size: 1.18rem; color: #fff1c4; }
+.evaluation-feature-copy p { margin: 0; color: #c3c6c9; line-height: 1.4; }
+.evaluation-feature-copy .eyebrow { color: #e3bb65; }
+.evaluation-feature-copy .lesson-progress { max-width: 560px; margin-top: 12px; }
+.evaluation-feature-copy .lesson-progress > span { background: #d8ae59; }
+.evaluation-feature-action { display: flex; flex-direction: column; align-items: flex-end; gap: 3px; }
+.evaluation-feature-action strong { color: #f1d489; font-size: 1.45rem; font-variant-numeric: tabular-nums; }
+.evaluation-feature-action small { color: #aeb5bd; }
+.evaluation-feature-action > span { color: #f1d489; font-weight: 650; margin-top: 8px; }
+@media (max-width: 740px) {
+  .evaluation-feature-card { grid-template-columns: 32px minmax(0,1fr); padding: 15px; gap: 12px; }
+  .evaluation-feature-emblem { font-size: 1.25rem; }
+  .evaluation-feature-action { grid-column: 2; align-items: flex-start; }
+}
+
+/* v110: use the available desktop width for statistics and readable cards. */
+@media (min-width: 1180px) {
+  .shell {width:min(1570px,calc(100% - 40px));}
+}
+.lesson-page .lesson-status {grid-template-columns:repeat(6,minmax(0,1fr));}
+.lesson-page .lesson-status small {font-size:clamp(.91rem,1vw,1.04rem);color:#c9d1da;}
+@media(max-width:1100px){.lesson-page .lesson-status{grid-template-columns:repeat(3,minmax(0,1fr));}}
+@media(max-width:680px){.lesson-page .lesson-status{grid-template-columns:repeat(2,minmax(0,1fr));}}
+/* Checkbox dropdowns preserve the native multi-select for form submission. */
+.pct-filter-wrap{display:flex;flex-direction:column;gap:8px;min-width:0;font-size:.91rem;color:var(--text);}
+.pct-filter-label{display:block;font-size:.93rem;font-weight:600;}
+.pct-multiselect{position:relative;min-width:0;}
+.pct-multiselect summary{display:flex;align-items:center;gap:8px;min-height:43px;cursor:pointer;padding:9px 12px;color:var(--text);background:#1c222a;border:1px solid var(--line);border-radius:10px;list-style:none;font-size:.96rem;}
+.pct-multiselect summary::-webkit-details-marker{display:none;}
+.pct-multiselect summary::after{content:'▾';margin-left:auto;font-size:.95rem;color:#c4d1dc;}
+.pct-multiselect[open] summary{border-color:#adc5dc;border-radius:10px 10px 0 0;}
+.pct-filter-popover{position:absolute;z-index:100;top:calc(100% - 1px);left:0;right:0;max-height:300px;overflow:auto;overscroll-behavior:contain;padding:7px;border-radius:0 0 10px 10px;background:#1c222a;border:1px solid #879bad;box-shadow:0 14px 28px rgba(0,0,0,.46);}
+.pct-filter-option{display:flex;align-items:center;gap:10px;padding:8px;border-radius:6px;font-size:.94rem;line-height:1.35;cursor:pointer;overflow-wrap:anywhere;}
+.pct-filter-option:hover,.pct-filter-option:focus-within{background:#303f4a;}
+.pct-filter-option input{width:17px;height:17px;flex-shrink:0;accent-color:#96c6e6;}
+.pct-filter-helper{font-size:.85rem;color:#bac8d5;padding:8px;border-bottom:1px solid var(--line);}
+.pct-native-multiple{position:absolute!important;left:-9999px!important;width:1px!important;height:1px!important;opacity:0!important;pointer-events:none!important;}
+
+/* v111: explain stale per-position coaching instead of silently dropping recaps. */
+.coach-readiness-warning {
+  margin: 12px 0;
+  padding: 14px 16px;
+  border: 1px solid rgba(245,190,105,.44);
+  border-radius: 10px;
+  background: rgba(135,86,25,.14);
+  color: var(--text);
+  font-size: .95rem;
+  line-height: 1.55;
+}
+.coach-readiness-warning a {
+  color: var(--text);
+  font-weight: 750;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+/* v113: .glass uses backdrop-filter and therefore isolates stacking contexts.
+   Raise the ENTIRE filter surface above the subsequent metric cards, not only
+   the popover inside it. Opening one option list also raises it above adjacent
+   selectors in the same filter grid. No global header stacking is changed. */
+.analytics-filters, .player-filters { position:relative; z-index:30; overflow:visible; }
+.pct-multiselect[open] { z-index:200; }
+
+/* v115 — compact solved-status strip. The side column can be ~335px on desktop;
+   the old 175px minimum for the message forced the vote controls onto row two.
+   Only the solved (green) banner is affected; error and prompt notices can wrap. */
+.trainer-main .feedback.good:not(.hidden) {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+  padding: 9px 11px;
+  line-height: 1.25;
+}
+.trainer-main .feedback.good #feedback-message {
+  flex: 1 1 auto;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.trainer-main .feedback.good .position-votes:not(.hidden) {
+  flex: 0 0 auto;
+  display: inline-flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 5px;
+  margin-left: auto;
+}
+/* The group already has an explicit accessible label. Hide the redundant
+   visible prompt so the thumbs (and optional edit action) fit on one row. */
+.trainer-main .feedback.good .position-votes .rating-prompt {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+.trainer-main .feedback.good .position-votes .feedback-edit-correction {
+  flex: 0 0 29px;
+  width: 29px;
+  min-width: 29px;
+  height: 29px;
+  padding: 0;
+  display: inline-grid;
+  place-items: center;
+}
+
+/* v116: show the accepted move as the real board state. The engine-best
+   piece is a green, non-interactive annotation, never a replacement piece. */
+.square .best-move-preview {
+  position: absolute; z-index: 4; display: grid; place-items: center;
+  inset: 0; pointer-events: none; user-select: none;
+  font-size: .84em; font-style: normal; color: #89ffd0; opacity: .72;
+  text-shadow: 0 0 3px #093f28, 0 0 9px #0a7545, 1px 1px 0 #064224;
+}
+/* When the optimal destination is already occupied on the accepted board,
+   put a small ghost in its corner rather than hiding the actual piece. */
+.square .best-move-preview.has-occupant {
+  inset: 2px 2px auto auto; width: 45%; height: 45%;
+  background: rgba(8,72,46,.84); border: 1px solid #89ffd0;
+  border-radius: 50%; font-size: .38em; opacity: .95;
+}

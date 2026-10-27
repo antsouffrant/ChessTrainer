@@ -12,10 +12,10 @@
       <div class="lesson-training-progress-summary" aria-live="polite">
         <strong id="lesson-progress-count">Loading positions…</strong>
         <span id="lesson-progress-remaining"></span>
-        <label class="player-tracking-control" for="player-tracking-toggle" title="Choose whether your training attempts and solve time count toward Player statistics. Your puzzle progress is always saved.">
+        <label class="player-tracking-control" for="player-tracking-toggle" title="Track attempts and solve times in Player statistics. Off by default in evaluations; puzzle and evaluation progress are saved independently.">
           <input id="player-tracking-toggle" type="checkbox" checked>
           <span class="player-tracking-switch" aria-hidden="true"></span>
-          <span id="player-tracking-label">Learning stats on</span>
+          <span id="player-tracking-label">Track Player stats</span>
         </label>
       </div>
     </div>
@@ -86,8 +86,8 @@
           {% endif %}
         </div>
         <div id="opponent-move" class="opponent-move hidden"></div>
-        <button id="hint-toggle" class="hint-toggle secondary-button" type="button">Show hint</button>
-        <p id="solved-opening" class="solved-opening hidden"></p>
+        <button id="hint-toggle" class="hint-toggle secondary-button" type="button" aria-controls="trainer-hint-text" aria-expanded="false">Show hint</button>
+        <p id="trainer-hint-text" class="trainer-hint-text hidden" role="status" aria-live="polite"></p>
         {% if not coach_enabled %}
         <div id="explanation-feedback-area" class="rate-hover-zone explanation-feedback-area">
           <p id="coach-text" class="coach-text">Watch the last move, then find a strong response.</p>
@@ -108,11 +108,12 @@
           <span class="rating-prompt">Helpful position?</span>
           <button type="button" class="inline-rating-button" data-rating="1" aria-label="Helpful position" title="Helpful position">👍</button>
           <button type="button" class="inline-rating-button" data-rating="-1" aria-label="Unhelpful position" title="Unhelpful position">👎</button>
-            <button type="button" class="feedback-edit-correction hidden" aria-label="Edit suggested correction" title="Edit suggested correction">Edit suggestion</button>
+            <button type="button" class="feedback-edit-correction hidden" aria-label="Edit suggested correction" title="Edit suggested correction">✎</button>
         </div>
       </div>
 
       <div id="solution" class="solution hidden">
+        <div id="solved-opening-row" class="solved-opening-row hidden"><span>Opening</span><strong id="solved-opening"></strong></div>
         <div><span>Engine preference</span><strong id="best-move"></strong></div>
         <div><span>Evaluation · White + / Black −</span><strong id="evaluation"></strong></div>
         <div class="game-moves-result"><span>Your game moves</span><div id="played-moves-list" class="played-moves-list"></div></div>
@@ -128,12 +129,13 @@
         </div>
       </div>
 
-      <div id="solved-position-controls" class="solved-position-controls hidden" aria-label="Solved position controls">
+      <div id="solved-position-controls" class="solved-position-controls hidden{% if evaluation_run_id %} evaluation-controls{% endif %}" aria-label="Solved position controls">
         <button id="refresh-position-button" class="secondary-button solved-position-button" type="button" title="Reset this puzzle to unsolved">↻ Reset puzzle</button>
         <label id="learned-toggle-wrap" class="learned-toggle solved-position-button solved-learned-control hidden" title="Uncheck to put this position back into the training mix while keeping the current review session active">
           <input type="checkbox" id="learned-checkbox">
           <span>Position learned</span>
         </label>
+        {% if evaluation_run_id %}<span id="evaluation-saved-indicator" class="evaluation-progress-note hidden" role="status" aria-live="polite">✓ Evaluation saved</span>{% endif %}
       </div>
     </aside>
 
@@ -154,12 +156,14 @@
         <span class="coach-learning-badge" title="Verified ideas can become personal learning motifs">learns</span>
       </div>
       <p class="coach-panel-intro">Ask why a move works, test a continuation, or explore a learning motif. Stockfish and the same explanation engine used by the puzzle will help compare the possibilities. After solving, the coach may suggest a relevant classic or a strong move from your own games.</p>
+      <div id="coach-readiness-warning" class="coach-readiness-warning hidden" role="status" aria-live="polite"></div>
+      <div id="coach-recap-warning" class="coach-readiness-warning hidden" role="alert" aria-live="polite"></div>
       <div id="coach-concept-event" class="coach-concept-event hidden"></div>
       <div id="coach-chat" class="coach-chat" aria-live="polite">
         <div id="coach-position-review" class="coach-message assistant coach-position-review hidden">
-          <div class="coach-message-label">Coach · Solving continuation</div>
+          <div class="coach-message-label">Coach · Best move</div>
           <div id="explanation-feedback-area" class="rate-hover-zone explanation-feedback-area coach-message-body">
-            <div class="coach-solution-comment"><span class="coach-attempt-label" id="coach-solution-label">Solution</span>
+            <div class="coach-solution-comment"><span class="coach-attempt-label" id="coach-solution-label">Best move</span>
               <p id="coach-text" class="coach-text"></p></div>
             <div class="inline-feedback-votes hidden" data-feedback-category="explanation" role="group" aria-label="Was this explanation helpful?">
               <span class="rating-prompt">Helpful explanation?</span>

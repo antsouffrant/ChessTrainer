@@ -29,7 +29,9 @@ if (forceNewPlaylist || savedPlaylist?.url !== sessionUrl) savedPlaylist = null;
 let playlistPinned = false;
 let positionsRequestPending = false;
 function keepPlaylistSnapshot() {
-  if (!positions.length) return;
+  // Evaluation membership and solved progress live in SQLite, not in the
+  // ordinary training playlist's browser storage.
+  if (evaluationRunId || !positions.length) return;
   savedPlaylist = {
     url: sessionUrl, ids: positions.map(p => Number(p.id)), solvedMoves: sessionSolvedMoves
   };
@@ -54,11 +56,31 @@ function reconcilePlaylistLearnedState(positionId, learned, affectedPositionIds 
 const hasExplicitTrainingTarget = Boolean(conceptKey || openingKey || openingVariation || requestedPositionId || trainerLearningMode || trainerListingScope || trainerRatingMin || trainerRatingMax || trainerContextFilter || trainerMoveTypeFilter || benchmarkQueue || new URLSearchParams(location.search).has('sort'));
 let savedTraining = null;
 try { savedTraining = JSON.parse(localStorage.getItem(`${trainingStateKey}-state`) || 'null'); } catch (_) {}
-if (!hasExplicitTrainingTarget && savedTraining?.url?.startsWith(`/trainer/${jobId}`) && savedTraining.url !== `${location.pathname}${location.search}`) {
+function isEvaluationResumeUrl(url) {
+  if (typeof url !== 'string') return false;
+  try {
+    const candidate = new URL(url, location.origin);
+    return candidate.origin === location.origin &&
+      candidate.pathname === `/trainer/${jobId}` &&
+      (candidate.searchParams.has('benchmark') || candidate.searchParams.has('run_id'));
+  } catch (_) { return false; }
+}
+// Upgrade browsers that cached the old evaluation as their last training
+// playlist. That saved URL must never override Training, Lessons, or Openings.
+if (isEvaluationResumeUrl(savedTraining?.url) || isEvaluationResumeUrl(localStorage.getItem(trainingStateKey))) {
+  localStorage.removeItem(trainingStateKey);
+  localStorage.removeItem(`${trainingStateKey}-state`);
+  savedTraining = null;
+}
+if (!hasExplicitTrainingTarget && savedTraining?.url?.startsWith(`/trainer/${jobId}`) &&
+    !isEvaluationResumeUrl(savedTraining.url) && savedTraining.url !== `${location.pathname}${location.search}`) {
   location.replace(savedTraining.url);
 }
 const resumePositionId = !forceNewPlaylist && !requestedPositionId && savedTraining?.url === sessionUrl ? Number(savedTraining.positionId) || null : null;
 function rememberTraining(positionId) {
+  // Only ordinary lessons/openings/training become the default resume target.
+  // Evaluations are always launched explicitly from Process/Coach/featured tiles.
+  if (evaluationRunId) return;
   const url = sessionUrl;
   localStorage.setItem(trainingStateKey, url);
   localStorage.setItem(`${trainingStateKey}-state`, JSON.stringify({url, positionId}));
@@ -80,13 +102,26 @@ try {
 let currentIndex = 0;
 let selectedSquare = null;
 let solved = false;
+// Feedback confirmation belongs to a specific evaluation run AND position;
+// solving alone never implies the evaluation has been reviewed.
+const evaluationFeedbackSavedByPosition = new Map();
+function evaluationFeedbackSaved() {
+  return Boolean(evaluationRunId && solved &&
+    evaluationFeedbackSavedByPosition.get(Number(currentPosition()?.id || 0)));
+}
+function updateEvaluationFeedbackState(positionId, saved) {
+  if (!evaluationRunId || !positionId) return;
+  evaluationFeedbackSavedByPosition.set(Number(positionId), Boolean(saved));
+  // Avoid delayed network responses from unlocking a different puzzle.
+  if (Number(currentPosition()?.id) === Number(positionId)) updateNavigationMeta();
+}
 let inputLocked = true;
 // Active learning time is measured only while the training tab is visible and
 // focused. No DB session is created until the user submits a legal move.
 // Persist the clock-in preference across game lists and browser sessions.
 // Turning this off suppresses Player events, never normal puzzle completion.
 const playerTrackingStorageKey = 'pct-player-tracking-enabled';
-let learningTrackingEnabled = localStorage.getItem(playerTrackingStorageKey) !== '0';
+let learningTrackingEnabled = evaluationRunId ? false : localStorage.getItem(playerTrackingStorageKey) !== '0';
 const playerTrackingToggleEl = document.getElementById('player-tracking-toggle');
 const playerTrackingLabelEl = document.getElementById('player-tracking-label');
 let playerClockOutRequest = Promise.resolve();
@@ -127,13 +162,14 @@ function learningClockCommit() {
 // creates a new session on the next legal attempt; earlier data is preserved.
 function updatePlayerTrackingUI() {
   if (playerTrackingToggleEl) playerTrackingToggleEl.checked = learningTrackingEnabled;
-  if (playerTrackingLabelEl) playerTrackingLabelEl.textContent = learningTrackingEnabled ? 'Learning stats on' : 'Learning stats off';
+  if (playerTrackingLabelEl) playerTrackingLabelEl.textContent = learningTrackingEnabled ? 'Player stats on' : 'Player stats off';
 }
 function setPlayerTrackingEnabled(enabled) {
   if (learningTrackingEnabled === enabled) return;
   learningClockPause();
   learningTrackingEnabled = enabled;
-  localStorage.setItem(playerTrackingStorageKey, enabled ? '1' : '0');
+  // An evaluation always starts with tracking off, without overwriting the normal preference.
+  if (!evaluationRunId) localStorage.setItem(playerTrackingStorageKey, enabled ? '1' : '0');
   learningClockElapsedMs = 0;
   if (!enabled) {
     restartTrackedSession = true;
@@ -141,7 +177,8 @@ function setPlayerTrackingEnabled(enabled) {
     const positionId = learningClockPositionId;
     if (positionId) {
       playerClockOutRequest = playerClockOutRequest.catch(() => {}).then(() =>
-        fetch(`/api/positions/${positionId}/player/clock-out`, {method:'POST', keepalive:true})
+        fetch(`/api/positions/${positionId}/player/clock-out`, {method:'POST', keepalive:true,
+          headers:{'Content-Type':'application/json'}, body:JSON.stringify({evaluation_run_id:evaluationRunId})})
       ).catch(() => {});
     }
   } else {
@@ -150,11 +187,6 @@ function setPlayerTrackingEnabled(enabled) {
   updatePlayerTrackingUI();
 }
 updatePlayerTrackingUI();
-if (evaluationRunId && playerTrackingToggleEl) {
-  playerTrackingToggleEl.disabled = true;
-  const trackingLabel = document.getElementById('player-tracking-label');
-  if (trackingLabel) trackingLabel.textContent = 'Evaluation · separate from Player stats';
-}
 playerTrackingToggleEl?.addEventListener('change', () => setPlayerTrackingEnabled(playerTrackingToggleEl.checked));
 if (typeof document.addEventListener === 'function') {
   document.addEventListener('visibilitychange', () => {
@@ -197,6 +229,7 @@ let solvingMoveSan = null;
 let solvingMoveFen = null;
 let solutionBestMoveUci = null;
 let solutionBestMoveSan = null;
+let solvedReviewFen = null; // Board after the actual accepted move; engine-best remains a visual annotation.
 
 const boardEl = document.getElementById('chessboard');
 const feedbackEl = document.getElementById('feedback');
@@ -258,16 +291,20 @@ const taskHeadingEl = document.getElementById('task-heading');
 const coachTextEl = document.getElementById('coach-text');
 const categoryEl = document.getElementById('category');
 const hintToggleEl = document.getElementById('hint-toggle');
+const hintTextEl = document.getElementById('trainer-hint-text');
 const coachChatEl = document.getElementById('coach-chat');
 const coachPositionReviewEl = document.getElementById('coach-position-review');
 const coachAttemptCommentsEl = document.getElementById('coach-attempt-comments');
 const coachSolutionLabelEl = document.getElementById('coach-solution-label');
 const solvedOpeningEl = document.getElementById('solved-opening');
+const solvedOpeningRowEl = document.getElementById('solved-opening-row');
 const coachFormEl = document.getElementById('coach-form');
 const coachInputEl = document.getElementById('coach-input');
 const coachSendEl = document.getElementById('coach-send');
 const coachModeNoteEl = document.getElementById('coach-mode-note');
 const coachConceptEventEl = document.getElementById('coach-concept-event');
+const coachReadinessWarningEl = document.getElementById('coach-readiness-warning');
+const coachRecapWarningEl = document.getElementById('coach-recap-warning');
 const refreshPositionEl = document.getElementById('refresh-position-button');
 const solvedPositionControlsEl = document.getElementById('solved-position-controls');
 const trainerRootEl = document.getElementById('trainer-root');
@@ -277,6 +314,8 @@ const historicCoachRequests = new Set();
 const brilliantCoachRequests = new Set();
 const proactiveCoachRequests = new Map();
 const coachSolveSessionKeys = new Map();
+const coachAttemptLogFailures = new Map();
+let coachThreadLoadSerial = 0;
 function coachSolveSessionKey(positionId) {
   const id = Number(positionId || 0);
   if (!coachSolveSessionKeys.has(id)) {
@@ -284,8 +323,38 @@ function coachSolveSessionKey(positionId) {
       ? crypto.randomUUID().replaceAll('-', '')
       : `${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}`;
     coachSolveSessionKeys.set(id, evaluationRunId ? `eval_${evaluationRunId}_${token}` : token);
+    coachAttemptLogFailures.delete(id);
   }
   return coachSolveSessionKeys.get(id);
+}
+function coachingAvailableForPosition(position) {
+  // Legacy cards without a readiness field remain usable; the server guards
+  // every vote against an actually stale per-position model.
+  return Boolean(position && position.coaching_ready !== false);
+}
+function displayCoachRefreshWarning(position) {
+  if (!coachReadinessWarningEl) return;
+  coachReadinessWarningEl.replaceChildren();
+  const unavailable = Boolean(position && !coachingAvailableForPosition(position));
+  coachReadinessWarningEl.classList.toggle('hidden', !unavailable);
+  coachRecapWarningEl?.classList.add('hidden');
+  if (!unavailable) return;
+  const storedVersion = position.coaching_version || 'not refreshed';
+  const activeVersion = position.active_coaching_version || 'current';
+  const text = document.createElement('span');
+  const cached = Boolean(position?.coach_explanation && position?.feedback_message_id);
+  text.textContent = cached
+    ? `Cached coaching from ${storedVersion} (active: ${activeVersion}). You can still rate or edit feedback on displayed messages; refresh coaching for new current-model advice and chat. `
+    : `No saved coaching message is available for this position (saved: ${storedVersion}; active: ${activeVersion}). Refresh coaching to generate explanations. `;
+  const processLink = document.createElement('a');
+  processLink.href = `/processes?job_id=${jobId}`;
+  processLink.textContent = 'Open Process to refresh coaching';
+  coachReadinessWarningEl.append(text, processLink);
+}
+function showCoachRecapIssue(positionId, message) {
+  if (!coachRecapWarningEl || Number(displayedPositionId) !== Number(positionId)) return;
+  coachRecapWarningEl.textContent = `Attempted-move coaching could not be loaded: ${message}. Verified move attempts remain saved.`;
+  coachRecapWarningEl.classList.remove('hidden');
 }
 function preserveCoachReviewInThread() {
   if (!coachChatEl) return;
@@ -324,12 +393,17 @@ function renderCoachAttemptComments(recap, positionId = null) {
     try { structured = JSON.parse(recap.structured_json); } catch (_) { structured = {}; }
   }
   const notes = attemptNotesFromRecap(structured);
+  const recapVersion = structured?.coaching_version || 'unknown generation';
+  const isHistorical = Boolean(recapVersion !== currentPosition()?.coaching_version);
   coachAttemptCommentsEl.replaceChildren();
   const solutionNote = notes.find(note => note.origin === 'solving') || notes.find(note => note.correct && note.origin !== 'game');
+  // A near-optimal accepted move can be the final correct attempt without being
+  // Stockfish's primary choice. Never put that alternate line in Best move.
+  const engineBestUci = solutionBestMoveUci || currentPosition()?.best_move_uci || '';
+  const recapMatchesBest = Boolean(solutionNote?.move_uci && engineBestUci && solutionNote.move_uci === engineBestUci);
   if (coachSolutionLabelEl) {
-    coachSolutionLabelEl.textContent = solutionNote
-      ? `Solution · ${solutionNote.move_san || solutionNote.move_uci}` : 'Solution';
-    coachSolutionLabelEl.dataset.fromRecap = solutionNote ? '1' : '0';
+    coachSolutionLabelEl.textContent = `Best move · ${solutionBestMoveSan || currentPosition()?.best_move_san || engineBestUci || '—'}`;
+    coachSolutionLabelEl.dataset.fromRecap = (recapMatchesBest && !isHistorical) ? '1' : '0';
   }
   // A move attempted twice in the same session is the same continuation, not
   // two independently judged chess claims. The last verified note wins.
@@ -350,8 +424,7 @@ function renderCoachAttemptComments(recap, positionId = null) {
     const title = document.createElement('div');
     title.className = 'coach-message-label';
     const purpose = note.origin === 'game' ? (note.purpose || (note.correct ? 'explanation' : 'learning')) : 'learning';
-    title.textContent = `Coach · ${note.origin === 'game' ? 'Your game' :
-      note.origin === 'previous_session' ? 'Previously tried' : 'Attempted move'} · ${note.move_san || key} · ${purpose === 'learning' ? 'Learning' : 'Explanation'}`;
+    title.textContent = `${note.origin === 'game' ? 'Game move' : 'Attempted move'} · ${note.move_san || key} · ${purpose === 'learning' ? 'Learning' : 'Explanation'}${isHistorical ? ` · Saved ${recapVersion}` : ''}`;
     const bubble = document.createElement('div');
     bubble.className = 'coach-message-body rate-hover-zone explanation-feedback-area';
     const copy = document.createElement('p');
@@ -361,6 +434,7 @@ function renderCoachAttemptComments(recap, positionId = null) {
     votes.className = 'inline-feedback-votes';
     votes.dataset.feedbackCategory = 'continuation';
     votes.dataset.continuationKey = note.origin === 'game' ? `game:${key}` : key;
+    if (note.feedback_message_id) votes.dataset.feedbackMessageId = String(note.feedback_message_id);
     votes.setAttribute('role', 'group');
     votes.setAttribute('aria-label', `Was the coaching for ${note.move_san || key} helpful?`);
     votes.innerHTML = `<span class="rating-prompt">Helpful explanation?</span>
@@ -372,20 +446,33 @@ function renderCoachAttemptComments(recap, positionId = null) {
     coachAttemptCommentsEl.append(section);
   }
   coachAttemptCommentsEl.classList.toggle('hidden', !coachAttemptCommentsEl.childElementCount);
-  if (solutionNote?.text && coachTextEl) {
-    coachTextEl.textContent = solutionNote.text;
+  if (coachTextEl) {
+    if (recapMatchesBest && !isHistorical && solutionNote.text) coachTextEl.textContent = solutionNote.text;
+    else coachTextEl.textContent = currentPosition()?.coach_explanation ||
+      'No verified explanation of the engine’s preferred move is available.';
     explainedPositionId = Number(displayedPositionId);
   }
+  const solvingId = (recapMatchesBest && !isHistorical && solutionNote?.feedback_message_id) || currentPosition()?.feedback_message_id;
+  document.querySelectorAll('.inline-feedback-votes[data-feedback-category="explanation"]').forEach(group => {
+    if (solvingId) group.dataset.feedbackMessageId = String(solvingId);
+    else delete group.dataset.feedbackMessageId;
+  });
+  void loadPositionRatings(Number(displayedPositionId));
   updatePositionRatingUI();
   if (notes.length && coachChatEl) coachChatEl.scrollTop = 0;
 }
 function clearCoachAttemptComments() {
+  const positionMessageId = currentPosition()?.feedback_message_id;
+  document.querySelectorAll('.inline-feedback-votes[data-feedback-category="explanation"]').forEach(group => {
+    if (positionMessageId) group.dataset.feedbackMessageId = String(positionMessageId);
+    else delete group.dataset.feedbackMessageId;
+  });
   if (coachAttemptCommentsEl) {
     coachAttemptCommentsEl.replaceChildren();
     coachAttemptCommentsEl.classList.add('hidden');
   }
   if (coachSolutionLabelEl) {
-    coachSolutionLabelEl.textContent = 'Solution';
+    coachSolutionLabelEl.textContent = 'Best move';
     delete coachSolutionLabelEl.dataset.fromRecap;
   }
 }
@@ -398,17 +485,45 @@ async function publishPostSolveCoach(position) {
       method: 'POST', headers: {'Content-Type':'application/json'},
       body: JSON.stringify({session_key: sessionKey, evaluation_run_id: evaluationRunId})
     });
-    if (!response.ok) return;
-    const result = await response.json();
-    const message = result.message;
-    if (!message || displayedPositionId !== positionId) return;
-    if (coachThreadReadyPositionId !== positionId) {
-      await loadCoachThread(position);
+    if (!response.ok) {
+      const failure = await response.json().catch(() => ({}));
+      showCoachRecapIssue(positionId, failure.error || `HTTP ${response.status}`);
       return;
     }
-    // Each attempted continuation is a separate independently rateable message.
+    const result = await response.json();
+    if (displayedPositionId !== positionId) return;
+    coachRecapWarningEl?.classList.add('hidden');
+    const message = result.message;
+    if (!message) {
+      showCoachRecapIssue(positionId, 'The server returned no saved recap.');
+      return;
+    }
+    if (coachThreadReadyPositionId !== positionId) {
+      // A history load may have started before the solved recap was committed.
+      // It is not an authoritative acknowledgement of THIS solve. Always
+      // render the fresh recap returned by POST after the thread settles.
+      await loadCoachThread(position);
+      if (Number(displayedPositionId) !== positionId) return;
+    }
+    // POST returned the exact session's recap: never replace it with a stale
+    // history snapshot from a concurrently loading thread.
     renderCoachAttemptComments(message, positionId);
-  } catch (_) { /* A recap is optional and must never block the board. */ }
+    const meta = (() => {
+      try { return JSON.parse(message.structured_json || '{}'); }
+      catch (_) { return {}; }
+    })();
+    const wrongCount = (meta.attempts || []).filter(attempt => !attempt.correct).length;
+    const learningCount = attemptNotesFromRecap(meta).filter(note =>
+      !note.correct && note.origin !== 'game' && note.origin !== 'solving').length;
+    if (wrongCount && !learningCount) {
+      showCoachRecapIssue(positionId, `${wrongCount} wrong move(s) were saved, but their coaching notes were not returned.`);
+    } else if (coachAttemptLogFailures.get(positionId)) {
+      showCoachRecapIssue(positionId, `${coachAttemptLogFailures.get(positionId)} move(s) were verified but not saved as coach attempts; this recap may omit them.`);
+    }
+  } catch (error) {
+    // A network or recap failure must not erase the learner's verified moves.
+    showCoachRecapIssue(positionId, error?.message || 'Network request failed');
+  }
 }
 
 const fmtCount = value => window.pctFormatCount ? window.pctFormatCount(value) : String(Number(value || 0));
@@ -457,7 +572,6 @@ function learningModeMeta(value, category='') {
     opposition: {label:'Opponent opportunity', tone:'opposition'}
   }[value] || {label:'Training position', tone:'training'};
 }
-function learningModeLabel(value, category='') { return learningModeMeta(value, category).label; }
 
 function renderConcepts(concepts = [], taxonomy = null) {
   if (taxonomy && currentPosition()) currentPosition().taxonomy = taxonomy;
@@ -490,6 +604,8 @@ const positionRatings = new Map();
 const positionCorrections = new Map();
 const continuationRatings = new Map();
 const continuationCorrections = new Map();
+const displayedMessageRatings = new Map();
+const displayedMessageCorrections = new Map();
 const taxonomyFeedbackRecords = new Map();
 const taxonomyFeedbackEl = document.getElementById('taxonomy-feedback');
 const taxonomyFeedbackStatusEl = document.getElementById('taxonomy-feedback-status');
@@ -502,20 +618,14 @@ function nextFeedbackRating(currentRating, clickedRating) {
   return Number(currentRating) === Number(clickedRating) ? 0 : Number(clickedRating);
 }
 
-function alphabeticalMotifs(options = []) {
-  return [...options].sort((a, b) =>
-    Number(String(a.key || '').startsWith('evaluation_')) - Number(String(b.key || '').startsWith('evaluation_')) ||
-    String(a.name || '').localeCompare(String(b.name || ''), undefined, {sensitivity:'base'}) ||
-    String(a.key || '').localeCompare(String(b.key || '')));
-}
 
 function closeCorrectionDialog() {
   if (correctionDialog?.open) correctionDialog.close();
   correctionTarget = null;
 }
-function openCorrectionDialog(category, targetId, existing = {}, snapshot = '', continuationKey = '') {
+function openCorrectionDialog(category, targetId, existing = {}, snapshot = '', continuationKey = '', messageSnapshotId = null) {
   if (!correctionDialog || !['position', 'explanation', 'coaching', 'continuation'].includes(category)) return;
-  correctionTarget = {category, targetId, snapshot, continuationKey};
+  correctionTarget = {category, targetId, snapshot, continuationKey, messageSnapshotId};
   const position = category === 'position';
   const names = {position:'Improve this training position',
                  explanation:'Suggest a better explanation', continuation:'Improve this continuation', coaching:'Suggest a better coach response'};
@@ -536,7 +646,7 @@ document.getElementById('coaching-correction-skip')?.addEventListener('click', c
 correctionForm?.addEventListener('submit', async event => {
   event.preventDefault();
   if (!correctionTarget) return;
-  const {category, targetId, snapshot, continuationKey} = correctionTarget;
+  const {category, targetId, snapshot, continuationKey, messageSnapshotId} = correctionTarget;
   const value = document.getElementById('coaching-correction-text').value.trim();
   if (!value) return;
   const btn = document.getElementById('coaching-correction-save');
@@ -550,18 +660,25 @@ correctionForm?.addEventListener('submit', async event => {
       payload.category = category;
       payload.content_snapshot = snapshot;
       if (category === 'continuation') payload.continuation_key = continuationKey;
+      if (messageSnapshotId) payload.message_snapshot_id = messageSnapshotId;
     }
     payload.suggested_text = value;
     const response = await fetch(url, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || 'Could not save correction');
+    if (evaluationRunId) updateEvaluationFeedbackState(Number(currentPosition()?.id), data.evaluation_feedback_saved === true);
     if (chat) {
       const element = document.querySelector(`.coach-response-feedback[data-message-id="${targetId}"]`);
       if (element) element.dataset.suggestedText = data.suggested_text || '';
     } else {
-      positionRatings.set(targetId, data.ratings || {});
-      positionCorrections.set(targetId, data.corrections || {});
-      if (category === 'continuation') {
+      if (messageSnapshotId) {
+        displayedMessageRatings.set(targetId, data.message_ratings || {});
+        displayedMessageCorrections.set(targetId, data.message_corrections || {});
+      } else {
+        positionRatings.set(targetId, data.ratings || {});
+        positionCorrections.set(targetId, data.corrections || {});
+      }
+      if (!messageSnapshotId && category === 'continuation') {
         continuationRatings.set(targetId, data.continuation_ratings || {});
         continuationCorrections.set(targetId, data.continuation_corrections || {});
       }
@@ -720,6 +837,7 @@ async function updateTaxonomyFeedbackChoice(select) {
     taxonomyWriteQueue = task.catch(() => {});
     await task;
     if (Number(currentPosition()?.id) !== id) return;
+    if (evaluationRunId) updateEvaluationFeedbackState(id, data.evaluation_feedback_saved === true);
     if (taxonomyFeedbackStatusEl) taxonomyFeedbackStatusEl.textContent = selectedKey
       ? "Feedback saved. Select any pill again to change or clear your answer. The coach's analysis is unchanged."
       : "Feedback cleared for this field. The coach's original label is shown again.";
@@ -741,10 +859,14 @@ function updatePositionRatingUI() {
   document.querySelectorAll('.inline-feedback-votes[data-feedback-category]').forEach(group => {
     const category = group.dataset.feedbackCategory;
     const key = group.dataset.continuationKey;
-    const voted = category === 'continuation'
-      ? Number((continuationRatings.get(Number(p?.id)) || {})[key] || 0)
+    const messageId = Number(group.dataset.feedbackMessageId || (category === 'explanation' ? p?.feedback_message_id : 0));
+    const messageVote = messageId ? (displayedMessageRatings.get(Number(p?.id)) || {})[String(messageId)] : undefined;
+    const voted = messageId
+      ? Number(messageVote || 0)
+      : category === 'continuation' ? Number((continuationRatings.get(Number(p?.id)) || {})[key] || 0)
       : Number(ratings[category] || 0);
     const eligible = ready &&
+      (!['explanation','continuation'].includes(category) || Boolean(messageId)) &&
       (category !== 'explanation' || solvingExplanationReadyForRating());
     group.classList.toggle('hidden', !eligible);
     group.querySelectorAll('[data-rating]').forEach(button => {
@@ -770,7 +892,10 @@ async function loadPositionRatings(positionId) {
     positionCorrections.set(id, data.corrections || {});
     continuationRatings.set(id, data.continuation_ratings || {});
     continuationCorrections.set(id, data.continuation_corrections || {});
+    displayedMessageRatings.set(id, data.message_ratings || {});
+    displayedMessageCorrections.set(id, data.message_corrections || {});
     if (data.taxonomy_feedback) taxonomyFeedbackRecords.set(id, data.taxonomy_feedback);
+    if (evaluationRunId) updateEvaluationFeedbackState(id, data.evaluation_feedback_saved === true);
     if (Array.isArray(data.motif_options)) suggestedMotifOptions = data.motif_options;
     if (Number(currentPosition()?.id) === id) updatePositionRatingUI();
   } catch (_) { /* Unavailable votes must not block training. */ }
@@ -783,11 +908,15 @@ async function ratePositionFeedback(button) {
   const category = group?.dataset.feedbackCategory;
   const chosenRating = Number(button.dataset.rating);
   if (!['position', 'explanation', 'continuation'].includes(category) || ![-1, 1].includes(chosenRating)) return;
+  const messageId = Number(group.dataset.feedbackMessageId ||
+    (category === 'explanation' ? position.feedback_message_id : 0));
+  if (['explanation','continuation'].includes(category) && !messageId) return;
   const key = group.dataset.continuationKey || '';
   // Each failed continuation owns its vote and correction, independently of
   // solving and of all other attempted moves.
-  const priorRating = category === 'continuation'
-    ? Number((continuationRatings.get(id) || {})[key] || 0)
+  const priorRating = messageId
+    ? Number((displayedMessageRatings.get(id) || {})[String(messageId)] || 0)
+    : category === 'continuation' ? Number((continuationRatings.get(id) || {})[key] || 0)
     : Number(positionRatings.get(id)?.[category] || 0);
   const rating = nextFeedbackRating(priorRating, chosenRating);
   const buttons = [...group.querySelectorAll('[data-rating]')];
@@ -801,14 +930,21 @@ async function ratePositionFeedback(button) {
         category, rating, evaluation_run_id:evaluationRunId, lesson_key: new URLSearchParams(location.search).get('concept') || '',
         content_snapshot: category === 'explanation' ? explanationPackageSnapshot()
           : category === 'continuation' ? group.closest('.coach-message')?.querySelector('.coach-text')?.textContent || '' : '',
-        continuation_key: category === 'continuation' ? key : undefined
+        continuation_key: category === 'continuation' ? key : undefined,
+        message_snapshot_id: messageId || undefined
       })
     });
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || 'Could not save rating');
-    positionRatings.set(id, data.ratings || {});
-    positionCorrections.set(id, data.corrections || {});
-    if (category === 'continuation') {
+    if (evaluationRunId) updateEvaluationFeedbackState(id, data.evaluation_feedback_saved === true);
+    if (messageId) {
+      displayedMessageRatings.set(id, data.message_ratings || {});
+      displayedMessageCorrections.set(id, data.message_corrections || {});
+    } else {
+      positionRatings.set(id, data.ratings || {});
+      positionCorrections.set(id, data.corrections || {});
+    }
+    if (!messageId && category === 'continuation') {
       continuationRatings.set(id, data.continuation_ratings || {});
       continuationCorrections.set(id, data.continuation_corrections || {});
     }
@@ -819,10 +955,11 @@ async function ratePositionFeedback(button) {
     // benchmark; it also distinguishes a saved vote from a failed request.
     setRatingFeedbackStatus(group, rating === 0 ? 'Rating withdrawn' : 'Rating saved');
     if (rating === -1) openCorrectionDialog(category, id,
-      category === 'continuation' ? (continuationCorrections.get(id) || {})[key] || {}
+      messageId ? (displayedMessageCorrections.get(id) || {})[String(messageId)] || {}
+        : category === 'continuation' ? (continuationCorrections.get(id) || {})[key] || {}
         : positionCorrections.get(id)?.[category] || {},
       category === 'explanation' ? explanationPackageSnapshot()
-        : category === 'continuation' ? group.closest('.coach-message')?.querySelector('.coach-text')?.textContent || '' : '', key);
+        : category === 'continuation' ? group.closest('.coach-message')?.querySelector('.coach-text')?.textContent || '' : '', key, messageId);
     else if (correctionTarget?.targetId === id && correctionTarget?.category === category &&
              (category !== 'continuation' || correctionTarget.continuationKey === key)) closeCorrectionDialog();
   } catch (err) {
@@ -844,15 +981,18 @@ function handleExplanationFeedbackClick(event) {
     const id = Number(currentPosition()?.id || 0);
     const category = group.dataset.feedbackCategory;
     const key = group.dataset.continuationKey || '';
-    const rating = category === 'continuation'
-      ? (continuationRatings.get(id) || {})[key]
+    const messageId = Number(group.dataset.feedbackMessageId ||
+      (category === 'explanation' ? currentPosition()?.feedback_message_id : 0));
+    const rating = messageId ? (displayedMessageRatings.get(id) || {})[String(messageId)]
+      : category === 'continuation' ? (continuationRatings.get(id) || {})[key]
       : positionRatings.get(id)?.[category];
     if (id && Number(rating || 0) === -1) {
       openCorrectionDialog(category, id,
-        category === 'continuation' ? (continuationCorrections.get(id) || {})[key] || {}
+        messageId ? (displayedMessageCorrections.get(id) || {})[String(messageId)] || {}
+          : category === 'continuation' ? (continuationCorrections.get(id) || {})[key] || {}
           : positionCorrections.get(id)?.[category] || {},
         category === 'explanation' ? explanationPackageSnapshot()
-          : category === 'continuation' ? group.closest('.coach-message')?.querySelector('.coach-text')?.textContent || '' : '', key);
+          : category === 'continuation' ? group.closest('.coach-message')?.querySelector('.coach-text')?.textContent || '' : '', key, messageId);
     }
     return;
   }
@@ -890,11 +1030,6 @@ function squaresForOrientation(color) {
   return out;
 }
 
-function isUsersPiece(piece, color) {
-  if (!piece) return false;
-  const isWhite = piece === piece.toUpperCase();
-  return color === 'white' ? isWhite : !isWhite;
-}
 
 function isPieceForColor(piece, color) {
   if (!piece || !color) return false;
@@ -907,7 +1042,7 @@ function analysisModeActive() {
 }
 
 function fenTurnColor(fen) {
-  // The solved board normally shows the *result* of the user's correct move,
+  // The solved board shows the *result* of the accepted move the user played,
   // so the next piece to move may belong to the opponent, not the learner.
   const turn = String(fen || '').split(/\s+/)[1];
   return turn === 'w' ? 'white' : turn === 'b' ? 'black' : null;
@@ -984,7 +1119,7 @@ function renderBoard(position, fen = position.fen, interactive = true) {
   const board = parseFen(fen);
   ensureBoardGrid(position);
   hideEngineArrow();
-  boardEl.querySelectorAll('.moving-piece').forEach(el => el.remove());
+  boardEl.querySelectorAll('.moving-piece, .best-move-preview').forEach(el => el.remove());
   // A solved position is ready for a new branch even before Stockfish is
   // explicitly enabled. Its first move will enable analysis automatically.
   const canInteract = Boolean(interactive && (solved
@@ -1000,6 +1135,18 @@ function renderBoard(position, fen = position.fen, interactive = true) {
   }
 }
 
+function activateSolvedBoardAnalysis({deferEvaluation = false} = {}) {
+  if (!solved || engineToggleEl.disabled || engineToggleEl.checked) return false;
+  engineToggleEl.checked = true;
+  clearBoardMark();
+  updateHistoryUI();
+  engineEvalEl.textContent = '…';
+  // An engine response can re-render the board and cancel an ongoing drag.
+  // In that case playAnalysisMove() requests the fresh evaluation after drop.
+  if (!deferEvaluation) refreshEngineEvaluation();
+  return true;
+}
+
 // Drag-and-drop and click-to-move must both use the same legal-move resolver.
 // The pointer controller waits for real movement before starting a drag, so
 // taps/clicks are left intact and dragging works on touch screens too.
@@ -1007,6 +1154,7 @@ boardDragController = window.installBoardPointerDrag(boardEl, {
   canStart: from => boardInteractive &&
     isPieceForColor(renderedBoardMap[from], interactionColor(currentPosition())),
   onStart: from => {
+    activateSolvedBoardAnalysis({deferEvaluation: true});
     selectedSquare = from;
     paintSelection();
   },
@@ -1015,8 +1163,13 @@ boardDragController = window.installBoardPointerDrag(boardEl, {
     selectedSquare = null;
     paintSelection();
     if (legalMove) submitBoardMove(from, to, legalMove);
+    else if (analysisModeActive()) refreshEngineEvaluation();
   },
-  onCancel: () => { selectedSquare = null; paintSelection(); }
+  onCancel: () => {
+    selectedSquare = null;
+    paintSelection();
+    if (analysisModeActive()) refreshEngineEvaluation();
+  }
 });
 boardEl.addEventListener('click', event => {
   const square = event.target.closest?.('.square');
@@ -1079,10 +1232,12 @@ function coachMessageHtml(message) {
   let historical = false;
   let brilliant = false;
   let solvedRecap = false;
+  let generatedWith = message.generation_version || '';
   try {
     const structured = typeof message.structured_json === 'string'
       ? JSON.parse(message.structured_json || '{}')
       : (message.structured_json || {});
+    generatedWith = generatedWith || structured.coaching_version || '';
     const claims = structured.claims || [];
     if (role === 'assistant' && claims.length && claims[0].verdict) {
       const v = claims[0].verdict;
@@ -1116,7 +1271,7 @@ function coachMessageHtml(message) {
          <button type="button" class="feedback-edit-correction${rating === -1 ? '' : ' hidden'}" title="Edit your suggestion" aria-label="Edit coaching suggestion">Edit suggestion</button>
        </div>`
     : '';
-  return `<div class="coach-message ${role}${historical ? ' historic-coach-message' : ''}${brilliant ? ' brilliant-coach-message' : ''}"${messageId ? ` data-message-id="${messageId}"` : ''}><div class="coach-message-label">${historical ? 'Coach · Chess history' : brilliant ? 'Coach · From your games' : solvedRecap ? 'Coach · Your attempted moves' : label}</div>${verdict}<div class="coach-message-body">${escapeCoachHtml(message.content)}${historicalLink || brilliantLink ? `<div class="historic-coach-link-row">${historicalLink || brilliantLink}</div>` : ''}</div>${feedback}</div>`;
+  return `<div class="coach-message ${role}${historical ? ' historic-coach-message' : ''}${brilliant ? ' brilliant-coach-message' : ''}"${messageId ? ` data-message-id="${messageId}"` : ''}><div class="coach-message-label">${historical ? 'Coach · Chess history' : brilliant ? 'Coach · From your games' : solvedRecap ? 'Coach · Your attempted moves' : label}${role === 'assistant' && generatedWith ? ` · ${escapeCoachHtml(generatedWith)}` : ''}</div>${verdict}<div class="coach-message-body">${escapeCoachHtml(message.content)}${historicalLink || brilliantLink ? `<div class="historic-coach-link-row">${historicalLink || brilliantLink}</div>` : ''}</div>${feedback}</div>`;
 }
 
 // The server stores each historical reference as an ordinary coach message,
@@ -1166,7 +1321,7 @@ async function maybeOfferBrilliantCoach(position) {
 }
 
 function maybeOfferProactiveCoach(position) {
-  if (!position || !coachChatEl || !solved || !position.learned || evaluationRunId) return Promise.resolve();
+  if (!position || !coachChatEl || !solved || !position.learned || evaluationRunId || !coachingAvailableForPosition(position)) return Promise.resolve();
   if (proactiveCoachRequests.has(position.id)) return proactiveCoachRequests.get(position.id);
   const promise = maybeOfferHistoricalCoach(position).then(shown => {
     if (!shown && displayedPositionId === position.id) return maybeOfferBrilliantCoach(position);
@@ -1177,6 +1332,14 @@ function maybeOfferProactiveCoach(position) {
 
 function updateCoachMode() {
   if (!coachModeNoteEl || !coachInputEl) return;
+  const available = coachingAvailableForPosition(currentPosition());
+  coachInputEl.disabled = !available;
+  if (coachSendEl) coachSendEl.disabled = !available;
+  if (!available) {
+    coachModeNoteEl.textContent = 'Chess training remains available. Refresh coaching for this position before chatting or rating its explanations.';
+    coachInputEl.placeholder = 'Coaching requires a current-model refresh…';
+    return;
+  }
   if (solved) {
     coachModeNoteEl.textContent = 'Solved: ask why, test a move or variation, or explore a learning motif.';
     coachInputEl.placeholder = 'Try: Why is this better? What if d6? Show me a pin.';
@@ -1188,15 +1351,26 @@ function updateCoachMode() {
 
 async function loadCoachThread(position) {
   if (!coachChatEl || !position) return;
+  const threadRequest = ++coachThreadLoadSerial;
   coachThreadReadyPositionId = null;
+  if (!coachingAvailableForPosition(position) || !position?.coach_explanation) {
+    // No saved messages or generated prose is available for this position.
+    coachChatEl.innerHTML = '<div class="coach-empty">Coaching messages require a refresh for this game list.</div>';
+    preserveCoachReviewInThread();
+    clearCoachAttemptComments();
+    coachThreadReadyPositionId = position.id;
+    updatePositionRatingUI();
+    updateCoachMode();
+    return;
+  }
   coachConceptEventEl?.classList.add('hidden');
   coachChatEl.innerHTML = '<div class="coach-empty">Loading coaching thread…</div>';
   let lastRecap = null;
   try {
-    const response = await fetch(`/api/positions/${position.id}/coach${evaluationRunId ? `?run_id=${evaluationRunId}` : ""}`);
+    const response = await fetch(`/api/positions/${position.id}/coach${evaluationRunId ? `?run_id=${evaluationRunId}` : ""}`, {cache: "no-store"});
     const result = await response.json();
     if (!response.ok) throw new Error(result.error || 'Could not load coach');
-    if (displayedPositionId !== position.id) return;
+    if (displayedPositionId !== position.id || threadRequest !== coachThreadLoadSerial) return;
     const messages = result.messages || [];
     lastRecap = solved ? [...messages].reverse().find(message => {
       try { return JSON.parse(message.structured_json || '{}').kind === 'solved_attempt_recap'; }
@@ -1212,10 +1386,10 @@ async function loadCoachThread(position) {
       coachChatEl.scrollTop = coachChatEl.scrollHeight;
     }
   } catch (error) {
-    if (displayedPositionId !== position.id) return;
+    if (displayedPositionId !== position.id || threadRequest !== coachThreadLoadSerial) return;
     coachChatEl.innerHTML = `<div class="coach-empty">Coach history unavailable: ${escapeCoachHtml(error.message)}</div>`;
   }
-  if (displayedPositionId !== position.id) return;
+  if (displayedPositionId !== position.id || threadRequest !== coachThreadLoadSerial) return;
   preserveCoachReviewInThread();
   if (solved) renderCoachAttemptComments(lastRecap, position.id);
   coachThreadReadyPositionId = position.id;
@@ -1307,6 +1481,32 @@ async function sendCoachMessage(event) {
 
 function currentPosition() {
   return positions[currentIndex];
+}
+
+// Hints are pre-solve guidance, not coaching explanations. The latter may
+// live inside a hidden post-solve chat message when Adaptive Coach is enabled.
+function resetHint() {
+  if (hintTextEl) {
+    hintTextEl.textContent = '';
+    hintTextEl.classList.add('hidden');
+  }
+  if (hintToggleEl) {
+    hintToggleEl.textContent = 'Show hint';
+    hintToggleEl.setAttribute('aria-expanded', 'false');
+  }
+}
+
+function toggleHint() {
+  if (solved || !hintToggleEl || !hintTextEl || !currentPosition()) return;
+  if (hintToggleEl.getAttribute('aria-expanded') === 'true') {
+    resetHint();
+    return;
+  }
+  hintTextEl.textContent = String(currentPosition().coach_prompt || '').trim()
+    || 'Read the position, identify the opponent’s threat, and find a strong response.';
+  hintTextEl.classList.remove('hidden');
+  hintToggleEl.textContent = 'Hide hint';
+  hintToggleEl.setAttribute('aria-expanded', 'true');
 }
 
 function setShareLink(link, url) {
@@ -1468,7 +1668,7 @@ function updateHistoryUI() {
   } else if (reviewStage === 'analysis') {
     canBack = true;
     canForward = analysisCursor < analysisFrames.length;
-  } else if (reviewStage === 'history' && historyPly === target && solvingMoveFen) {
+  } else if (reviewStage === 'history' && historyPly === target && solvedReviewFen) {
     // The solved move is a virtual review node after the canonical puzzle FEN.
     canForward = true;
   }
@@ -1531,7 +1731,7 @@ function setHistoryPly(ply) {
 }
 
 function showSolvedReviewPosition() {
-  if (!solvingMoveFen) return false;
+  if (!solvedReviewFen) return false;
   reviewStage = 'solved';
   showingSolvedMove = true;
   historyPly = contextTargetPly();
@@ -1540,7 +1740,8 @@ function showSolvedReviewPosition() {
   selectedSquare = null;
   clearBoardMark();
   clearHighlights();
-  renderBoard(currentPosition(), solvingMoveFen, true);
+  renderBoard(currentPosition(), solvedReviewFen, true);
+  highlightSolvedMoveComparison();
   updateHistoryUI();
   if (engineToggleEl.checked) refreshEngineEvaluation();
   return true;
@@ -1562,6 +1763,7 @@ function showAnalysisCursor(cursor) {
     analysisLegalMoves = [];
     analysisTurn = null;
     renderBoard(currentPosition(), analysisBase.fen, true);
+    if (reviewStage === 'solved') highlightSolvedMoveComparison();
   } else {
     const frame = analysisFrames[nextCursor - 1];
     reviewStage = 'analysis';
@@ -1600,7 +1802,7 @@ function navigateReview(delta) {
 
   if (!currentContext?.available) return false;
   const target = contextTargetPly();
-  if (direction > 0 && historyPly >= target && solvingMoveFen) {
+  if (direction > 0 && historyPly >= target && solvedReviewFen) {
     return showSolvedReviewPosition();
   }
   setHistoryPly(historyPly + direction);
@@ -1737,6 +1939,7 @@ function handleSquareClick(squareName, board) {
   const activeColor = interactionColor(position);
   if (!selectedSquare) {
     if (!isPieceForColor(board[squareName], activeColor)) return;
+    activateSolvedBoardAnalysis();
     selectedSquare = squareName;
     paintSelection();
     return;
@@ -1781,6 +1984,46 @@ function clearHighlights() {
 function highlight(squareName, className) {
   const el = boardEl.querySelector(`[data-square="${squareName}"]`);
   if (el) el.classList.add(className);
+}
+
+function highlightSolvedMoveComparison(bestUci = solutionBestMoveUci, acceptedUci = solvingMoveUci) {
+  const best = String(bestUci || '');
+  const accepted = String(acceptedUci || '');
+  // Gold = the accepted move actually on the board. Green = an engine-best annotation.
+  if (accepted.length >= 4 && best.length >= 4 && accepted !== best) {
+    highlight(accepted.slice(0, 2), 'near-optimal');
+    highlight(accepted.slice(2, 4), 'near-optimal');
+  }
+  if (best.length >= 4) {
+    highlight(best.slice(0, 2), 'correct');
+    highlight(best.slice(2, 4), 'correct');
+  }
+  // Only an alternative solve needs a translucent best-move piece: do not
+  // replace the accepted piece or alter the accepted FEN. This annotation is
+  // decorative, so it cannot be dragged or interpreted as a second piece.
+  if (best.length >= 4 && accepted.length >= 4 && accepted !== best) {
+    renderEngineBestPreview(currentPosition(), best);
+  }
+}
+
+function renderEngineBestPreview(position, bestUci) {
+  if (!position?.fen || !bestUci || bestUci.length < 4 || !boardEl) return;
+  const original = parseFen(position.fen);
+  let piece = original[bestUci.slice(0, 2)];
+  if (!piece || !PIECES[piece]) return;
+  // Engine promotions must show the promoted piece, not the original pawn.
+  if (bestUci.length === 5 && /[qrbn]/i.test(bestUci[4])) {
+    piece = piece === piece.toUpperCase() ? bestUci[4].toUpperCase() : bestUci[4].toLowerCase();
+  }
+  const target = boardEl.querySelector(`[data-square="${bestUci.slice(2, 4)}"]`);
+  if (!target) return;
+  target.querySelector('.best-move-preview')?.remove();
+  const preview = document.createElement('i');
+  preview.className = `best-move-preview fa-solid ${PIECES[piece]}`;
+  if (target.querySelector('.piece')) preview.classList.add('has-occupant');
+  preview.setAttribute('aria-hidden', 'true');
+  preview.title = `Engine best: ${solutionBestMoveSan || bestUci}`;
+  target.appendChild(preview);
 }
 
 function evalLabel(cp, mate) {
@@ -1994,15 +2237,7 @@ async function playAnalysisMove(from, to, legalMove) {
 }
 
 function submitBoardMove(from, to, legalMove) {
-  if (solved && !analysisModeActive()) {
-    // The first post-solve move both enters analysis and plays that very move.
-    // Do not request an engine evaluation first: its asynchronous board redraw
-    // could interrupt a drag gesture or overwrite the in-flight move.
-    engineToggleEl.checked = true;
-    clearBoardMark();
-    updateHistoryUI();
-    engineEvalEl.textContent = '…';
-  }
+  if (solved && !analysisModeActive()) activateSolvedBoardAnalysis({deferEvaluation: true});
   if (analysisModeActive()) return playAnalysisMove(from, to, legalMove);
   return attemptMove(from, to, legalMove);
 }
@@ -2014,9 +2249,13 @@ function renderSolvedDetails(result) {
   preserveCoachReviewInThread();
   if (solvedOpeningEl) {
     const opening = String(currentPosition()?.opening_name || '').trim();
-    solvedOpeningEl.textContent = opening ? `Opening · ${opening}` : '';
-    solvedOpeningEl.classList.toggle('hidden', !opening);
+    solvedOpeningEl.textContent = opening;
+    solvedOpeningRowEl?.classList.toggle('hidden', !opening);
   }
+  if (coachSolutionLabelEl && coachSolutionLabelEl.dataset.fromRecap !== '1') {
+    coachSolutionLabelEl.textContent = `Best move · ${result.best_move_san || result.best_move_uci || solutionBestMoveSan || currentPosition()?.best_move_san || '—'}`;
+  }
+  resetHint();
   if (hintToggleEl) hintToggleEl.classList.add('hidden');
   const modeMeta = learningModeMeta(currentPosition()?.learning_mode, currentPosition()?.category);
   if (categoryEl) {
@@ -2026,9 +2265,8 @@ function renderSolvedDetails(result) {
     categoryEl.classList.remove('hidden');
   }
   if (coachTextEl && coachSolutionLabelEl?.dataset.fromRecap !== '1') {
-    coachTextEl.textContent = (result.accepted_alternative && result.accepted_move_explanation)
-      ? result.accepted_move_explanation
-      : (result.coach_explanation || 'Review how the move changes the threats, defenders, and resulting position.');
+    coachTextEl.textContent = result.coach_explanation || currentPosition()?.coach_explanation ||
+      'No verified coaching explanation is available. Run Coaching refresh before rating the explanation.';
     coachTextEl.classList.remove('hidden');
     explainedPositionId = Number(currentPosition()?.id);
   }
@@ -2069,6 +2307,8 @@ async function loadSolvedDetails(position) {
     if (displayedPositionId === position.id && solved) {
       solutionBestMoveUci = result.best_move_uci || solutionBestMoveUci;
       solutionBestMoveSan = result.best_move_san || solutionBestMoveSan;
+      // A late /solution response must never replace an accepted-move board.
+      solvedReviewFen = solvingMoveFen || solvedReviewFen || result.best_fen || null;
       // Older saved solves do not retain an accepted alternative separately.
       // Use the engine solution as the best available solving-move context.
       if (!solvingMoveUci && result.best_move_uci) {
@@ -2094,7 +2334,7 @@ async function attemptMove(from, to, legalMove = null) {
   clearHighlights();
   boardInteractive = false;
   const animationPromise = new Promise(resolve => animateMove(position, from, to, resolve, false));
-  const trackLearning = learningTrackingEnabled && !evaluationRunId;
+  const trackLearning = learningTrackingEnabled;
   const startNewLearningSession = trackLearning && restartTrackedSession;
   const activeSecondsDelta = trackLearning ? learningClockSnapshot() : null;
 
@@ -2150,6 +2390,14 @@ async function attemptMove(from, to, legalMove = null) {
 
   if (trackLearning && result.legal) restartTrackedSession = false;
   learningClockCommit();
+  // Coach evidence recording is independent of optional Player statistics.
+  // Surface a missing session receipt immediately instead of discovering the
+  // absence only after the puzzle is solved.
+  if (coachChatEl && result.coach_attempt_logged === false) {
+    coachAttemptLogFailures.set(Number(position.id),
+      (coachAttemptLogFailures.get(Number(position.id)) || 0) + 1);
+    showCoachRecapIssue(position.id, 'This move was verified but its coaching attempt was not saved. The recap may be incomplete.');
+  }
   if (!result.correct) {
       renderBoard(position, result.attempted_fen, false);
       highlight(to, 'wrong');
@@ -2178,45 +2426,38 @@ async function attemptMove(from, to, legalMove = null) {
     // Keep the exact accepted move and resulting FEN for unlimited review,
     // even when the user visits other positions or resumes this playlist.
     sessionSolvedMoves[String(position.id)] = {
-      uci: solvingMoveUci, san: solvingMoveSan, fen: solvingMoveFen
+      uci: solvingMoveUci, san: solvingMoveSan, fen: solvingMoveFen,
+      best_fen: result.best_fen || null
     };
     keepPlaylistSnapshot();
     solutionBestMoveUci = result.best_move_uci || null;
     solutionBestMoveSan = result.best_move_san || null;
+    solvedReviewFen = solvingMoveFen || result.best_fen || null;
     clearAnalysisBranch();
     reviewStage = 'solved';
     historyPly = contextTargetPly();
     learnedCheckbox.checked = true;
-    renderBoard(position, result.attempted_fen, true);
+    // The board must show the move the player actually made. Engine-best is
+    // only a green annotation, even when the server accepts an alternative.
+    renderBoard(position, solvingMoveFen || solvedReviewFen, true);
     updateHistoryUI();
-    if (result.accepted_alternative) {
-      // Preserve the move the learner actually played in yellow while showing
-      // the engine preference in green. Green is applied last and therefore
-      // takes precedence on any shared source/destination square.
-      highlight(from, 'near-optimal');
-      highlight(to, 'near-optimal');
-      const bestUci = String(result.best_move_uci || '');
-      if (bestUci.length >= 4) {
-        highlight(bestUci.slice(0, 2), 'correct');
-        highlight(bestUci.slice(2, 4), 'correct');
-      }
-    } else {
-      highlight(from, 'correct');
-      highlight(to, 'correct');
-    }
+    highlightSolvedMoveComparison();
     showBoardMark('correct');
     feedbackEl.className = 'feedback good';
   feedbackEl.classList.remove('hidden');
-    feedbackMessageEl.textContent = result.accepted_alternative
+    // Keep the green success strip one line beside the position thumbs.
+    // Detailed acceptance wording is still available as a tooltip.
+    feedbackMessageEl.title = result.accepted_alternative
       ? (evaluationRunId ? 'Strong move — accepted for this evaluation.' : 'Strong move — accepted as near-optimal and position marked learned.')
       : (evaluationRunId ? 'Correct — recorded for this evaluation.' : 'Correct — position marked learned.');
+    feedbackMessageEl.textContent = result.accepted_alternative ? '✓ Solved · strong move' : '✓ Solved';
 
     position.estimated_rating = result.estimated_rating ?? position.estimated_rating;
     position.difficulty_score = result.difficulty_score ?? position.difficulty_score;
     renderSolvedDetails(result);
     updatePositionRatingUI();
     loadPositionRatings(position.id);
-    if (!result.accepted_alternative) loadSolvedDetails(position);
+    loadSolvedDetails(position);
     void publishPostSolveCoach(position);
     engineToggleEl.disabled = false;
     if (engineToggleWrapEl) engineToggleWrapEl.classList.remove('hidden');
@@ -2239,12 +2480,14 @@ async function refreshCurrentPosition() {
     position.learned = 0;
     delete sessionSolvedMoves[String(position.id)];
     coachSolveSessionKeys.delete(Number(position.id));
+    coachAttemptLogFailures.delete(Number(position.id));
     keepPlaylistSnapshot();
     solved = false;
     showingSolvedMove = false;
     solvingMoveUci = null;
     solvingMoveSan = null;
     solvingMoveFen = null;
+    solvedReviewFen = null;
     solutionBestMoveUci = null;
     solutionBestMoveSan = null;
     analysisActionToken += 1;
@@ -2288,6 +2531,7 @@ async function rateCoachResponse(button) {
     });
     const result = await response.json();
     if (!response.ok) throw new Error(result.error || 'Could not save feedback');
+    if (evaluationRunId) updateEvaluationFeedbackState(Number(currentPosition()?.id), result.evaluation_feedback_saved === true);
     buttons.forEach(item => {
       const selected = Number(item.dataset.rating) === rating;
       item.classList.toggle('active', selected);
@@ -2372,17 +2616,26 @@ function updateNavigationMeta() {
   updateLessonProgress();
   document.getElementById('counter').textContent = positions.length ? `${currentIndex + 1} / ${positions.length}` : '0 / 0';
   document.getElementById('previous-button').disabled = currentIndex === 0;
-  nextButtonEl.disabled = !positions.length || (!solved && currentIndex >= positions.length - 1);
+  const evaluationReady = !evaluationRunId || evaluationFeedbackSaved();
+  nextButtonEl.disabled = !positions.length || !evaluationReady || (!solved && currentIndex >= positions.length - 1);
+  if (evaluationRunId) {
+    const indicator = document.getElementById('evaluation-saved-indicator');
+    indicator?.classList.toggle('hidden', !evaluationReady);
+    nextButtonEl.title = evaluationReady ? '' : 'Solve this evaluation position and save feedback before continuing.';
+  }
   nextButtonEl.textContent = solved && currentIndex >= positions.length - 1 ? (openingKey?'Back to openings →':'Back to lessons →') : 'Next position →';
 }
 
 async function showPosition(index) {
   if (!positions.length) return;
+  resetHint();
+  hintToggleEl?.classList.add('hidden');
   const token = ++positionDisplayToken;
   learningClockPause();
   learningClockPositionId = null;
   const chosenIndex = Math.max(0, Math.min(index, positions.length - 1));
   currentIndex = chosenIndex;
+  if (evaluationRunId) evaluationFeedbackSavedByPosition.set(Number(positions[chosenIndex].id), false);
   // Prevent an earlier puzzle's delayed context/solution from painting over
   // this card while its next chunk is in flight.
   displayedPositionId = null;
@@ -2411,6 +2664,8 @@ async function showPosition(index) {
   const p = positions[chosenIndex];
   resetGameShare();
   displayedPositionId = p.id;
+  clearCoachAttemptComments(); // prevents reusing another puzzle's message identity
+  displayCoachRefreshWarning(p);
   rememberTraining(p.id);
   selectedSquare = null;
   // Learned is the authoritative status. A stale saved solving move must
@@ -2420,7 +2675,10 @@ async function showPosition(index) {
     keepPlaylistSnapshot();
   }
   const savedSolve = p.learned ? (sessionSolvedMoves[String(p.id)] || null) : null;
-  const restoredSolvedFen = savedSolve?.fen || (p.learned ? p.review_best_fen : null);
+  // Accepted move wins over the engine's canonical result. The latter is only
+  // a fallback for legacy learned positions without a recorded actual solve.
+  const restoredSolvedFen = (p.learned ? (savedSolve?.fen || p.accepted_fen || p.review_best_fen) : null)
+    || savedSolve?.best_fen || null;
   solved = Boolean(p.learned);
   inputLocked = true;
   currentContext = null;
@@ -2430,9 +2688,10 @@ async function showPosition(index) {
   analysisActionToken += 1;
   clearAnalysisBranch();
   reviewStage = solved && restoredSolvedFen ? 'solved' : 'history';
-  solvingMoveUci = savedSolve?.uci || (solved ? p.best_move_uci : null);
-  solvingMoveSan = savedSolve?.san || (solved ? p.best_move_san : null);
-  solvingMoveFen = restoredSolvedFen || null;
+  solvingMoveUci = savedSolve?.uci || (solved ? (p.accepted_move_uci || p.best_move_uci) : null);
+  solvingMoveSan = savedSolve?.san || (solved ? (p.accepted_move_san || p.best_move_san) : null);
+  solvingMoveFen = savedSolve?.fen || p.accepted_fen || restoredSolvedFen || null;
+  solvedReviewFen = solvingMoveFen || restoredSolvedFen;
   solutionBestMoveUci = p.best_move_uci || null;
   solutionBestMoveSan = p.best_move_san || null;
   clearPreviewTimers();
@@ -2447,7 +2706,8 @@ async function showPosition(index) {
   document.getElementById('puzzle-rating').textContent = '—';
   feedbackEl.className = solved ? 'feedback good' : 'feedback neutral';
   feedbackEl.classList.remove('hidden');
-  feedbackMessageEl.textContent = solved ? (evaluationRunId ? 'Already solved in this evaluation run.' : 'Already learned. Review the game or move to another puzzle.') : '';
+  feedbackMessageEl.title = solved ? (evaluationRunId ? 'Already solved in this evaluation run.' : 'Already learned. Review the game or move to another puzzle.') : '';
+  feedbackMessageEl.textContent = solved ? '✓ Solved' : '';
   feedbackEl.classList.toggle('hidden', !solved);
   solutionEl.classList.add('hidden');
   coachThreadReadyPositionId = null;
@@ -2472,29 +2732,24 @@ async function showPosition(index) {
   if (taskHeadingEl) taskHeadingEl.textContent = 'Find a strong move.';
   coachPositionReviewEl?.classList.add('hidden');
   clearCoachAttemptComments();
-  solvedOpeningEl?.classList.add('hidden');
+  solvedOpeningRowEl?.classList.add('hidden');
   if (coachTextEl) {
     coachTextEl.textContent = 'Watch the last move, then find a strong response.';
     coachTextEl.classList.toggle('hidden', Boolean(coachPositionReviewEl));
   }
-  if (hintToggleEl) {
-    hintToggleEl.textContent = 'Show hint';
-    hintToggleEl.classList.remove('hidden');
-  }
+  resetHint();
+  hintToggleEl?.classList.toggle('hidden', solved);
   updateNavigationMeta();
   updateCoachMode();
   // Draw the actual board and restore solved feedback BEFORE fetching the
   // full game history, coaching thread, or slow engine explanations.
   renderBoard(p, restoredSolvedFen || p.fen, solved);
   if (solved) {
-    if (solvingMoveUci?.length >= 4) {
-      highlight(solvingMoveUci.slice(0, 2), 'correct');
-      highlight(solvingMoveUci.slice(2, 4), 'correct');
-    }
+    highlightSolvedMoveComparison();
     showBoardMark('correct');
     feedbackEl.className = 'feedback good';
     feedbackEl.classList.remove('hidden');
-    feedbackMessageEl.textContent = '✓ Solved position — review the correct move or continue.';
+    feedbackMessageEl.textContent = '✓ Solved.';
     solutionEl.classList.remove('hidden');
     if (p.estimated_rating) document.getElementById('puzzle-rating').textContent = `≈ ${p.estimated_rating}`;
     renderConcepts(p.concepts || [], p.taxonomy);
@@ -2686,11 +2941,15 @@ async function updateJobHud() {
 }
 
 async function navigatePuzzle(direction) {
+  if (evaluationRunId && direction > 0 && !evaluationFeedbackSaved()) return;
   if (direction > 0 && solved && currentIndex === positions.length - 1) {
-    // Exhaust the current snapshot only when the learner finishes its last card.
-    localStorage.removeItem(trainingStateKey);
-    localStorage.removeItem(`${trainingStateKey}-state`);
-    localStorage.removeItem(trainingPlaylistKey);
+    // Evaluation completion never retires an unrelated ordinary playlist.
+    // A completed evaluation is available later only via Coach comparisons.
+    if (!evaluationRunId) {
+      localStorage.removeItem(trainingStateKey);
+      localStorage.removeItem(`${trainingStateKey}-state`);
+      localStorage.removeItem(trainingPlaylistKey);
+    }
     location.assign(openingKey ? `/openings/${jobId}` : lessonsIndexUrl);
     return;
   }
@@ -2704,16 +2963,7 @@ document.getElementById('next-button').addEventListener('click', () => navigateP
 refreshPositionEl?.addEventListener('click', refreshCurrentPosition);
 historyBackEl.addEventListener('click', () => navigateReview(-1));
 historyForwardEl.addEventListener('click', () => navigateReview(1));
-if (hintToggleEl) {
-  hintToggleEl.addEventListener('click', () => {
-    if (solved || !coachTextEl) return;
-    const showingHint = hintToggleEl.textContent === 'Hide hint';
-    coachTextEl.textContent = showingHint
-      ? 'Watch the last move, then find a strong response.'
-      : (currentPosition()?.coach_prompt || 'Read the position, identify the opponent’s threat, and find a strong response.');
-    hintToggleEl.textContent = showingHint ? 'Show hint' : 'Hide hint';
-  });
-}
+if (hintToggleEl) hintToggleEl.addEventListener('click', toggleHint);
 engineToggleEl.addEventListener('change', () => {
   selectedSquare = null;
   clearHighlights();
@@ -2829,7 +3079,8 @@ learnedCheckbox.addEventListener('change', async () => {
     updateNavigationMeta();
     feedbackEl.className = 'feedback good';
     feedbackEl.classList.remove('hidden');
-    feedbackMessageEl.textContent = 'Position learned. It will stay out of the active training mix unless you reset it later.';
+    feedbackMessageEl.title = 'Position learned. It will stay out of the active training mix unless you reset it later.';
+    feedbackMessageEl.textContent = '✓ Solved';
     updatePositionRatingUI();
     if (engineToggleEl.checked) refreshEngineEvaluation();
   } catch (error) {

@@ -1,0 +1,32 @@
+const fs=require('node:fs'), assert=require('node:assert/strict'), vm=require('node:vm');
+const js=fs.readFileSync('static/trainer.js','utf8');
+const html=fs.readFileSync('templates/trainer.html','utf8');
+const css=fs.readFileSync('static/styles.css','utf8');
+assert.match(html,/class="solved-position-controls hidden\{% if evaluation_run_id %\} evaluation-controls/);
+assert.match(css,/\.solved-position-controls\.evaluation-controls > #learned-toggle-wrap\s*\{\s*display: none !important/);
+assert.match(css,/#evaluation-saved-indicator\s*\{\s*grid-column: 2;/);
+assert.match(js,/let learningTrackingEnabled = evaluationRunId \? false : localStorage\.getItem/);
+assert.doesNotMatch(js,/Evaluation · separate from Player stats/);
+assert.match(js,/const trackLearning = learningTrackingEnabled;/);
+assert.match(js,/evaluation_run_id:evaluationRunId/);
+assert.match(js,/activateSolvedBoardAnalysis\(\{deferEvaluation: true\}\);/);
+assert.match(js,/if \(!deferEvaluation\) refreshEngineEvaluation\(\);/);
+const re=/function activateSolvedBoardAnalysis\([^\n]*\) \{[\s\S]*?\n\}/;
+const fn=js.match(re);
+assert.ok(fn,'Missing solved-board activation helper');
+const state={solved:true,engineToggleEl:{disabled:false,checked:false},engineEvalEl:{textContent:'—'},
+   clearBoardMark:()=>state.calls.push('clear'),updateHistoryUI:()=>state.calls.push('history'),
+   refreshEngineEvaluation:()=>state.calls.push('engine'),calls:[]};
+vm.createContext(state);
+vm.runInContext(fn[0]+';this.activateSolvedBoardAnalysis=activateSolvedBoardAnalysis;',state);
+state.activateSolvedBoardAnalysis({deferEvaluation:true});
+assert.equal(state.engineToggleEl.checked,true);
+assert.deepEqual(state.calls,['clear','history'],'Drag should not trigger engine re-render');
+state.engineToggleEl.checked=false;state.calls.length=0;
+state.activateSolvedBoardAnalysis();
+assert.deepEqual(state.calls,['clear','history','engine']);
+state.engineToggleEl.checked=false;state.solved=false;state.calls.length=0;
+state.activateSolvedBoardAnalysis();
+assert.equal(state.engineToggleEl.checked,false);
+assert.deepEqual(state.calls,[]);
+console.log('v98 evaluation indicator, Player tracking and solved-board activation: PASS');

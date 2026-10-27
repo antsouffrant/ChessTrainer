@@ -1,0 +1,41 @@
+{% extends 'base.html' %}
+{% block title %}Model comparisons · Coach · Personal Chess Trainer{% endblock %}
+{% block extra_head %}<link rel="stylesheet" href="{{ url_for('static', filename='coach.css') }}">{% endblock %}
+{% block content %}
+<section class="analytics-hub" aria-label="Coaching model comparison">
+  <header class="analytics-hero glass"><div><span class="eyebrow">COACH · EVALUATION</span><h1>Model comparisons</h1><p class="muted">Compare fixed-position coaching benchmarks without mixing them into general feedback reporting.</p></div><div class="coach-actions"><a class="secondary-button" href="{{ url_for('coach_view') }}">← Coaching feedback</a><a class="secondary-button" href="{{ url_for('processes') }}">Manage evaluations →</a></div></header>
+  <section class="glass coach-benchmark-panel" id="model-benchmark-panel" aria-label="Fixed-cohort coaching model comparisons">
+    <div class="coach-benchmark-heading">
+      <div><span class="eyebrow">FIXED-POSITION BENCHMARK</span><h2>Coaching model comparison</h2>
+        <p class="muted">Compare explanation, motif, context and move-type changes on identical saved positions. Approval is shown separately on identically rated continuations.</p></div>
+      <a class="secondary-button" href="/processes">Manage evaluations →</a>
+    </div>
+    <div class="coach-benchmark-controls">
+      <label>Game list<select id="benchmark-job" aria-label="Benchmark game list"><option value="">Choose a game list</option></select></label>
+      <label>Model A · Baseline<select id="benchmark-model-a" aria-label="Baseline coaching model"></select></label>
+      <label>Compare against<select id="benchmark-model-b" aria-label="Comparison coaching model"><option value="all">All other models</option></select></label>
+    </div>
+    <div id="benchmark-chart-note" class="muted" role="status">Loading fixed benchmarks…</div>
+
+    <div class="coach-evaluation-heading">
+      <h3>Evaluation results by model</h3>
+      <p class="muted">This side-by-side view is the fastest way to compare overall performance. Rows are metrics; columns are evaluated coaching models.</p>
+    </div>
+    <div id="benchmark-evaluation-summary" class="coach-evaluation-summary" role="region" aria-live="polite" aria-label="Evaluation summary by model"></div>
+
+    <div class="coach-evaluation-heading">
+      <h3>Evaluation runs</h3>
+      <p class="muted">Use this section for run status and access. Historical evaluations stay frozen once a new coaching model is introduced.</p>
+    </div>
+    <div id="benchmark-evaluation-history" class="coach-evaluation-history" role="region" aria-live="polite" aria-label="Evaluation run history"></div>
+
+    <div class="coach-evaluation-heading">
+      <h3>What changed between models?</h3>
+      <p class="muted">Each comparison card has two parts: <strong>evaluation results</strong> show your feedback by model, while <strong>output differences</strong> show how often the models’ saved explanations or labels differ on the same positions.</p>
+    </div>
+    <div id="benchmark-model-chart" role="region" aria-live="polite" aria-label="Model comparison results"></div>
+    <p class="muted coach-benchmark-footnote">Evaluation metrics are based on your completed benchmark feedback. Output-difference rates are not approval metrics—they simply indicate how often two saved model snapshots disagree on the same benchmark positions.</p>
+  </section>
+</section>
+<script src="{{ url_for('static', filename='benchmark_chart.js') }}"></script>
+{% endblock %}
